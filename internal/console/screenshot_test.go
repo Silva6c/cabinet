@@ -28,23 +28,25 @@ func demoOptions() Options {
 		LogDir:          "logs",
 		CertFingerprint: "9f3c71ad84be2c1f5d6e7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8",
 		Snapshot: func() (EngineStat, []ClientRow) {
-			return EngineStat{
-					State: "ready", Depth: 20, Nodes: 12_400_000, NPS: 1_800_000,
-					Hashfull: 128, HashMB: 512, Threads: 8, MultiPV: 3, TargetDepth: 24,
-					// 两台设备展示卡片列表两种形态：已鉴权（玉点 + FEN 摘要）与
-					// 未鉴权（琥珀点 + 名字降级灰）
-				}, []ClientRow{{
-					Session: "3f2a…c9", FullID: "3f2a1b8c9d0e1f2a3b4c5d6e7f8a9b0c",
-					Client: "Android · 内阁", Ver: "v1", Authed: true,
-					RTTMs: 12, Path: "LAN",
-					Fen:     "r1ba1/9/1c2c4/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR b - - 0 1",
-					LastPos: now.Add(-30 * time.Second),
-				}, {
-					Session: "88cc…01", FullID: "88cc41d0e1f2a3b4c5d6e7f8a9b0c3f2",
-					Client: "Android · 内阁", Ver: "v1", Authed: false,
-					RTTMs: -1, Path: "LAN",
-					LastPos: now.Add(-2 * time.Second),
-				}}
+			st := EngineStat{
+				State: "ready", Depth: 20, Nodes: 12_400_000, NPS: 1_800_000,
+				Hashfull: 128, HashMB: 512, Threads: 8, MultiPV: 3, TargetDepth: 24,
+			}
+			// 两台设备展示卡片列表两种形态：已鉴权（玉点 + FEN 摘要）与
+			// 未鉴权（琥珀点 + 名字降级灰）
+			rows := []ClientRow{{
+				Session: "3f2a…c9", FullID: "3f2a1b8c9d0e1f2a3b4c5d6e7f8a9b0c",
+				Client: "Android · 内阁", Ver: "v1", Authed: true,
+				RTTMs: 12, Path: "LAN",
+				Fen:     "r1ba1/9/1c2c4/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR b - - 0 1",
+				LastPos: now.Add(-30 * time.Second),
+			}, {
+				Session: "88cc…01", FullID: "88cc41d0e1f2a3b4c5d6e7f8a9b0c3f2",
+				Client: "Android · 内阁", Ver: "v1", Authed: false,
+				RTTMs: -1, Path: "LAN",
+				LastPos: now.Add(-2 * time.Second),
+			}}
+			return st, rows
 		},
 		Books: func() []BookRow {
 			return []BookRow{{Name: "桔库", Entries: 12345, ModTime: now.Add(-72 * time.Hour)}}
