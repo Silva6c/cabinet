@@ -172,18 +172,33 @@ func buildExe() error {
 		return fmt.Errorf("%s 正在运行，请先从托盘退出再打包（否则无法覆盖产物）", exeName)
 	}
 
+	// 版本注入与 build-exe.bat 同口径（2026-10-27）：git 可用时写
+	// vc<提交数>-<HEAD日期>，非 git 环境留空回退 protocol.go 默认值——
+	// 本地打包与 CI 打包的 exe 版本号保证一致可追溯
+	ldflags := "-H windowsgui"
+	if vc, err := exec.Command("git", "rev-list", "HEAD", "--count").Output(); err == nil {
+		if bd, err := exec.Command("git", "log", "-1", "--format=%cd", "--date=format:%Y%m%d").Output(); err == nil {
+			if v, d := strings.TrimSpace(string(vc)), strings.TrimSpace(string(bd)); v != "" && d != "" {
+				ldflags += fmt.Sprintf(" -X cabinet/internal/server.Version=vc%s-%s", v, d)
+			}
+		}
+	}
+
+	// MinGW 解析顺序：仓内 .tools 副本（本机约定）优先，不在则信任环境 PATH
+	// 里的 gcc（CI windows runner 自带 MinGW）——两处都落空才硬失败
+	env := append(os.Environ(), "CGO_ENABLED=1")
 	mingw, err := filepath.Abs(filepath.Join(".tools", "mingw64-extract", "mingw64", "bin"))
-	if err != nil {
-		return fmt.Errorf("解析 MinGW 路径失败: %w", err)
+	if err == nil {
+		if _, err := os.Stat(filepath.Join(mingw, "gcc.exe")); err == nil {
+			// mingw 必须是绝对路径：go build 的 cgo 环节在临时构建目录下 spawn gcc，
+			// PATH 里的相对条目按那个 CWD 解析必落空（实测教训）
+			env = append(env, "PATH="+mingw+string(os.PathListSeparator)+os.Getenv("PATH"))
+		} else if _, err := exec.LookPath("gcc"); err != nil {
+			return errors.New("找不到 gcc：本机确认 .tools/mingw64-extract/mingw64 存在，CI 确认 MinGW 在 PATH")
+		}
 	}
-	if _, err := os.Stat(filepath.Join(mingw, "gcc.exe")); err != nil {
-		return errors.New("找不到 gcc：确认 .tools/mingw64-extract/mingw64 存在")
-	}
-	// mingw 必须是绝对路径：go build 的 cgo 环节在临时构建目录下 spawn gcc，
-	// PATH 里的相对条目按那个 CWD 解析必落空（实测教训）
-	cmd := exec.Command("go", "build", "-ldflags", "-H windowsgui", "-o", exeName, "./cmd/cabinet")
-	cmd.Env = append(os.Environ(), "CGO_ENABLED=1",
-		"PATH="+mingw+string(os.PathListSeparator)+os.Getenv("PATH"))
+	cmd := exec.Command("go", "build", "-ldflags", ldflags, "-o", exeName, "./cmd/cabinet")
+	cmd.Env = env
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("构建失败: %w", err)

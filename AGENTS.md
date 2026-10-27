@@ -68,3 +68,19 @@
 - 提交信息简体中文，一笔一事（功能 / 收官登记分开）。
 - 版本号：Go 端由 `build-exe.bat`/Makefile 经 ldflags 注入
   `vc<git提交数>-<日期>`；Android 端 versionCode = git 提交数。
+
+## 版本发布纪律（2026-10-27 用户定）
+
+- **GitHub 只收稳定版本**：日常开发 = 本地提交；push 到 GitHub 只在用户
+  人工确认稳定版之后——AI 不得自行判定"稳定"并推送，用户没说推送就不推。
+- 稳定版发布动作：确认代理已开 → `git push` → 打 tag `stable-YYYYMMDD`
+  推送，tag 自动触发 `.github/workflows/release-build.yml` 构建 APK +
+  便携双轨 zip 并挂到该 tag 的 GitHub Release；`workflow_dispatch` 可手动
+  补包重跑（只出 artifact 不挂 Release）。
+- CI 产出完整包的前提：版权物（模型 onnx/tflite、皮卡鱼引擎包 zip、桔库
+  zip）已一次性上传到本仓 Release 的 **assets 标签**（版权红线不进 git，
+  构建时 `gh release download` 注入）；缺资产时构建失败提示上传，不产残废包。
+- 本地日常构建照旧不受影响：APK `:app:assembleArmv8DotprodRelease`
+  （输出名 `cabinet_日期_vc<提交数>_变体.apk`，versionCode 下限 275）；
+  exe/便携 zip `scripts/package-portable.bat`（版本注入已与 build-exe.bat
+  对齐，CI windows runner 自动回退自带 MinGW）。
