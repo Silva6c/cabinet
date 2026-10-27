@@ -4,6 +4,7 @@ import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import android.content.res.AssetManager
+import android.os.Build
 import java.nio.FloatBuffer
 
 /**
@@ -62,8 +63,10 @@ class OnnxBoardRecognizer(
         /** 角点复检间隔（毫秒）：复用角点超过该时长后强制全图重定位一次 */
         private const val POSE_RECHECK_MS = 8000L
 
-        /** ONNX 推理 intra-op 线程数（0 = onnxruntime 默认策略：物理核数） */
-        private const val INTRA_THREADS = 2
+        /** ONNX 推理线程数：arm64 真机传给 XNNPACK 线程池，纯 CPU 回退路径为
+         *  intra-op 线程数。4 ≈ 中端机大核数（旧值 2 是 XNNPACK 缺位时的热保守
+         *  值）；pacer 按实测成本自适应收紧间隔，提速后占空比不变、不会更热 */
+        private const val INTRA_THREADS = 4
     }
 
     // 分段耗时累计（仅 worker 线程写，profiling=false 恒为 0）
@@ -201,10 +204,28 @@ class OnnxBoardRecognizer(
     }
 
     /**
-     * 创建推理会话。注意不要启用 XNNPACK：x86_64 模拟器上 native abort（SIGABRT），
-     * Java 层 try/catch 拦不住，进程直接死——已实测。收益调优走线程数。
+     * 创建推理会话。XNNPACK 仅在主 ABI 为 arm64 的真机启用（fp32 卷积主力提速；
+     * 上游模型的动态量化算子 MatMulInteger 不受 XNNPACK 支持，自动回退 CPU EP，
+     * 其余 fp32 算子照常受益）。x86_64 模拟器上 XNNPACK native abort（SIGABRT），
+     * Java 层 try/catch 拦不住、进程直接死——已实测，故主 ABI 判定在前：模拟器
+     * 主 ABI 是 x86_64，恒走纯 CPU 路径；真机 EP 注册/session 创建失败也回退
+     * 纯 CPU 重试——识别管线可用性永远优先于提速。
      */
     private fun createSession(modelBytes: ByteArray, intraThreads: Int): OrtSession {
+        if (Build.SUPPORTED_ABIS.firstOrNull() == "arm64-v8a") {
+            try {
+                val opts = OrtSession.SessionOptions()
+                // XNNPACK EP 官方推荐配置：主线程池降为 1（避免与 XNNPACK 自有线程池
+                // 叠加争核），并行度经 provider 参数交给 XNNPACK 内部（intraThreads）
+                opts.setIntraOpNumThreads(1)
+                opts.addXnnpack(mapOf("intra_op_num_threads" to intraThreads.toString()))
+                val s = ortEnv.createSession(modelBytes, opts)
+                RLog.i(TAG, "onnx session: XNNPACK EP (arm64, threads=$intraThreads)")
+                return s
+            } catch (t: Throwable) {
+                RLog.w(TAG, "XNNPACK 会话创建失败，回退纯 CPU EP", t)
+            }
+        }
         val opts = OrtSession.SessionOptions()
         opts.setIntraOpNumThreads(intraThreads)
         return ortEnv.createSession(modelBytes, opts)
