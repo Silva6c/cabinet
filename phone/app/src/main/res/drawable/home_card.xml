@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 玻璃卡片：伪玻璃三件套——炭面 72% 底 + 1dp 高光描边（qi_line2）+ 顶部 42% 处渐隐的微渐变。
+     真背景模糊在浮层场景不可得（Android 悬浮窗无法采样身后内容），此为物理可实现的最优近似 -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item>
+        <shape android:shape="rectangle">
+            <corners android:radius="@dimen/qi_r_l" />
+            <solid android:color="@color/qi_glass" />
+            <stroke
+                android:width="1dp"
+                android:color="@color/qi_line2" />
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="rectangle">
+            <corners android:radius="@dimen/qi_r_l" />
+            <gradient
+                android:angle="270"
+                android:centerY="0.42"
+                android:endColor="#00FFFFFF"
+                android:startColor="#12FFFFFF"
+                android:type="linear" />
+        </shape>
+    </item>
+</layer-list>

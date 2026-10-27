@@ -1,0 +1,38 @@
+# golangci-lint v2 配置——内阁 Go 端（cmd/internal/tools）质量门禁
+# 原则：基础集起步，零告警基线；新启用 linter 必须先清零再入配置。
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: none
+  enable:
+    # 错误返回值未检查
+    - errcheck
+    # 可疑构造（copylocks、printf 格式串、循环变量捕获等）
+    - govet
+    # 静态检查主力（SA 系列 + 简化建议）
+    - staticcheck
+    # 无效赋值（赋值后从未读取）
+    - ineffassign
+  settings:
+    revive:
+      # 只开低噪音规则；exported 注释强制对本库过重（注释密度已高但非全量导出注释）
+      rules:
+        - name: var-naming
+        - name: indent-error-flow
+        - name: error-strings
+        - name: unreachable-code
+        - name: context-as-argument
+  exclusions:
+    rules:
+      # 测试代码允许忽略返回值（defer Close 类清理路径是既定风格）
+      - path: _test\.go
+        linters:
+          - errcheck
+
+formatters:
+  enable:
+    # Go 官方格式基线（基线已 gofmt -w 修平）
+    - gofmt

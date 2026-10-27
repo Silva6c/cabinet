@@ -1,0 +1,159 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 棋韵组件样式（docs/美学设计研究.md §7.1）：色值一律引用 colors.xml token -->
+<resources>
+
+    <!-- ==================== 主页 ==================== -->
+
+    <!-- 玻璃卡片（伪玻璃三件套：半透明底 + 高光描边 + 顶部微渐变，见 home_card.xml） -->
+    <style name="Qi.Card" parent="">
+        <item name="android:background">@drawable/home_card</item>
+        <item name="android:orientation">vertical</item>
+        <item name="android:padding">@dimen/qi_sp_4</item>
+    </style>
+
+    <!-- 卡片等宽编号 01/02/03 -->
+    <style name="Qi.CardIndex" parent="">
+        <item name="android:textColor">@color/qi_dim</item>
+        <item name="android:textSize">12sp</item>
+        <item name="android:fontFeatureSettings">tnum</item>
+    </style>
+
+    <style name="Qi.CardTitle" parent="">
+        <item name="android:textColor">@color/qi_ivory</item>
+        <item name="android:textSize">15sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:letterSpacing">0.02</item>
+    </style>
+
+    <!-- 状态 chip：胶囊描边；底色/文字色按状态在代码里换（chip_dim/amber/jade） -->
+    <style name="Qi.Chip" parent="">
+        <item name="android:textSize">11sp</item>
+        <item name="android:paddingLeft">@dimen/qi_sp_2</item>
+        <item name="android:paddingRight">@dimen/qi_sp_2</item>
+        <item name="android:paddingTop">3dp</item>
+        <item name="android:paddingBottom">3dp</item>
+        <item name="android:background">@drawable/chip_dim</item>
+        <item name="android:textColor">@color/qi_muted</item>
+    </style>
+
+    <style name="Qi.Label" parent="">
+        <item name="android:textColor">@color/qi_muted</item>
+        <item name="android:textSize">12sp</item>
+    </style>
+
+    <style name="Qi.Hint" parent="">
+        <item name="android:textColor">@color/qi_dim</item>
+        <item name="android:textSize">11sp</item>
+    </style>
+
+    <!-- 按钮三级：主（朱砂·按实底）/ 次（半透明 + 描边）/ 文本级（关于） -->
+    <style name="Qi.Button.Primary" parent="">
+        <item name="android:background">@drawable/home_btn_primary</item>
+        <item name="android:textColor">#FFFFFFFF</item>
+        <item name="android:textSize">15sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:letterSpacing">0.02</item>
+    </style>
+
+    <style name="Qi.Button.Secondary" parent="">
+        <item name="android:background">@drawable/home_btn_secondary</item>
+        <item name="android:textColor">@color/qi_ivory</item>
+        <item name="android:textSize">14sp</item>
+    </style>
+
+    <!-- 互斥芯片（识别引擎/悬浮窗主题）：RadioButton 去圆钮、按选中态换底 -->
+    <style name="Qi.ChipSelectable" parent="">
+        <item name="android:button">@null</item>
+        <item name="android:background">@drawable/chip_segment</item>
+        <item name="android:textColor">@color/chip_segment_text</item>
+        <item name="android:textSize">12sp</item>
+        <item name="android:paddingLeft">10dp</item>
+        <item name="android:paddingRight">10dp</item>
+        <item name="android:paddingTop">6dp</item>
+        <item name="android:paddingBottom">6dp</item>
+        <item name="android:minHeight">32dp</item>
+        <item name="android:gravity">center</item>
+        <item name="android:drawablePadding">6dp</item>
+    </style>
+
+    <!-- 步骤行：几何序号圆点（待办=朱砂 / 完成=玉✓ / 未开始=灰，底与字在代码里换） -->
+    <style name="Qi.StepNum" parent="">
+        <item name="android:layout_width">20dp</item>
+        <item name="android:layout_height">20dp</item>
+        <item name="android:gravity">center</item>
+        <item name="android:textSize">11sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:background">@drawable/step_num_idle</item>
+        <item name="android:textColor">@color/qi_muted</item>
+    </style>
+
+    <!-- 步骤行尾部动作（去授予 / 已授权 ✓） -->
+    <style name="Qi.StepAction" parent="">
+        <item name="android:textSize">12sp</item>
+        <item name="android:paddingLeft">10dp</item>
+        <item name="android:paddingRight">10dp</item>
+        <item name="android:paddingTop">4dp</item>
+        <item name="android:paddingBottom">4dp</item>
+        <item name="android:background">@drawable/chip_action</item>
+        <item name="android:textColor">@color/qi_amber_text</item>
+    </style>
+
+    <!-- ==================== 悬浮窗 ==================== -->
+
+    <!-- 左列顶部状态行：● 运行中 · 用时 1.2s -->
+    <style name="OverlayState">
+        <item name="android:textSize">11sp</item>
+        <item name="android:textColor">@color/qi_muted</item>
+        <item name="android:maxLines">1</item>
+        <item name="android:ellipsize">end</item>
+    </style>
+
+    <!-- 主状态大字（HUD 一眼原则：轮到我方走 / 已停止指导 / 连接异常…）；
+         14sp：最长文案"未配置电脑地址"7 字在 114dp 左列不顶满不贴边 -->
+    <style name="OverlayHeadline">
+        <item name="android:textSize">14sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:textColor">@color/qi_amber_text</item>
+        <item name="android:maxLines">2</item>
+        <item name="android:ellipsize">end</item>
+    </style>
+
+    <!-- 优势行：红方优势 +0.8（等宽数字） -->
+    <style name="OverlayAdvantage">
+        <item name="android:textSize">12sp</item>
+        <item name="android:fontFeatureSettings">tnum</item>
+        <item name="android:maxLines">1</item>
+        <item name="android:ellipsize">end</item>
+    </style>
+
+    <!-- 候选/预案行：候选 1/3 · 马三进二 ✓ -->
+    <style name="OverlayCandidate">
+        <item name="android:textSize">12sp</item>
+        <item name="android:maxLines">2</item>
+        <item name="android:ellipsize">end</item>
+    </style>
+
+
+    <!-- 值芯片（深度/哈希）：无描边 6% 白底；底与双色文字由 OverlayPanelView 按主题注入 -->
+    <style name="OverlayChip">
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">23dp</item>
+        <item name="android:gravity">center_vertical</item>
+        <item name="android:paddingLeft">@dimen/qi_sp_2</item>
+        <item name="android:paddingRight">@dimen/qi_sp_2</item>
+        <item name="android:background">@drawable/overlay_chip_bg</item>
+        <item name="android:textSize">11sp</item>
+        <item name="android:textColor">@color/qi_muted</item>
+        <item name="android:maxLines">1</item>
+    </style>
+
+    <!-- 动作按钮（更新/停止/关闭/详情、变招/悔棋/手动）：1dp 描边，底由主题注入 -->
+    <style name="OverlayAction">
+        <item name="android:background">@drawable/overlay_action_bg</item>
+        <item name="android:textColor">@color/qi_ivory</item>
+        <item name="android:textSize">11sp</item>
+        <item name="android:gravity">center</item>
+        <item name="android:maxLines">1</item>
+        <item name="android:paddingHorizontal">2dp</item>
+    </style>
+</resources>

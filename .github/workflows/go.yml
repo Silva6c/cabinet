@@ -1,0 +1,37 @@
+# Go 端 CI：vet + test + lint（Fyne 的 CGO 依赖需先装 X11/GL 系统库）
+name: go
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      # fyne（go-gl/glfw）在 Linux 上编译需要这些系统库：
+      # X11 系列 + Wayland（glfw 3.4 起双后端编译，缺 wayland/xkbcommon 头直接挂）
+      - name: 安装 Fyne 系统依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-dev libxcursor-dev libxrandr-dev \
+            libxinerama-dev libxi-dev libxxf86vm-dev \
+            libwayland-dev libxkbcommon-dev
+
+      - name: vet
+        run: go vet ./...
+
+      - name: test
+        run: go test ./...
+
+      - name: lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest

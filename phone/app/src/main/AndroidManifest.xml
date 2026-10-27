@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- WSS 远程分析（连线电脑端"内阁"） -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- 前台服务（录屏识别运行中通知） -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 悬浮窗（建议提示；不注册无障碍、不注入点击） -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <!-- 应用内扫码连接（相机仅用于扫描电脑端连接二维码） -->
+    <uses-permission android:name="android.permission.CAMERA" />
+
+    <!-- 无自定义 Application（空壳 ChessApp 已删，2026-10-27 规范轮） -->
+    <application
+        android:allowBackup="false"
+        android:icon="@drawable/ic_launcher"
+        android:label="@string/app_name"
+        android:theme="@style/Theme.Cabinet.Assist">
+
+        <!-- zxing 扫码页：库默认横屏，改为竖屏更符合本应用使用习惯 -->
+        <activity
+            android:name="com.journeyapps.barcodescanner.CaptureActivity"
+            android:exported="false"
+            android:screenOrientation="portrait"
+            android:stateNotNeeded="true"
+            tools:replace="android:screenOrientation" />
+
+        <!-- 自定义扫码页：TRY_HARDER + 仅 QR + 连续对焦（扫电脑屏幕二维码提速） -->
+        <activity
+            android:name="com.cabinet.assist.ui.QrScanActivity"
+            android:exported="false"
+            android:screenOrientation="portrait"
+            android:stateNotNeeded="true" />
+
+        <activity
+            android:name="com.cabinet.assist.ui.AssistActivity"
+            android:exported="true"
+            android:launchMode="singleTask">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- 扫码配对：PC 端"连接二维码"内容为 cabinet://connect?u=<wss地址>&k=<令牌>，
+                 手机系统相机扫码后点链接即自动填入连接参数 -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="cabinet" android:host="connect" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name="com.cabinet.assist.ScreenAssistService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
+    </application>
+
+</manifest>

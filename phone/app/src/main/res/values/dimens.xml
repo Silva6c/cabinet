@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 棋韵尺寸 token（docs/美学设计研究.md §4.4）：间距 4dp 基准，圆角 8/12/16/20 四级 -->
+<resources>
+    <dimen name="qi_sp_1">4dp</dimen>
+    <dimen name="qi_sp_2">8dp</dimen>
+    <dimen name="qi_sp_3">12dp</dimen>
+    <dimen name="qi_sp_4">16dp</dimen>
+    <dimen name="qi_sp_5">20dp</dimen>
+
+    <dimen name="qi_r_s">8dp</dimen>
+    <dimen name="qi_r_m">12dp</dimen>
+    <dimen name="qi_r_l">16dp</dimen>
+    <dimen name="qi_r_xl">20dp</dimen>
+    <dimen name="qi_r_chip">100dp</dimen>
+
+    <dimen name="qi_btn_h">48dp</dimen>
+    <dimen name="qi_btn_h_sm">42dp</dimen>
+    <dimen name="qi_input_h">44dp</dimen>
+</resources>

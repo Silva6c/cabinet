@@ -1,0 +1,583 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 主页（连线识别指导）：瑞士式信息层级（大字 + 细线 + 留白）+ 包豪斯几何标记。
+     结构：头部 → 玻璃状态条 → 卡片01 连接电脑 → 卡片02 启动识别 → 卡片03 外观与设置 → 关于。
+     说明性小字统一收进"关于"对话框，页面只保留操作入口。
+     背景（默认墨底+细网格 / 自定义图压暗）由 AssistActivity 在代码中设置 -->
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/bg_scroll"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/qi_ink"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:paddingLeft="@dimen/qi_sp_5"
+        android:paddingTop="30dp"
+        android:paddingRight="@dimen/qi_sp_5"
+        android:paddingBottom="@dimen/qi_sp_5">
+
+        <!-- ============ 头部：几何标记 + 大字 + 微标 + 细分割线 ============ -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <ImageView
+                android:layout_width="26dp"
+                android:layout_height="26dp"
+                android:contentDescription="@string/app_name"
+                android:src="@drawable/ic_mark_qi" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="10dp"
+                android:letterSpacing="0.06"
+                android:text="@string/app_name"
+                android:textColor="@color/qi_ivory"
+                android:textSize="28sp"
+                android:textStyle="bold" />
+        </LinearLayout>
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:letterSpacing="0.18"
+            android:text="象棋连线识别指导 · 内阁 CABINET"
+            android:textColor="@color/qi_muted"
+            android:textSize="11sp" />
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_marginTop="14dp"
+            android:background="@color/qi_line1" />
+
+        <!-- ============ 玻璃状态条：状态点 + 状态文案 + 提示 ============ -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="@dimen/qi_sp_3"
+            android:background="@drawable/home_card"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingLeft="@dimen/qi_sp_3"
+            android:paddingTop="12dp"
+            android:paddingRight="@dimen/qi_sp_3"
+            android:paddingBottom="12dp">
+
+            <View
+                android:id="@+id/v_state_dot"
+                android:layout_width="8dp"
+                android:layout_height="8dp"
+                android:background="@drawable/step_num_idle" />
+
+            <TextView
+                android:id="@+id/tv_auto_status"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="10dp"
+                android:layout_weight="1"
+                android:ellipsize="end"
+                android:maxLines="2"
+                android:text="状态：尚未启动"
+                android:textColor="@color/qi_ivory"
+                android:textSize="13sp" />
+
+            <TextView
+                android:id="@+id/tv_state_hint"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="@dimen/qi_sp_2"
+                android:textColor="@color/qi_muted"
+                android:textSize="11sp" />
+        </LinearLayout>
+
+        <!-- ============ 卡片 01：连接电脑 ============ -->
+        <LinearLayout
+            style="@style/Qi.Card"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="@dimen/qi_sp_3">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    style="@style/Qi.CardIndex"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="01" />
+
+                <TextView
+                    style="@style/Qi.CardTitle"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="@dimen/qi_sp_2"
+                    android:layout_weight="1"
+                    android:text="连接电脑" />
+
+                <TextView
+                    android:id="@+id/tv_chip_conn"
+                    style="@style/Qi.Chip"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="未连接" />
+            </LinearLayout>
+
+            <!-- 主路径：扫码配对（一步填全参数）；paddingStart 让二维码图标
+                 与按钮左缘保持呼吸间距（默认 padding 下图标贴边很难看） -->
+            <Button
+                android:id="@+id/btn_scan_connect"
+                style="@style/Qi.Button.Primary"
+                android:layout_width="match_parent"
+                android:layout_height="@dimen/qi_btn_h"
+                android:layout_marginTop="@dimen/qi_sp_3"
+                android:paddingStart="18dp"
+                android:drawableStart="@drawable/ic_qr_scan"
+                android:drawablePadding="@dimen/qi_sp_2"
+                android:text="扫二维码连接电脑" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:gravity="center"
+                android:text="或手动填写"
+                android:textColor="@color/qi_dim"
+                android:textSize="11sp" />
+
+            <EditText
+                android:id="@+id/et_server_url"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/qi_sp_2"
+                android:background="@drawable/home_edit"
+                android:hint="电脑地址，如 wss://192.168.1.10:9527/ws"
+                android:inputType="textUri"
+                android:minHeight="@dimen/qi_input_h"
+                android:paddingLeft="@dimen/qi_sp_3"
+                android:paddingRight="@dimen/qi_sp_3"
+                android:textColor="@color/qi_ivory"
+                android:textColorHint="@color/qi_dim"
+                android:textSize="13sp" />
+
+            <EditText
+                android:id="@+id/et_server_token"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/qi_sp_2"
+                android:background="@drawable/home_edit"
+                android:hint="配对令牌（电脑端配置文件 token）"
+                android:inputType="text"
+                android:minHeight="@dimen/qi_input_h"
+                android:paddingLeft="@dimen/qi_sp_3"
+                android:paddingRight="@dimen/qi_sp_3"
+                android:textColor="@color/qi_ivory"
+                android:textColorHint="@color/qi_dim"
+                android:textSize="13sp" />
+
+            <!-- 证书指纹（可选）：低频路径默认收起为一行文本级入口 -->
+            <TextView
+                android:id="@+id/tv_fp_toggle"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/qi_sp_1"
+                android:paddingTop="10dp"
+                android:paddingBottom="6dp"
+                android:text="证书指纹（可选，扫码自动填入）›"
+                android:textColor="@color/qi_muted"
+                android:textSize="12sp" />
+
+            <EditText
+                android:id="@+id/et_server_fingerprint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:background="@drawable/home_edit"
+                android:hint="证书指纹（不填不校验）"
+                android:inputType="text"
+                android:minHeight="@dimen/qi_input_h"
+                android:paddingLeft="@dimen/qi_sp_3"
+                android:paddingRight="@dimen/qi_sp_3"
+                android:textColor="@color/qi_ivory"
+                android:textColorHint="@color/qi_dim"
+                android:textSize="13sp"
+                android:visibility="gone" />
+
+            <Button
+                android:id="@+id/btn_test_connect"
+                style="@style/Qi.Button.Secondary"
+                android:layout_width="match_parent"
+                android:layout_height="@dimen/qi_btn_h_sm"
+                android:layout_marginTop="@dimen/qi_sp_2"
+                android:text="测试连接（无需开启录屏）" />
+        </LinearLayout>
+
+        <!-- ============ 卡片 02：启动识别 ============ -->
+        <LinearLayout
+            style="@style/Qi.Card"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="@dimen/qi_sp_3">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    style="@style/Qi.CardIndex"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="02" />
+
+                <TextView
+                    style="@style/Qi.CardTitle"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="@dimen/qi_sp_2"
+                    android:layout_weight="1"
+                    android:text="启动识别" />
+
+                <TextView
+                    android:id="@+id/tv_chip_perm"
+                    style="@style/Qi.Chip"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="待授权" />
+            </LinearLayout>
+
+            <!-- 步骤 ① 悬浮窗权限 -->
+            <LinearLayout
+                android:id="@+id/btn_overlay_permission"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/qi_sp_3"
+                android:background="?attr/selectableItemBackground"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingTop="10dp"
+                android:paddingBottom="10dp">
+
+                <TextView
+                    android:id="@+id/tv_step1_num"
+                    style="@style/Qi.StepNum"
+                    android:text="1" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="10dp"
+                    android:text="悬浮窗权限"
+                    android:textColor="@color/qi_ivory"
+                    android:textSize="14sp" />
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="6dp"
+                    android:layout_weight="1"
+                    android:text="显示建议面板"
+                    android:textColor="@color/qi_muted"
+                    android:textSize="11sp" />
+
+                <TextView
+                    android:id="@+id/tv_overlay_action"
+                    style="@style/Qi.StepAction"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="去授予" />
+            </LinearLayout>
+
+            <!-- 步骤 ② 通知权限 -->
+            <LinearLayout
+                android:id="@+id/btn_notification_permission"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:background="?attr/selectableItemBackground"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingTop="10dp"
+                android:paddingBottom="10dp">
+
+                <TextView
+                    android:id="@+id/tv_step2_num"
+                    style="@style/Qi.StepNum"
+                    android:text="2" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="10dp"
+                    android:text="通知权限"
+                    android:textColor="@color/qi_ivory"
+                    android:textSize="14sp" />
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="6dp"
+                    android:layout_weight="1"
+                    android:text="前台服务提示（Android 13+）"
+                    android:textColor="@color/qi_muted"
+                    android:textSize="11sp" />
+
+                <TextView
+                    android:id="@+id/tv_notify_action"
+                    style="@style/Qi.StepAction"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="去授予" />
+            </LinearLayout>
+
+            <!-- 步骤 ③ 屏幕识别：CTA 提到卡片底部做整宽主按钮 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingTop="10dp">
+
+                <TextView
+                    android:id="@+id/tv_step3_num"
+                    style="@style/Qi.StepNum"
+                    android:text="3" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="10dp"
+                    android:text="屏幕识别"
+                    android:textColor="@color/qi_ivory"
+                    android:textSize="14sp" />
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="6dp"
+                    android:layout_weight="1"
+                    android:text="全自动识别棋盘"
+                    android:textColor="@color/qi_muted"
+                    android:textSize="11sp" />
+            </LinearLayout>
+
+            <Button
+                android:id="@+id/btn_start_capture"
+                style="@style/Qi.Button.Primary"
+                android:layout_width="match_parent"
+                android:layout_height="@dimen/qi_btn_h"
+                android:layout_marginTop="10dp"
+                android:text="开始屏幕识别" />
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:layout_marginTop="@dimen/qi_sp_3"
+                android:background="@color/qi_line1" />
+
+            <!-- 设置类行：识别引擎（两枚互斥芯片，逻辑不变） -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    style="@style/Qi.Label"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="识别引擎" />
+
+                <RadioGroup
+                    android:id="@+id/rg_recognizer_engine"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal">
+
+                    <RadioButton
+                        android:id="@+id/rb_engine_onnx"
+                        style="@style/Qi.ChipSelectable"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="ONNX 角点式" />
+
+                    <RadioButton
+                        android:id="@+id/rb_engine_yolo"
+                        style="@style/Qi.ChipSelectable"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="@dimen/qi_sp_2"
+                        android:text="YOLO 检测式" />
+                </RadioGroup>
+            </LinearLayout>
+
+            <!-- 设置类行：引擎线程值芯片（点按循环，逻辑不变） -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/qi_sp_2"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    style="@style/Qi.Label"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="引擎线程" />
+
+                <Button
+                    android:id="@+id/btn_engine_threads"
+                    style="@style/Qi.ChipSelectable"
+                    android:layout_width="wrap_content"
+                    android:layout_height="32dp"
+                    android:minWidth="0dp"
+                    android:text="跟随电脑端" />
+            </LinearLayout>
+
+            <TextView
+                style="@style/Qi.Hint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:text="点按调档；连接电脑后自动应用（0=电脑端自动分配，切回即生效）" />
+        </LinearLayout>
+
+        <!-- ============ 卡片 03：外观与设置 ============ -->
+        <LinearLayout
+            style="@style/Qi.Card"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="@dimen/qi_sp_3">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    style="@style/Qi.CardIndex"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="03" />
+
+                <TextView
+                    style="@style/Qi.CardTitle"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="@dimen/qi_sp_2"
+                    android:layout_weight="1"
+                    android:text="外观与设置" />
+
+                <TextView
+                    android:id="@+id/tv_chip_bg"
+                    style="@style/Qi.Chip"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="默认棋韵" />
+            </LinearLayout>
+
+            <TextView
+                style="@style/Qi.Label"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/qi_sp_3"
+                android:text="悬浮窗主题（切换即时生效）" />
+
+            <RadioGroup
+                android:id="@+id/rg_overlay_theme"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:orientation="horizontal">
+
+                <RadioButton
+                    android:id="@+id/rb_theme_dark"
+                    style="@style/Qi.ChipSelectable"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:checked="true"
+                    android:drawableStart="@drawable/sw_dark"
+                    android:text="深色玻璃" />
+
+                <RadioButton
+                    android:id="@+id/rb_theme_black"
+                    style="@style/Qi.ChipSelectable"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="@dimen/qi_sp_2"
+                    android:drawableStart="@drawable/sw_black"
+                    android:text="纯黑 OLED" />
+
+                <RadioButton
+                    android:id="@+id/rb_theme_light"
+                    style="@style/Qi.ChipSelectable"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="@dimen/qi_sp_2"
+                    android:drawableStart="@drawable/sw_light"
+                    android:text="浅色纸感" />
+            </RadioGroup>
+
+            <TextView
+                style="@style/Qi.Label"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/qi_sp_3"
+                android:text="主页背景（自定义图库图片，自动压暗保证可读）" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/btn_pick_background"
+                    style="@style/Qi.Button.Secondary"
+                    android:layout_width="0dp"
+                    android:layout_height="@dimen/qi_btn_h_sm"
+                    android:layout_marginRight="@dimen/qi_sp_1"
+                    android:layout_weight="1"
+                    android:text="从图库选择" />
+
+                <Button
+                    android:id="@+id/btn_reset_background"
+                    style="@style/Qi.Button.Secondary"
+                    android:layout_width="0dp"
+                    android:layout_height="@dimen/qi_btn_h_sm"
+                    android:layout_marginLeft="@dimen/qi_sp_1"
+                    android:layout_weight="1"
+                    android:text="恢复默认" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- 关于：收纳功能说明/连接提示/使用步骤/合规声明等小字 -->
+        <TextView
+            android:id="@+id/btn_about"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="@dimen/qi_sp_4"
+            android:gravity="center"
+            android:padding="10dp"
+            android:text="关于内阁 · 免责声明"
+            android:textColor="@color/qi_dim"
+            android:textSize="13sp" />
+    </LinearLayout>
+</ScrollView>

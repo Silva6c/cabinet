@@ -1,0 +1,14 @@
+# 行尾规范：仓库内统一 LF；Windows 专用脚本保持 CRLF；二进制不转换。
+* text=auto
+*.bat text eol=crlf
+*.sh text eol=lf
+*.py text eol=lf
+*.go text eol=lf
+*.kt text eol=lf
+*.java text eol=lf
+
+# 二进制资源不做任何行尾转换
+*.png binary
+*.ico binary
+*.jpg binary
+*.ttf binary

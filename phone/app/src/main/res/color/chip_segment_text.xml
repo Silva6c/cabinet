@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 互斥芯片文字色：选中=象牙，未选=次级 -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:color="@color/qi_ivory" android:state_checked="true" />
+    <item android:color="@color/qi_muted" />
+</selector>

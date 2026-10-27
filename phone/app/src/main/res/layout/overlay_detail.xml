@@ -1,0 +1,203 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 悬浮窗窗口2（详情）：三行高密度布局（2026-10-18 重构"美观且占地少"）。
+     旧版五行竖排（大字/状态/指标2×2/WDL/来源各自占行），窗口宽度被来源行
+     定宽撑开而其余行只用左半——右侧大片空白、整体偏高。新版每行铺满全宽：
+       行1  优势大字（左）＋ 引擎状态·用时（右，与点）
+       行2  指标四项一行均匀分布（深度/节点/速率/哈希，中间 weight Space）
+       行3  建议来源（占满剩余，超长省略）＋ 胜率 WDL（右对齐，无则 GONE）
+     全区域可拖动；显隐由主面板"详情"按钮控制。
+     尺寸契约：行1 的 detail_score 行是唯一"锚定行"（width 260dp 定宽撑开
+     窗口总宽 = 260 + 28dp 根 padding）；ScreenAssistService.ensureDetailWindow
+     的 w/h 估算值须同步（只影响默认落位与屏内钳制，窗口本体 WRAP_CONTENT） -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/detail_root"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:background="@drawable/overlay_bg"
+    android:clickable="true"
+    android:focusable="true"
+    android:orientation="vertical"
+    android:paddingLeft="14dp"
+    android:paddingTop="8dp"
+    android:paddingRight="14dp"
+    android:paddingBottom="8dp">
+
+    <!-- 行1：优势大字 + 引擎状态（同行两端）：大字是视觉锚点，状态小字靠右
+         补位——旧版各占一行、大字右侧 ~140dp 全空。baseline 对齐让 22sp 大字
+         与 11sp 小字沿文字底线自然排列 -->
+    <LinearLayout
+        android:layout_width="260dp"
+        android:layout_height="wrap_content"
+        android:baselineAligned="false"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <TextView
+            android:id="@+id/detail_score"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:fontFeatureSettings="tnum"
+            android:shadowColor="#80000000"
+            android:shadowDy="1"
+            android:shadowRadius="4"
+            android:text="—"
+            android:textColor="@color/qi_jade_text"
+            android:textSize="22sp"
+            android:textStyle="bold" />
+
+        <Space
+            android:layout_width="0dp"
+            android:layout_height="1dp"
+            android:layout_weight="1" />
+
+        <View
+            android:id="@+id/detail_dot"
+            android:layout_width="6dp"
+            android:layout_height="6dp"
+            android:layout_marginEnd="5dp"
+            android:background="@drawable/step_num_idle" />
+
+        <TextView
+            android:id="@+id/detail_state"
+            style="@style/OverlayState"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="引擎 —" />
+    </LinearLayout>
+
+    <!-- 行2：指标四项一行均匀分布（3 个 weight Space 等分剩余宽度）。
+         旧版 2×2 两行各两项靠左、右半空置；单行后窗口整体再省一行高。
+         各值 maxLines=1：值偶发超长（节点 12.3M 等）省略不折行 -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="7dp"
+        android:orientation="horizontal">
+
+        <TextView
+            android:id="@+id/detail_l_depth"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="深度"
+            android:textColor="@color/qi_muted"
+            android:textSize="11sp" />
+
+        <TextView
+            android:id="@+id/detail_v_depth"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="3dp"
+            android:ellipsize="end"
+            android:fontFeatureSettings="tnum"
+            android:maxLines="1"
+            android:text="—"
+            android:textColor="@color/qi_amber_text"
+            android:textSize="12sp" />
+
+        <Space
+            android:layout_width="0dp"
+            android:layout_height="1dp"
+            android:layout_weight="1" />
+
+        <TextView
+            android:id="@+id/detail_l_nodes"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="节点"
+            android:textColor="@color/qi_muted"
+            android:textSize="11sp" />
+
+        <TextView
+            android:id="@+id/detail_v_nodes"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="3dp"
+            android:ellipsize="end"
+            android:fontFeatureSettings="tnum"
+            android:maxLines="1"
+            android:text="—"
+            android:textColor="@color/qi_amber_text"
+            android:textSize="12sp" />
+
+        <Space
+            android:layout_width="0dp"
+            android:layout_height="1dp"
+            android:layout_weight="1" />
+
+        <TextView
+            android:id="@+id/detail_l_nps"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="速率"
+            android:textColor="@color/qi_muted"
+            android:textSize="11sp" />
+
+        <TextView
+            android:id="@+id/detail_v_nps"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="3dp"
+            android:ellipsize="end"
+            android:fontFeatureSettings="tnum"
+            android:maxLines="1"
+            android:text="—"
+            android:textColor="@color/qi_amber_text"
+            android:textSize="12sp" />
+
+        <Space
+            android:layout_width="0dp"
+            android:layout_height="1dp"
+            android:layout_weight="1" />
+
+        <TextView
+            android:id="@+id/detail_l_hash"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="哈希"
+            android:textColor="@color/qi_muted"
+            android:textSize="11sp" />
+
+        <TextView
+            android:id="@+id/detail_v_hash"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="3dp"
+            android:ellipsize="end"
+            android:fontFeatureSettings="tnum"
+            android:maxLines="1"
+            android:text="—"
+            android:textColor="@color/qi_amber_text"
+            android:textSize="12sp" />
+    </LinearLayout>
+
+    <!-- 行3：来源（占满剩余、超长省略）＋ 胜率 WDL（右对齐小字）。
+         WDL 未携带时 GONE（高 0），来源独占整行——旧版 WDL 独占一行 -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="5dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <TextView
+            android:id="@+id/detail_source"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:ellipsize="end"
+            android:maxLines="1"
+            android:text="来源 —"
+            android:textColor="@color/qi_muted"
+            android:textSize="11sp" />
+
+        <TextView
+            android:id="@+id/detail_wdl"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="6dp"
+            android:fontFeatureSettings="tnum"
+            android:textColor="@color/qi_muted"
+            android:textSize="11sp"
+            android:visibility="gone" />
+    </LinearLayout>
+</LinearLayout>

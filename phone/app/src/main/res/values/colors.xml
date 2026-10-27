@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 棋韵语义 token（docs/美学设计研究.md §4.2）：两端同源，朱砂唯一主色，
+     琥珀/玉/石青/警示只用于状态，不用于装饰 -->
+<resources>
+    <!-- 底与面 -->
+    <color name="qi_ink">#14171C</color>
+    <color name="qi_surface">#1B1E24</color>
+    <!-- 玻璃层：炭面 72% 半透明（伪玻璃底；真模糊在悬浮窗物理上不可得） -->
+    <color name="qi_glass">#B81B1E24</color>
+
+    <!-- 文字三级 -->
+    <color name="qi_ivory">#E8E6E1</color>
+    <color name="qi_muted">#9A9EA6</color>
+    <color name="qi_dim">#565B64</color>
+
+    <!-- 朱砂（唯一主色；朱砂·按专用于白字实心底，白字对比 4.5:1） -->
+    <color name="qi_zhu">#D05A44</color>
+    <color name="qi_zhu_btn">#C35440</color>
+    <color name="qi_zhu_btn_press">#B04A38</color>
+
+    <!-- 琥珀：候选/待定/等待 -->
+    <color name="qi_amber">#FFC107</color>
+    <color name="qi_amber_text">#FFE082</color>
+
+    <!-- 玉：就绪/建议定着/优势 -->
+    <color name="qi_jade_text">#81C784</color>
+    <color name="qi_jade_dot">#4CAF50</color>
+
+    <!-- 描边三档（分层用，不用阴影） -->
+    <color name="qi_line1">#1AFFFFFF</color>
+    <color name="qi_line2">#29FFFFFF</color>
+    <color name="qi_line3">#47FFFFFF</color>
+</resources>

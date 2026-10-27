@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 棋韵标记（包豪斯几何：方 · 圆 · 三角）——主页头部与身份识别 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="26dp"
+    android:height="26dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- 方：朱砂 -->
+    <path
+        android:pathData="M1.5,13.5 h9 v9 h-9 z"
+        android:strokeColor="@color/qi_zhu"
+        android:strokeWidth="1.6" />
+    <!-- 圆：玉 -->
+    <path
+        android:pathData="M9,8 a6,6 0 1,0 12,0 a6,6 0 1,0 -12,0"
+        android:strokeColor="@color/qi_jade_dot"
+        android:strokeWidth="1.6" />
+    <!-- 三角：琥珀 -->
+    <path
+        android:fillColor="@color/qi_amber"
+        android:pathData="M13,22.5 L17.5,14 L22,22.5 z" />
+</vector>

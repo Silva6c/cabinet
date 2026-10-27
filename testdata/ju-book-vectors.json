@@ -1,0 +1,174 @@
+{
+  "generated_by": "tools/vector-gen (上游 Zobrist/Board 移植 + sqlite-jdbc)",
+  "purpose": "锚点语义用例（手挑，14 条）",
+  "book": "library/books/<自备桔库>.obk",
+  "vectors": [
+    {
+      "case": "startpos_red",
+      "fen": "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1",
+      "red_go": true,
+      "hash": 7101337512282506414,
+      "hit": true,
+      "best_move": "h2c2",
+      "moves": [
+        {"move": "h2c2", "score": 1, "win_rate": 6.0, "draw": 120, "lost": 0},
+        {"move": "h2f2", "score": 1, "win_rate": 4.0, "draw": 240, "lost": 0},
+        {"move": "b0a2", "score": 1, "win_rate": 3.0, "draw": 97, "lost": 0},
+        {"move": "h0g2", "score": 1, "win_rate": 2.0, "draw": 306, "lost": 3},
+        {"move": "h2d2", "score": 1, "win_rate": 2.0, "draw": 193, "lost": 2}
+      ]
+    },
+    {
+      "case": "startpos_black",
+      "fen": "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR b - - 0 1",
+      "red_go": false,
+      "hash": -4448661228494754826,
+      "hit": false,
+      "best_move": "",
+      "moves": [
+      ]
+    },
+    {
+      "case": "miss_kings_only",
+      "fen": "4k4/9/9/9/9/9/9/9/9/4K4 w - - 0 1",
+      "red_go": true,
+      "hash": 6712858077814438566,
+      "hit": false,
+      "best_move": "",
+      "moves": [
+      ]
+    },
+    {
+      "case": "line_0_w",
+      "fen": "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1",
+      "red_go": true,
+      "hash": 7101337512282506414,
+      "hit": true,
+      "best_move": "h2c2",
+      "moves": [
+        {"move": "h2c2", "score": 1, "win_rate": 6.0, "draw": 120, "lost": 0},
+        {"move": "h2f2", "score": 1, "win_rate": 4.0, "draw": 240, "lost": 0},
+        {"move": "b0a2", "score": 1, "win_rate": 3.0, "draw": 97, "lost": 0},
+        {"move": "h0g2", "score": 1, "win_rate": 2.0, "draw": 306, "lost": 3},
+        {"move": "h2d2", "score": 1, "win_rate": 2.0, "draw": 193, "lost": 2}
+      ]
+    },
+    {
+      "case": "line_1_b",
+      "fen": "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C2C4/9/RNBAKABNR b - - 0 2",
+      "red_go": false,
+      "hash": -6779375433368598546,
+      "hit": true,
+      "best_move": "c9e7",
+      "moves": [
+        {"move": "c9e7", "score": 1, "win_rate": 4.0, "draw": 115, "lost": 1},
+        {"move": "h9g7", "score": 1, "win_rate": 2.0, "draw": 331, "lost": 2},
+        {"move": "b9c7", "score": 1, "win_rate": 2.0, "draw": 242, "lost": 1}
+      ]
+    },
+    {
+      "case": "line_2_w",
+      "fen": "rnbakab1r/9/1c4nc1/p1p1p1p1p/9/9/P1P1P1P1P/1C2C4/9/RNBAKABNR w - - 0 3",
+      "red_go": true,
+      "hash": 3997584258454171369,
+      "hit": true,
+      "best_move": "b0c2",
+      "moves": [
+        {"move": "b0c2", "score": 1, "win_rate": 2.0, "draw": 33, "lost": 0},
+        {"move": "b2d2", "score": 1, "win_rate": 1.0, "draw": 24, "lost": 0},
+        {"move": "c3c4", "score": 1, "win_rate": 0.0, "draw": 39, "lost": 0},
+        {"move": "h0g2", "score": 1, "win_rate": 0.0, "draw": 100, "lost": 2},
+        {"move": "g3g4", "score": 1, "win_rate": 0.0, "draw": 65, "lost": 0}
+      ]
+    },
+    {
+      "case": "line_3_b",
+      "fen": "rnbakab1r/9/1c4nc1/p1p1p1p1p/9/9/P1P1P1P1P/1C2C1N2/9/RNBAKAB1R b - - 0 4",
+      "red_go": false,
+      "hash": 5269302746982601205,
+      "hit": true,
+      "best_move": "b9c7",
+      "moves": [
+        {"move": "b9c7", "score": 1, "win_rate": 1.0, "draw": 18, "lost": 0},
+        {"move": "i9h9", "score": 1, "win_rate": 1.0, "draw": 31, "lost": 0},
+        {"move": "c6c5", "score": 1, "win_rate": 1.0, "draw": 16, "lost": 1},
+        {"move": "g6g5", "score": 1, "win_rate": 0.0, "draw": 34, "lost": 0}
+      ]
+    },
+    {
+      "case": "line_4_w",
+      "fen": "r1bakab1r/9/1cn3nc1/p1p1p1p1p/9/9/P1P1P1P1P/1C2C1N2/9/RNBAKAB1R w - - 0 5",
+      "red_go": true,
+      "hash": 9156254193706828008,
+      "hit": true,
+      "best_move": "g3g4",
+      "moves": [
+        {"move": "g3g4", "score": 1, "win_rate": 1.0, "draw": 33, "lost": 0},
+        {"move": "e3e4", "score": 1, "win_rate": 1.0, "draw": 1, "lost": 1},
+        {"move": "i0h0", "score": 1, "win_rate": 0.0, "draw": 55, "lost": 3},
+        {"move": "b2c2", "score": 1, "win_rate": 0.0, "draw": 2, "lost": 0}
+      ]
+    },
+    {
+      "case": "line_5_b",
+      "fen": "r1bakab1r/9/1cn3nc1/p1p1p1p1p/9/9/P1P1P1P1P/1C2C1N2/9/RNBAKABR1 b - - 0 6",
+      "red_go": false,
+      "hash": 3722746140646461000,
+      "hit": true,
+      "best_move": "i9h9",
+      "moves": [
+        {"move": "i9h9", "score": 1, "win_rate": 3.0, "draw": 55, "lost": 0}
+      ]
+    },
+    {
+      "case": "line_6_w",
+      "fen": "1rbakab1r/9/1cn3nc1/p1p1p1p1p/9/9/P1P1P1P1P/1C2C1N2/9/RNBAKABR1 w - - 0 7",
+      "red_go": true,
+      "hash": 7841773046024441561,
+      "hit": false,
+      "best_move": "",
+      "moves": [
+      ]
+    },
+    {
+      "case": "line_7_b",
+      "fen": "1rbakab1r/9/1cn3nc1/p1p1p1p1p/9/9/P1P1P1P1P/1CN1C1N2/9/R1BAKABR1 b - - 0 8",
+      "red_go": false,
+      "hash": 681424561850596983,
+      "hit": false,
+      "best_move": "",
+      "moves": [
+      ]
+    },
+    {
+      "case": "line_8_w",
+      "fen": "1rbakab1r/9/1cn3nc1/p3p1p1p/2p6/9/P1P1P1P1P/1CN1C1N2/9/R1BAKABR1 w - - 0 9",
+      "red_go": true,
+      "hash": 8441254485414531928,
+      "hit": false,
+      "best_move": "",
+      "moves": [
+      ]
+    },
+    {
+      "case": "mirror_red",
+      "fen": "r1bakabr1/9/1cn3nc1/p1p1p3p/6p2/9/P1P1P1P1P/2N1C1NC1/9/1RBAKAB1R w - - 0 1",
+      "red_go": true,
+      "hash": -8041259228342860382,
+      "hit": false,
+      "best_move": "",
+      "moves": [
+      ]
+    },
+    {
+      "case": "mirror_black",
+      "fen": "r1bakabr1/9/1cn3nc1/p1p1p3p/6p2/9/P1P1P1P1P/2N1C1NC1/9/1RBAKAB1R b - - 0 1",
+      "red_go": false,
+      "hash": 3506509359382260474,
+      "hit": false,
+      "best_move": "",
+      "moves": [
+      ]
+    }
+  ]
+}
