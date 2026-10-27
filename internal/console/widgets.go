@@ -341,17 +341,19 @@ func stateColor(state string) color.Color {
 
 // ---------- 连接区横排行（表格式便当盒，2026-10-20 v3） ----------
 
-// clientColW 连接区横排列宽（与旧 widget.Table 时代一致；尾列"最后 position"
-// 锁 260——fen 摘要 16 字符等宽约 140px，260 给足余量。尾列不能靠 HBox 弹性：
-// 带截断的 Label MinSize 只报最小宽，HBox 逐项按 MinSize 排布不做弹性分配，
-// 不锁宽就只剩一个省略号——v3/v4 两轮实测）。
+// clientColW 连接区横排列宽（尾列"最后 position"锁 260——fen 摘要 16 字符
+// 等宽约 140px，260 给足余量。尾列不能靠 HBox 弹性：带截断的 Label MinSize
+// 只报最小宽，HBox 逐项按 MinSize 排布不做弹性分配，不锁宽就只剩一个省略号
+// ——v3/v4 两轮实测）。
+// 2026-10-28 设备昵称功能加"设备"列（第二列）：窗口 960px，新总宽 820+24
+// 边距仍在可用范围内；客户端列收窄（cabinet-phone 等宽 ~110px 足够）。
 // 表头行与数据行共用此列宽，保证竖向对齐。
-var clientColW = []float32{110, 130, 80, 80, 70, 260}
+var clientColW = []float32{110, 120, 130, 70, 70, 60, 260}
 
 // clientHeaderRow 表头行（公用设施，用户要求"会话/客户端等排在最上面，和之前
-// 类似"）：六列标题横排、恒显不随数据行滚动。固定列宽经 sizedBox，尾列弹性。
+// 类似"）：七列标题横排、恒显不随数据行滚动。固定列宽经 sizedBox，尾列弹性。
 func clientHeaderRow() fyne.CanvasObject {
-	titles := []string{"会话", "客户端", "版本", "RTT", "路径", "最后 position"}
+	titles := []string{"会话", "设备", "客户端", "版本", "RTT", "路径", "最后 position"}
 	box := container.NewHBox()
 	for i, t := range titles {
 		txt := qiText(t, qiSize(theme.SizeNameCaptionText), qiMuted, false, true)
@@ -361,9 +363,10 @@ func clientHeaderRow() fyne.CanvasObject {
 	return container.New(&pad{left: 12, right: 12, top: 2, bottom: 2}, box)
 }
 
-// clientRow 会话数据行（v4 矮便当盒，2026-10-20）：一行一台设备，横排六列与
-// 表头同构对齐；行底恢复便当盒卡片质感（qiSurface 圆角底 + qiLine2 细描边，
-// 选中换朱砂描边——v2 卡片语言），行高 ~30px 压到最矮。整行 Tappable：点击
+// clientRow 会话数据行（v4 矮便当盒，2026-10-20）：一行一台设备，横排七列与
+// 表头同构对齐（2026-10-28 加"设备"列，昵称功能）；行底恢复便当盒卡片质感
+// （qiSurface 圆角底 + qiLine2 细描边，选中换朱砂描边——v2 卡片语言），行高
+// ~30px 压到最矮。整行 Tappable：点击
 // 回调 onTap(fullID)，选中态由 sectionClients 统一维护。列表装入自适应滚动
 // 区（行数少时随内容、超过 100px 封顶内部滚动）——设备再多也只在"03 连接"
 // 内部滚动，不挤兑其他区块（2026-10-20 用户要求）。
@@ -428,13 +431,13 @@ func newClientRow(onTap func(fullID string)) *clientRow {
 	r.content.StrokeColor = qiLine2
 	r.content.StrokeWidth = 1
 	box := container.NewHBox()
-	for i := 0; i < 6; i++ {
-		// 列样式沿用旧表：会话/RTT/最后 position 低强调（灰调），客户端名常规亮色
+	for i := 0; i < 7; i++ {
+		// 列样式沿用旧表：会话/RTT/最后 position 低强调（灰调），设备/客户端名常规亮色
 		// （Label 无 Color 字段，灰/亮用 Importance 两档——Low=disabled 灰）
-		mono := i == 0 || i == 3 || i == 5
-		// 六列全部锁宽（含尾列，见 clientColW 注）——单元格容器整体上树，
+		mono := i == 0 || i == 4 || i == 6
+		// 七列全部锁宽（含尾列，见 clientColW 注）——单元格容器整体上树，
 		// 抽 label 单独上树等于放弃锁宽布局（v3 六列塌缩省略号的根因）
-		cell, lbl := clientCell("—", mono, i == 1, clientColW[i])
+		cell, lbl := clientCell("—", mono, i == 2, clientColW[i])
 		if mono {
 			lbl.Importance = widget.LowImportance
 		} else {
@@ -480,7 +483,18 @@ func (r *clientRow) set(row ClientRow, selected bool) {
 		r.content.StrokeColor = stroke
 	}
 
-	// 客户端名（列 1）：未鉴权降级灰（旧表"（未鉴权）"语义；Label 用 Importance
+	// 设备（列 1，2026-10-28 昵称功能）：昵称·devid前4；旧手机端未上报昵称时
+	// 退 "—"（会话列已有短 ID 可辨）。devid 后缀恒带，两台同型号默认名撞名
+	// 时也能分清
+	dev := row.Name
+	if dev != "" && len(row.Devid) >= 4 {
+		dev += "·" + row.Devid[:4]
+	}
+	if dev == "" {
+		dev = "—"
+	}
+
+	// 客户端名（列 2）：未鉴权降级灰（旧表"（未鉴权）"语义；Label 用 Importance
 	// 两档表达灰/亮——Low=disabled 灰，Medium=前景亮）
 	name := row.Client
 	wantImp := widget.MediumImportance
@@ -494,17 +508,18 @@ func (r *clientRow) set(row ClientRow, selected bool) {
 	case name == "":
 		name = "—"
 	}
-	if r.labels[1].Importance != wantImp {
-		r.labels[1].Importance = wantImp
-		r.labels[1].Refresh()
+	if r.labels[2].Importance != wantImp {
+		r.labels[2].Importance = wantImp
+		r.labels[2].Refresh()
 	}
 	r.setText(r.labels[0], row.Session)
-	r.setText(r.labels[1], name)
-	r.setText(r.labels[2], orDash(row.Ver))
-	r.setText(r.labels[3], fmtRTT(row.RTTMs))
-	r.setText(r.labels[4], orDash(row.Path))
+	r.setText(r.labels[1], dev)
+	r.setText(r.labels[2], name)
+	r.setText(r.labels[3], orDash(row.Ver))
+	r.setText(r.labels[4], fmtRTT(row.RTTMs))
+	r.setText(r.labels[5], orDash(row.Path))
 	// 最后 position：FEN 摘要（尚未发过局面退最近活动时间），旧表列语义
-	r.setText(r.labels[5], orDash(fenBrief(row.Fen, row.LastPos)))
+	r.setText(r.labels[6], orDash(fenBrief(row.Fen, row.LastPos)))
 
 	r.Refresh()
 }

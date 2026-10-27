@@ -438,11 +438,16 @@ func (c *Console) confirmKickSession() {
 	}
 	// 确认文案带上会话缩略 ID 与客户端名（若有），断错设备的代价是对方重连一遍
 	r := c.rowByID(id)
+	// 昵称功能（2026-10-28）：确认文案优先显示设备昵称（一眼认出断的是哪台），
+	// 未上报昵称退客户端名，都无则按鉴权状态给占位
 	name := "（未鉴权）"
 	if r != nil {
-		if r.Authed && r.Client != "" {
+		switch {
+		case r.Authed && r.Name != "":
+			name = r.Name
+		case r.Authed && r.Client != "":
 			name = r.Client
-		} else if r.Authed {
+		case r.Authed:
 			name = "（已鉴权）"
 		}
 	}

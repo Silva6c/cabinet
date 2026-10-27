@@ -39,7 +39,7 @@ sequenceDiagram
     participant C as 内阁（PC）
     Note over P,C: TLS 建连（自签证书；应用层令牌鉴权）
     C->>P: hello {"server":"cabinet","ver":"0.1.0","caps":["v1"]}
-    P->>C: hello {"client":"cabinet-phone","ver":"…","caps":["v1"]}
+    P->>C: hello {"client":"cabinet-phone","ver":"…","caps":["v1"],"devid":"…","name":"…"}
     P->>C: auth {"token":"<64 hex>"}
     C->>P: welcome {"session_id":"…","engine":{"state":"ready"},"books":["…"]}
     Note over P,C: 之后 position / suggestion / status / ping / pong / bye 自由流动
@@ -65,10 +65,17 @@ PC 端 `server` 字段恒为 `"cabinet"`；手机端 `client` 字段约定为 `"
 | `server` | string | 二选一 | PC 端标识，**固定字符串 `"cabinet"`** |
 | `ver` | string | 是 | 本端软件版本（semver 字符串，如 `"0.1.0"`） |
 | `caps` | string[] | 是 | 能力列表，v1 恒 `["v1"]`；未来新增能力追加字符串 |
+| `devid` | string | 否（仅手机端） | 设备稳定标识（首启随机生成的 16~32 hex），用于跨重连区分设备；**仅展示用途，不作为鉴权依据**（鉴权唯一依据是 auth 的 token） |
+| `name` | string | 否（仅手机端） | 设备昵称（≤24 字符；PC 端 trim、去控制字符、限长后展示），控制台设备列表显示 `name·devid前4` 形态 |
+
+- `devid`/`name` 为手机端可选自报字段（旧手机端不发、旧 PC 端忽略，双向兼容 §7）。
+  昵称来源与修改在手机端（默认 `Build.MODEL`）；PC 端在握手期按上述规则防御性
+  规整后存入会话，**鉴权完成后到达的 hello 不再更新**（§3 忽略语义）。
 
 ```json
 {"v":1,"t":"hello","server":"cabinet","ver":"0.1.0","caps":["v1"]}
-{"v":1,"t":"hello","client":"cabinet-phone","ver":"0.1.0","caps":["v1"]}
+{"v":1,"t":"hello","client":"cabinet-phone","ver":"0.1.0","caps":["v1"],
+ "devid":"0123456789abcdef0123456789abcdef","name":"Pixel 8"}
 ```
 
 ### 4.2 auth（手机→PC）

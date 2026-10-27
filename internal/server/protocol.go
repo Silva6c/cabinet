@@ -81,12 +81,16 @@ func frame(t string) frameBase {
 // 变红即破坏旧端解析，属协议破坏性变更。
 
 // Hello 握手帧（双向）。PC 端填 Server、手机端填 Client，二者互斥。
+// Devid/Name 为手机端可选自报字段（2026-10-28 设备昵称功能）：omitempty 保证
+// server 端 hello 序列化形态不变（TestEncodeFieldOrder 逐字节锚），旧端忽略。
 type Hello struct {
 	frameBase
 	Client string   `json:"client,omitempty"`
 	Server string   `json:"server,omitempty"`
 	Ver    string   `json:"ver"`
 	Caps   []string `json:"caps"`
+	Devid  string   `json:"devid,omitempty"`
+	Name   string   `json:"name,omitempty"`
 }
 
 // Auth 令牌鉴权帧（手机→PC）。

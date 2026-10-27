@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"cabinet/internal/engine"
@@ -75,6 +76,71 @@ func TestEncodeFieldOrder(t *testing.T) {
 	want := fmt.Sprintf(`{"v":1,"t":"hello","server":"cabinet","ver":%q,"caps":["v1"]}`, Version)
 	if string(b) != want {
 		t.Fatalf("编码输出不符期望\n got: %s\nwant: %s", b, want)
+	}
+}
+
+// TestClientHelloDevidNameRoundTrip 设备昵称功能（协议 §4.1 可选字段，2026-10-28）：
+// 客户端 hello 自报 devid/name 的往返与字节形态。新字段单列用例，不扰动既有
+// golden 锚——server 端 hello 两字段零值 + omitempty，形态不变。
+func TestClientHelloDevidNameRoundTrip(t *testing.T) {
+	in := Hello{frameBase: frame(TypeHello), Client: "cabinet-phone", Ver: "0.1.0",
+		Caps: []string{CapV1}, Devid: "0123456789abcdef0123456789abcdef", Name: "Pixel 8"}
+	b, err := sendJSONForTest(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"v":1,"t":"hello","client":"cabinet-phone","ver":"0.1.0","caps":["v1"],` +
+		`"devid":"0123456789abcdef0123456789abcdef","name":"Pixel 8"}`
+	if string(b) != want {
+		t.Fatalf("客户端 hello 编码不符期望\n got: %s\nwant: %s", b, want)
+	}
+	out := roundTrip[Hello](t, in)
+	if out.Devid != in.Devid || out.Name != in.Name || out.Client != in.Client {
+		t.Fatalf("字段不匹配: %+v", out)
+	}
+}
+
+// TestHelloDevidNameOmittedWhenEmpty 旧形态兼容锚：devid/name 零值不出现在
+// 序列化输出里（旧手机端/PC 端互相解析不受影响）。
+func TestHelloDevidNameOmittedWhenEmpty(t *testing.T) {
+	b, err := sendJSONForTest(Hello{frameBase: frame(TypeHello), Client: "cabinet-phone", Ver: "0.1.0", Caps: []string{CapV1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"v":1,"t":"hello","client":"cabinet-phone","ver":"0.1.0","caps":["v1"]}`
+	if string(b) != want {
+		t.Fatalf("零值 devid/name 不应出现\n got: %s\nwant: %s", b, want)
+	}
+}
+
+// TestSanitizeName 设备昵称规整（session.go）：trim、去控制字符、限长 24 字符。
+func TestSanitizeName(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"  Pixel 8  ", "Pixel 8"},
+		{"名\x01字\x07测\x1F试", "名字测试"},
+		{strings.Repeat("长", 30), strings.Repeat("长", 24)},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := sanitizeName(c.in); got != c.want {
+			t.Fatalf("sanitizeName(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestDevidRegexp 设备标识校验（session.go）：16~32 hex 之外一律拒收。
+func TestDevidRegexp(t *testing.T) {
+	valid := []string{"0123456789abcdef", "0123456789ABCDEF0123456789abcdef", "0123456789abcdef0123456789abcdef"}
+	for _, v := range valid {
+		if !devidRegexp.MatchString(v) {
+			t.Fatalf("合法 devid 被拒: %q", v)
+		}
+	}
+	invalid := []string{"", "short", "0123456789abcde", strings.Repeat("a", 33), "0123456789abcdefg"}
+	for _, v := range invalid {
+		if devidRegexp.MatchString(v) {
+			t.Fatalf("非法 devid 被放行: %q", v)
+		}
 	}
 }
 

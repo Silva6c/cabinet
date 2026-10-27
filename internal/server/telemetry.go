@@ -99,10 +99,16 @@ func (s *Server) handleLogFrame(c *Conn, m *Log) {
 	if len(short) > 8 {
 		short = short[:8]
 	}
+	// 会话标记带设备昵称（2026-10-28 设备昵称功能）：多台手机各自落盘时一眼
+	// 分清归属；旧手机端未上报昵称时保持纯会话 ID 形态不变
+	tag := short
+	if name := c.Identity().Name; name != "" {
+		tag = short + "/" + name
+	}
 	for _, line := range m.Lines {
 		b.WriteString(now)
 		b.WriteString(" [")
-		b.WriteString(short)
+		b.WriteString(tag)
 		b.WriteString("] ")
 		b.WriteString(line)
 		b.WriteByte('\n')

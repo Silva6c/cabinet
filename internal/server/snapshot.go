@@ -27,6 +27,8 @@ type ClientSnap struct {
 	FullID      string // 完整会话 ID（控制台"断开会话"按此定位，不显示）
 	Client      string // hello 自报标识，未鉴权时为空
 	Ver         string
+	Devid       string // hello 自报设备稳定标识（已过 16~32 hex 校验；空 = 旧端未上报）
+	Name        string // hello 自报设备昵称（已规整限长；空 = 旧端未上报）
 	Authed      bool
 	RTTMs       int64
 	Path        string

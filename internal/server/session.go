@@ -4,7 +4,10 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"regexp"
+	"strings"
 	"time"
+	"unicode"
 
 	"github.com/gorilla/websocket"
 )
@@ -13,6 +16,26 @@ var upgrader = websocket.Upgrader{
 	ReadBufferSize:  4096,
 	WriteBufferSize: 4096,
 	CheckOrigin:     func(*http.Request) bool { return true },
+}
+
+// devidRegexp 设备稳定标识校验（协议 §4.1：16~32 hex）——不匹配的 hello 自报
+// devid 直接丢弃（展示字段防滥用，不信任对端）。
+var devidRegexp = regexp.MustCompile(`^[0-9a-fA-F]{16,32}$`)
+
+// sanitizeName 设备昵称规整（协议 §4.1）：trim、去控制字符、限长 24 字符。
+// 昵称直进控制台设备列表与手机日志落盘，防御性规整不信任对端自报值。
+func sanitizeName(s string) string {
+	s = strings.TrimFunc(s, unicode.IsSpace)
+	runes := make([]rune, 0, 24)
+	for _, r := range s {
+		if len(runes) >= 24 {
+			break
+		}
+		if !unicode.IsControl(r) {
+			runes = append(runes, r)
+		}
+	}
+	return string(runes)
 }
 
 // serveWS 单连接生命周期：upgrade → PC 先发 hello → 鉴权窗口 → 主循环。
@@ -103,8 +126,17 @@ func (s *Server) handshake(c *Conn, ws *websocket.Conn) bool {
 		switch m := msg.(type) {
 		case *Hello:
 			if m.Client != "" {
-				c.Client, c.Ver = m.Client, m.Ver
-				c.log.Info("客户端 hello", "client", m.Client, "ver", m.Ver, "caps", m.Caps)
+				// 设备昵称功能（协议 §4.1）：devid/name 防御性规整后随身份原子
+				// 落会话——展示字段直进控制台表格与日志落盘，不信任对端自报值
+				id := identity{Client: m.Client, Ver: m.Ver, Name: sanitizeName(m.Name)}
+				if devidRegexp.MatchString(m.Devid) {
+					id.Devid = m.Devid
+				} else if m.Devid != "" {
+					c.log.Debug("hello devid 非法（应为 16~32 hex），忽略", "devid", m.Devid)
+				}
+				c.SetIdentity(id)
+				c.log.Info("客户端 hello", "client", m.Client, "ver", m.Ver,
+					"devid", id.Devid, "name", id.Name, "caps", m.Caps)
 			}
 		case *Auth:
 			if !ValidateToken(m.Token, s.cfg.Token) {
@@ -130,7 +162,8 @@ func (s *Server) handshake(c *Conn, ws *websocket.Conn) bool {
 				c.log.Warn("发送 welcome 失败", "err", err)
 				return false
 			}
-			c.log.Info("鉴权通过，会话建立", "client", c.Client, "ver", c.Ver)
+			ident := c.Identity()
+			c.log.Info("鉴权通过，会话建立", "client", ident.Client, "ver", ident.Ver, "name", ident.Name)
 			return true
 		default:
 			// 握手窗口内的业务帧：提示但不踢，由 10s 窗口兜底（协议 §3）

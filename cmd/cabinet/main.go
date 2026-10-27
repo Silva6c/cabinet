@@ -350,7 +350,8 @@ func run(configPath, resourceRoot string, noTray bool) error {
 			clients := make([]console.ClientRow, 0, len(s.Clients))
 			for _, cl := range s.Clients {
 				clients = append(clients, console.ClientRow{
-					Session: cl.SessionID, FullID: cl.FullID, Client: cl.Client, Ver: cl.Ver, Authed: cl.Authed,
+					Session: cl.SessionID, FullID: cl.FullID, Devid: cl.Devid, Name: cl.Name,
+					Client: cl.Client, Ver: cl.Ver, Authed: cl.Authed,
 					RTTMs: cl.RTTMs, Path: cl.Path, LastPos: cl.LastPos, Fen: cl.Fen,
 				})
 			}

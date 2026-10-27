@@ -28,9 +28,12 @@ type Conn struct {
 	// 依赖"最坏读到旧值只影响一帧"的弱一致论证，2026-10-27 按原注释规划加固为
 	// atomic.Bool（数据竞争在 -race 下是硬错误，弱一致不豁免）。
 	authed atomic.Bool
-	// Client/Ver 对端自报标识与版本（hello 帧内容），用于日志
-	Client string
-	Ver    string
+	// ident 对端自报身份（hello 帧内容，见 identity）。atomic.Value 整体原子
+	// 换：写侧仅握手 goroutine（重复 hello 后到覆盖先到），读侧为控制台刷新/
+	// 日志落盘/管理日志——此前 Client/Ver 是普通 string 跨 goroutine 无同步边
+	// （-race 硬错误隐患，与 authed 加固同理），2026-10-28 随 devid/name 引入
+	// 一并收编
+	ident atomic.Value // 恒存 identity 结构体（Identity/SetIdentity 读写）
 	// log 本连接专属日志字段
 	log *slog.Logger
 
@@ -40,6 +43,27 @@ type Conn struct {
 	lastPosAt   atomic.Int64 // 最近一次 position 时刻（Unix 毫秒；0 = 未发过）
 	lastFen     atomic.Value // 最近一次 position 的 fen（string；控制台"最后 position"列）
 	rttMs       atomic.Int64 // 最近一次 PC ping → pong 往返毫秒（-1 = 尚未测得）
+}
+
+// identity 对端自报身份（hello 帧自报字段快照）。Devid/Name 为 2026-10-28
+// 设备昵称功能新增（协议 §4.1 可选字段）；Name 已在握手期经 sanitizeName
+// 规整、Devid 经 devidRegexp 校验，此处存的是展示就绪值。
+type identity struct {
+	Client string
+	Ver    string
+	Devid  string
+	Name   string
+}
+
+// SetIdentity 握手期写入对端身份（整体原子换，后到覆盖先到）。
+func (c *Conn) SetIdentity(i identity) { c.ident.Store(i) }
+
+// Identity 读当前身份快照（未收到客户端 hello 时返回零值）。
+func (c *Conn) Identity() identity {
+	if v, ok := c.ident.Load().(identity); ok {
+		return v
+	}
+	return identity{}
 }
 
 // NewConn 创建会话包装并生成会话 ID。
@@ -123,11 +147,14 @@ func (h *Hub) Snapshots() []ClientSnap {
 	defer h.mu.Unlock()
 	out := make([]ClientSnap, 0, len(h.conns))
 	for c := range h.conns {
+		ident := c.Identity()
 		snap := ClientSnap{
 			SessionID:   shortID(c.ID),
 			FullID:      c.ID, // 管理操作（断开会话）按完整 ID 定位
-			Client:      c.Client,
-			Ver:         c.Ver,
+			Client:      ident.Client,
+			Ver:         ident.Ver,
+			Devid:       ident.Devid,
+			Name:        ident.Name,
 			Authed:      c.authed.Load(),
 			RTTMs:       c.rttMs.Load(),
 			Path:        "LAN", // M4 中继上线后按连接来源区分
@@ -177,7 +204,7 @@ func (h *Hub) Disconnect(sessionID, reason string) bool {
 		_ = target.ws.WriteControl(websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocket.CloseNormalClosure, reason), deadline)
 		_ = target.Close()
-		h.log.Info("手动断开会话", "session", target.ID, "client", target.Client, "reason", reason)
+		h.log.Info("手动断开会话", "session", target.ID, "client", target.Identity().Client, "reason", reason)
 	}()
 	return true
 }

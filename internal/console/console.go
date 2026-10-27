@@ -61,6 +61,8 @@ type EngineStat struct {
 type ClientRow struct {
 	Session string // 已缩略的会话 ID
 	FullID  string // 完整会话 ID（断开会话用，不显示）
+	Devid   string // hello 自报设备稳定标识（空 = 旧端未上报）
+	Name    string // hello 自报设备昵称（空 = 旧端未上报）
 	Client  string
 	Ver     string
 	Authed  bool
