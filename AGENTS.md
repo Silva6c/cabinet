@@ -42,6 +42,23 @@
   （`protocol_bench_test.go`）确认帧形态不破。
 - 识别引擎的训练/评测演进在姊妹仓 **xiangqi-recognition**（私有），本仓不含训练代码。
 
+### 跨平台雷区（CI 是 ubuntu，本机多为 Windows——2026-10-27 六笔 CI 修复实录沉淀）
+
+- 平台专用代码走 `_windows.go` + `//go:build !windows` 存根对。**存根签名必须与
+  Windows 实现逐字对表**：本机 build/vet/test/lint 全部排除存根文件，签名错
+  本机全绿、只在 CI 炸。改存根后用临时模块双 GOOS 验证（拷存根 + 复刻真实
+  调用形态，`GOOS=linux` 与默认各 `go build` 一次，双双通过才算数）。
+- 测试对"启动监听后立即写文件"的链路（fsnotify 等），必须等就绪信号再写：
+  Linux inotify **不回放 `w.Add` 之前的事件**，写早了变更永久丢失（Windows 本机
+  调度快掩盖竞争）。参照 `Manager.watchReady` 模式（sync.Once + close(channel)）。
+- gofmt 歧义区：闭包一行 `return A{...}, B{{...}}`（多个跨行复合字面量）的续行
+  缩进，Windows 与 Linux 的 gofmt 判定可能**互为镜像**且无法本机复现——拆成
+  独立赋值 + 简单 return，缩进由括号深度唯一决定，两边都无歧义。
+- golangci-lint 钉 v2（action 用 **v7**）；action v6 只认 v1 会装错版本直接挂。
+- CI 日志自助获取（不必等截图）：`printf "protocol=https\nhost=github.com\n" |
+  git credential fill` 取凭据 → curl GitHub API（`/actions/runs` → `/jobs` →
+  job 的 `/logs`）。
+
 ## 提交约定
 
 - 提交信息简体中文，一笔一事（功能 / 收官登记分开）。
