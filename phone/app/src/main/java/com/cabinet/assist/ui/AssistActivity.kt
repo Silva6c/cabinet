@@ -76,6 +76,7 @@ class AssistActivity : AppCompatActivity() {
     private lateinit var etServerUrl: EditText
     private lateinit var etServerToken: EditText
     private lateinit var etServerFingerprint: EditText
+    private lateinit var etDeviceName: EditText
     private lateinit var bgScroll: ScrollView
 
     /** 卡片状态 chip 语义档（描边与文字色成对切换） */
@@ -198,14 +199,18 @@ class AssistActivity : AppCompatActivity() {
         etServerUrl = findViewById(R.id.et_server_url)
         etServerToken = findViewById(R.id.et_server_token)
         etServerFingerprint = findViewById(R.id.et_server_fingerprint)
+        etDeviceName = findViewById(R.id.et_device_name)
         btnTestConnect = findViewById(R.id.btn_test_connect)
         btnTestConnect?.setOnClickListener { testConnection() }
         etServerUrl.setText(cfg.serverUrl)
         etServerToken.setText(cfg.serverToken)
         etServerFingerprint.setText(cfg.certFingerprint)
+        etDeviceName.setText(cfg.deviceName)
         etServerUrl.addTextChangedListener(saveOnChanged { cfg.serverUrl = it })
         etServerToken.addTextChangedListener(saveOnChanged { cfg.serverToken = it })
         etServerFingerprint.addTextChangedListener(saveOnChanged { cfg.certFingerprint = it })
+        // 设备昵称（协议 §4.1 hello 自报）：清空 = 回退默认机型名（getter 兜底）
+        etDeviceName.addTextChangedListener(saveOnChanged { cfg.deviceName = it })
 
         // 悬浮窗背景主题：三选一，切换即时应用到运行中的悬浮窗
         val rgTheme = findViewById<RadioGroup>(R.id.rg_overlay_theme)
@@ -388,7 +393,8 @@ class AssistActivity : AppCompatActivity() {
                 finishTest("电脑端返回错误：$message", ok = false)
             }
         }
-        testClient = RemoteAnalysisClient(url, token, listener, certFingerprint = fingerprint)
+        testClient = RemoteAnalysisClient(url, token, listener, certFingerprint = fingerprint,
+            deviceName = AssistConfig(this).deviceName, deviceId = AssistConfig(this).deviceId)
             .also { it.start() }
         statusHandler.postDelayed(testTimeoutRunnable, 10_000)
     }

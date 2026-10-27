@@ -146,7 +146,8 @@ class ScreenAssistService : Service() {
                 return@post
             }
             remote = RemoteAnalysisClient(config.serverUrl, config.serverToken, remoteListener,
-                certFingerprint = config.certFingerprint)
+                certFingerprint = config.certFingerprint, deviceName = config.deviceName,
+                deviceId = config.deviceId)
                 .also { it.start() }
             RLog.i(TAG, "连接配置已热更新: ${config.serverUrl}")
         }
@@ -617,7 +618,8 @@ class ScreenAssistService : Service() {
             setStatus("未配置电脑地址/令牌\n请在连线页填写后重试")
         } else {
             remote = RemoteAnalysisClient(config.serverUrl, config.serverToken, remoteListener,
-                certFingerprint = config.certFingerprint)
+                certFingerprint = config.certFingerprint, deviceName = config.deviceName,
+                deviceId = config.deviceId)
                 .also { it.start() }
             // B3 录屏重启补发（2026-10-24）：录屏重启保留 tracker/currentFen 但
             // remote 是全新实例（lastPositionFen=null），且画面未变恒 SAME_BOARD

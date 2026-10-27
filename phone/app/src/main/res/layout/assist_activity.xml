@@ -185,6 +185,23 @@
                 android:textColorHint="@color/qi_dim"
                 android:textSize="13sp" />
 
+            <!-- 设备昵称（可选）：上报 PC 控制台设备列表区分多台手机，默认取机型 -->
+            <EditText
+                android:id="@+id/et_device_name"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/qi_sp_2"
+                android:background="@drawable/home_edit"
+                android:hint="设备昵称（默认取机型，电脑端列表区分多台手机）"
+                android:inputType="text"
+                android:maxLength="24"
+                android:minHeight="@dimen/qi_input_h"
+                android:paddingLeft="@dimen/qi_sp_3"
+                android:paddingRight="@dimen/qi_sp_3"
+                android:textColor="@color/qi_ivory"
+                android:textColorHint="@color/qi_dim"
+                android:textSize="13sp" />
+
             <!-- 证书指纹（可选）：低频路径默认收起为一行文本级入口 -->
             <TextView
                 android:id="@+id/tv_fp_toggle"

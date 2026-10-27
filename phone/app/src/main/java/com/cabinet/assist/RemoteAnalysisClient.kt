@@ -51,6 +51,10 @@ class RemoteAnalysisClient(
     private val listener: Listener,
     /** 证书 SHA-256 指纹（64 位 hex）；非空 = 锁定校验，空 = 联调模式信任所有证书 */
     private val certFingerprint: String = "",
+    /** 设备昵称（协议 §4.1 hello 可选自报字段；空 = 不携带，与旧端形态一致） */
+    private val deviceName: String = "",
+    /** 设备稳定标识（首启随机 32 hex；仅展示用途，PC 端不作为鉴权依据） */
+    private val deviceId: String = "",
 ) {
     interface Listener {
         /** 连接状态变化（状态栏显示） */
@@ -413,6 +417,10 @@ class RemoteAnalysisClient(
                     put("v", PROTO_VERSION); put("t", "hello")
                     put("client", CLIENT_NAME); put("ver", CLIENT_VER)
                     put("caps", org.json.JSONArray().put(CAP_V1))
+                    // 设备昵称功能（协议 §4.1）：自报 devid/name 供 PC 设备列表区分
+                    // 多台手机；空值不携带（与旧端 hello 字节形态一致，§7 宽容语义）
+                    if (deviceName.isNotEmpty()) put("name", deviceName)
+                    if (deviceId.isNotEmpty()) put("devid", deviceId)
                 }
                 webSocket.send(hello.toString())
                 send(AuthFrame(token = token))

@@ -1,6 +1,8 @@
 package com.cabinet.assist
 
 import android.content.Context
+import android.os.Build
+import java.util.UUID
 
 /**
  * 连线功能的持久化配置（SharedPreferences）。
@@ -146,6 +148,31 @@ class AssistConfig(context: Context) {
         get() = sp.getInt(KEY_ENG_MULTI_PV, 1).coerceIn(1, 3)
         set(value) { sp.edit().putInt(KEY_ENG_MULTI_PV, value.coerceIn(1, 3)).apply() }
 
+    /**
+     * 设备稳定标识（协议 §4.1 hello 可选自报字段 devid）：首启随机生成 32 hex
+     * 并持久化，用于 PC 端跨重连区分设备。仅展示用途（PC 端不作为鉴权依据）；
+     * 与配对信息同生命周期——重装/清数据 = 重新扫码 = 新身份，语义自洽。
+     */
+    val deviceId: String
+        get() {
+            sp.getString(KEY_DEVICE_ID, null)?.let { return it }
+            val id = UUID.randomUUID().toString().replace("-", "")
+            sp.edit().putString(KEY_DEVICE_ID, id).apply()
+            return id
+        }
+
+    /**
+     * 设备昵称（hello 可选自报字段 name，PC 控制台设备列表显示）：默认取
+     * 机型（Build.MODEL，开箱即有意义），主页可编辑。PC 端会再做防御性规整
+     * （trim/去控制字符/限长 24），此处同步限长减少无谓往返差异。
+     */
+    var deviceName: String
+        get() = sp.getString(KEY_DEVICE_NAME, null)?.trim().takeUnless { it.isNullOrEmpty() }
+            ?: Build.MODEL
+        set(value) {
+            sp.edit().putString(KEY_DEVICE_NAME, value.trim().take(24)).apply()
+        }
+
     companion object {
         private const val KEY_SERVER_URL = "server_url"
         private const val KEY_SERVER_TOKEN = "server_token"
@@ -167,6 +194,8 @@ class AssistConfig(context: Context) {
         private const val KEY_ENG_MULTI_PV = "engine_multi_pv"
         private const val KEY_SINGLE_MOVE_REPAIR = "single_move_repair"
         private const val KEY_LAST_CONFIRMED_FEN = "last_confirmed_fen"
+        private const val KEY_DEVICE_ID = "device_id"
+        private const val KEY_DEVICE_NAME = "device_name"
 
         /**
          * 指纹归一化：去冒号/空格分隔、转小写，容忍 "AA:BB:.." / "aabb.." 两种写法；
