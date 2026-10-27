@@ -13,6 +13,6 @@ func RuleExists(_ string) (bool, error) { return true, nil }
 
 // Allow 非 Windows 不支持一键放行；正常流程到不了这里（RuleExists 恒 true
 // → 告警不出现 → 放行入口不显示），防御性返回错误而非静默成功。
-func Allow(_, _ int) error {
+func Allow(_ string, _ int) error {
 	return errors.New("防火墙一键放行仅 Windows 支持")
 }
