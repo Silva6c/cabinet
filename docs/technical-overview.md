@@ -280,12 +280,17 @@ flowchart LR
 | `recognizerEngine` | `"onnx"` | 识别引擎 onnx/yolo（主页单选即时切换） |
 | `useNnapi` | false | YOLO NNAPI 加速（默认关） |
 | `confirmCount` | 3 | 稳定确认帧数 1..8 |
-| `engineDepth` / `engineHashMB` | 20 / 256 | set_engine 档位循环值 |
+| `singleMoveRepair` | true | 走子连贯性修正：确认时刻枚举单步走子解释"差 1 格"漏检并修正 |
+| `engineDepth` / `engineHashMB` / `engineThreads` | 20 / 256 / 0 | set_engine 档位循环值（threads 0 = 自动档） |
+| `engineMultiPv` | 1 | 变招路数档位（悬浮窗按钮循环，1–5） |
+| `benchProfiling` | false | 识别分段计时（每次识别多打一条 timing 日志；诊断开关，adb 改 shared_prefs） |
 | `overlayPos` / `overlayDetailPos` / `overlayTheme` | — | 双窗位置（归一化）与主题 |
 
 模型资产（不进 git，另行分发）：`assets/yolov5n_xq_fp16.tflite`（3.8MB）、
-`assets/models/4_v6-0301.onnx`（RTMPose，10.7MB）、`assets/models/nano_v3-0319.onnx`
-（Swin 分类，31.1MB）。
+`assets/models/4_v6-0301.onnx`（RTMPose 角点，10.7MB）、`assets/models/nano_v3-0319.onnx`
+（Swin 分类，10.9MB 动态量化版——int8 权重 + fp32 激活；上游发布的 fp32 原版 31.1MB
+不进包，留作精度参照）。推理加速：arm64 真机启用 XNNPACK + 4 线程（x86_64 模拟器
+上 XNNPACK 会 native 崩溃，已实测，按主 ABI 门控恒走纯 CPU；EP 创建失败自动回退）。
 
 ## 5. 安全模型
 
