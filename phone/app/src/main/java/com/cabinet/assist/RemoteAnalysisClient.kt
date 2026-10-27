@@ -514,6 +514,11 @@ class RemoteAnalysisClient(
     private fun send(any: Any) {
         val socket = ws ?: return
         if (!started) return
+        // 业务帧等 welcome 再放行：TCP 已 open 但握手（hello+auth+welcome）未完成时，
+        // PC 对 position/set_engine 回 error{auth_required}（2026-10-27 局3 实录：服务
+        // 重启瞬间恢复的 pending position 在 ws open 后、welcome 前发出，控制台/悬浮窗
+        // 闪一次"请先完成握手"）。welcome 处理器会用 lastPositionFen 自动补发，丢弃无损
+        if ((any is PositionFrame || any is SetEngineFrame) && state != ConnectionState.CONNECTED) return
         if (!socket.send(toJson(any).toString())) {
             RLog.w(TAG, "发送失败（连接已断），等待重连")
         }

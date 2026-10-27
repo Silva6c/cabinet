@@ -58,6 +58,10 @@
 - CI 日志自助获取（不必等截图）：`printf "protocol=https\nhost=github.com\n" |
   git credential fill` 取凭据 → curl GitHub API（`/actions/runs` → `/jobs` →
   job 的 `/logs`）。
+- 本机 `go vet ./...` 会扫 `_windows.go`（CI ubuntu 不扫）：`LazyProc.Call` 参数里
+  的 `uintptr(unsafe.Pointer(...))`（如 `firewall_windows.go` 的 ShellExecuteW）
+  是官方豁免的 syscall 惯用法，vet 原生命令不识别 LazyProc 场景会报 misuse——
+  已注释 + `//nolint:govet` 双豁免，属已知误报，勿为消警改写 API 调用形态。
 
 ## 提交约定
 

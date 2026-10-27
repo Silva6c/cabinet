@@ -42,33 +42,79 @@ type boardGrid struct {
 	cells [10][9]byte // [y][x]，y=0 为 FEN 首行（黑方底线），红方在 y=9
 }
 
-// pieceZonesLegal 校验子力区域规则：将/帅与仕必须在各自九宫（x 3..5，黑 y 0..2、
-// 红 y 7..9），相/象不得过河（黑 y≤4、红 y≥5）。皮卡鱼对违反者报
-// "Unsupported position" 并立即退出（2026-10-01 第二轮审查实测三类全中）。
+// pieceZonesLegal 校验子力区域规则：将/帅在各自九宫（x 3..5，黑 y 0..2、
+// 红 y 7..9），仕/相按点位白名单（advisorSpot/elephantSpot）。皮卡鱼对违反者报
+// "Unsupported position" 并立即退出（2026-10-01 第二轮审查实测将/仕出九宫、
+// 相过河三类全中；2026-10-27 补刀：仕/相在半场内但不在点位上同样秒退——半天
+// 实战四炸全是这一类，旧版对仕相只查九宫/不过河、对相只查 y 方向，拦不住）。
 func pieceZonesLegal(b *boardGrid) bool {
 	for y := 0; y < 10; y++ {
 		for x := 0; x < 9; x++ {
 			switch b.cells[y][x] {
-			case 'k', 'a': // 黑将/黑仕：黑方九宫
+			case 'k': // 黑将：黑方九宫
 				if x < 3 || x > 5 || y > 2 {
 					return false
 				}
-			case 'K', 'A': // 红帅/红仕：红方九宫
+			case 'K': // 红帅：红方九宫
 				if x < 3 || x > 5 || y < 7 {
 					return false
 				}
-			case 'b': // 黑象：不过河
-				if y > 4 {
+			case 'a': // 黑仕
+				if !advisorSpot(x, y, false) {
 					return false
 				}
-			case 'B': // 红相：不过河
-				if y < 5 {
+			case 'A': // 红仕
+				if !advisorSpot(x, y, true) {
+					return false
+				}
+			case 'b': // 黑象
+				if !elephantSpot(x, y, false) {
+					return false
+				}
+			case 'B': // 红相
+				if !elephantSpot(x, y, true) {
 					return false
 				}
 			}
 		}
 	}
 	return true
+}
+
+// advisorSpot 仕/士点位白名单（宫斜 5 点，黑表直接判、红方镜像 row=9-y 共用）：
+// 底线 row0 x∈{3,5}、中宫 row1 x=4、顶线 row2 x∈{3,5}。真实对局仕只可能站在这
+// 5 点上，识别出九宫内非点位的"仕"必为误识别——拦下走 bad_position 自愈重探，
+// 不会误伤真实局面。
+func advisorSpot(x, y int, red bool) bool {
+	row := y
+	if red {
+		row = 9 - y
+	}
+	switch row {
+	case 0, 2:
+		return x == 3 || x == 5
+	case 1:
+		return x == 4
+	}
+	return false
+}
+
+// elephantSpot 相/象点位白名单（田字 7 点，镜像同 advisorSpot）：底线 row0 与
+// 河沿 row4 各 x∈{2,6}、中排 row2 x∈{0,4,8}。点位本身全在本方半场，旧版
+// "不过河"约束内含其中——2026-10-27 半天四炸（BLACK/WHITE bishop(s) on
+// invalid positions）全是"半场内、非点位"的误识别穿透旧校验直达皮卡鱼。
+func elephantSpot(x, y int, red bool) bool {
+	row := y
+	if red {
+		row = 9 - y
+	}
+	switch row {
+	case 0, 4:
+		return x == 2 || x == 6
+	case 2:
+		return x == 0 || x == 4 || x == 8
+	}
+	return false
 }
 
 type kingPos struct{ x, y int }
