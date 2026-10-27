@@ -48,13 +48,14 @@ jobs:
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null 2>&1 || true
           ./gradlew :app:assembleArmv8DotprodRelease --no-daemon --console=plain
 
-      - name: 按交付惯例改名
+      - name: 按交付惯例改名（ABI 分包：arm64 主交付 + x86_64 模拟器）
         run: |
           VC=$(git rev-list HEAD --count)
           if [ "$VC" -lt 275 ]; then VC=275; fi # 与 build.gradle.kts 的下限对齐
           DATE=$(date +%Y%m%d)
-          SRC=phone/app/build/outputs/apk/Armv8Dotprod/release/app-Armv8Dotprod-release.apk
-          cp "$SRC" "cabinet_${DATE}_vc${VC}_Armv8Dotprod.apk"
+          OUT=phone/app/build/outputs/apk/Armv8Dotprod/release
+          cp "$OUT/app-Armv8Dotprod-arm64-v8a-release.apk" "cabinet_${DATE}_vc${VC}_arm64.apk"
+          cp "$OUT/app-Armv8Dotprod-x86_64-release.apk" "cabinet_${DATE}_vc${VC}_x86_64.apk"
           ls -la cabinet_*.apk
 
       - name: 上传 artifact

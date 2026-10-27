@@ -36,6 +36,19 @@ android {
         create("Armv8Dotprod") { dimension = "channel" }
     }
 
+    // ABI 分包（2026-10-28 用户定）：ORT 1.31.1 so 翻倍后 4 ABI 全带让 APK 膨胀到
+    // 184MB——只发有真实运行环境的包：arm64-v8a（全部真机）+ x86_64（模拟器联调）。
+    // 32 位 armeabi-v7a/x86 无对应运行场景，直接排除不构建。各包同 versionCode
+    // （自分发不经 Play，不存在分包 versionCode 区分要求）。
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("arm64-v8a", "x86_64")
+            isUniversalApk = false
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
