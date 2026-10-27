@@ -32,8 +32,8 @@ jobs:
         run: go test ./...
 
       - name: lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v7
         with:
-          # 钉 v2：本仓 .golangci.yml 是 v2 配置格式（formatters/linters 分离），
-          # v1 二进制解析不了；version: latest 曾被解析到 v1.64.8 导致 lint 必挂
+          # 钉 v2：本仓 .golangci.yml 是 v2 配置格式（formatters/linters 分离）；
+          # action v6 不支持 v2（曾解析到 v1.64.8 直接报不支持），必须 v7
           version: v2.15
