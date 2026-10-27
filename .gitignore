@@ -57,3 +57,6 @@ phone/tools/evidence/
 
 # 模型库（三家对照模型集中管理，大二进制不进 git）
 /模型库/
+
+# 构建资产上传暂存（版权物 zip，待用户发话再传 GitHub Release assets）
+/dist-upload/

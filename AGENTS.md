@@ -11,6 +11,10 @@
 3. **docs/protocol-v1.md** —— WSS 协议 v1 定稿：帧结构、字段名、错误码全部钉死，
    **实现照协议抄，改协议先改文档**。
 4. 改 UI 前读 **docs/美学设计研究.md**（色板 token 与布局依据）。
+5. **识别引擎的训练/评测/权重演进在姊妹仓 `D:\AI-works\xiangqi-recognition`**
+   （独立 GPLv3 项目）：冷启动读其 **AGENTS.md**——当前状态在其
+   `docs/训练工作台账.md`，方法史在其 `docs/训练方法史-v1到v34.md`；
+   本仓 `phone/tools/recog` 已冻结为历史基线，严禁在此起训练。
 
 ## 目录地图
 
@@ -40,7 +44,8 @@
 - Android 端：`./gradlew :app:testArmv8DotprodDebugUnitTest`。
 - 协议改动：跑 `internal/server` 的 golden 锚测试
   （`protocol_bench_test.go`）确认帧形态不破。
-- 识别引擎的训练/评测演进在姊妹仓 **xiangqi-recognition**（私有），本仓不含训练代码。
+- 识别引擎的训练/评测演进在姊妹仓 **xiangqi-recognition**（独立 GPLv3 开源项目
+  `github.com/Silva6c/xiangqi-recognition`），本仓不含训练代码。
 
 ### 跨平台雷区（CI 是 ubuntu，本机多为 Windows——2026-10-27 六笔 CI 修复实录沉淀）
 
