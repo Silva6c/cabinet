@@ -86,6 +86,21 @@
   zip）已一次性上传到本仓 Release 的 **assets 标签**（版权红线不进 git，
   构建时 `gh release download` 注入）；缺资产时构建失败提示上传，不产残废包。
 - 本地日常构建照旧不受影响：APK `:app:assembleArmv8DotprodRelease`
-  （输出名 `cabinet_日期_vc<提交数>_变体.apk`，versionCode 下限 275）；
+  （ABI 分包输出 `cabinet_日期_vc<提交数>_arm64.apk` 真机交付 + `_x86_64.apk`
+  模拟器联调，versionCode 下限 275）；
   exe/便携 zip `scripts/package-portable.bat`（版本注入已与 build-exe.bat
   对齐，CI windows runner 自动回退自带 MinGW）。
+
+## 依赖升级挂账（2026-10-28 巡检定，三档）
+
+- **可升未升**（有前置或需回归窗口，等用户点头分批做）：Go 补丁 1.26.10 +
+  fyne 2.8.2/x-text 0.43.0/sqlite 1.61.0 一批；Kotlin 1.9.24→2.4.21（解锁
+  okhttp 5 与 ktlint 重评估）；AGP 8.8.2→8.13.2 + Gradle 8.14.6。
+- **挂账**（前置未满足）：okhttp 5（强制 Kotlin 2.x）；androidx 三件套
+  （要 compileSdk 36.1，且 targetSdk 35 起强制 edge-to-edge 对悬浮窗是真实
+  行为变更，升前须专项验证）；tflite→LiteRT（tflite 停更 21 个月，先盘问
+  YOLO 已走 onnxruntime 后 tflite 是否还需要）；AGP 9 / Go 1.27（等生态）。
+- **不动**：zxing（上游停滞 5 年无风险驱动）、junit4、go-qrcode（停滞 6 年）、
+  systray 伪版本（比最新 tag 新）。
+- XNNPACK 已放弃（2026-10-28）：分类模型主力算子 MatMulInteger 不受支持、
+  收益上限 <5%，上游 #32298 未修——详见 technical-overview §4.3。

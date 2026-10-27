@@ -60,7 +60,7 @@
 ## 4. onnxruntime-android — MIT
 
 - 用途：手机端识别引擎（ONNX 推理运行时）
-- 版本：1.17.1；许可：MIT License
+- 版本：1.31.1；许可：MIT License
 - 来源：https://github.com/microsoft/onnxruntime
 
 ## 5. Android 端其他依赖（build.gradle.kts）

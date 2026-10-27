@@ -231,7 +231,9 @@ sequenceDiagram
 ## 4. 手机端模块详解（Android，minSdk 26 / target 34）
 
 依赖：OkHttp 4.12（WSS）、zxing-embedded 4.3（扫码）、tensorflow-lite 2.14（YOLO）、
-onnxruntime-android 1.17.1（ONNX）。applicationId `com.cabinet`。
+onnxruntime-android 1.31.1（ONNX，2026-10-28 升级，16KB page size 对齐）。applicationId
+`com.cabinet`。构建按 ABI 分包：arm64-v8a（真机交付，约 66MB）+ x86_64（模拟器联调），
+32 位 ABI 不再构建。
 
 ### 4.1 识别管线（双引擎）
 
@@ -289,8 +291,10 @@ flowchart LR
 模型资产（不进 git，另行分发）：`assets/yolov5n_xq_fp16.tflite`（3.8MB）、
 `assets/models/4_v6-0301.onnx`（RTMPose 角点，10.7MB）、`assets/models/nano_v3-0319.onnx`
 （Swin 分类，10.9MB 动态量化版——int8 权重 + fp32 激活；上游发布的 fp32 原版 31.1MB
-不进包，留作精度参照）。推理加速：arm64 真机启用 XNNPACK + 4 线程（x86_64 模拟器
-上 XNNPACK 会 native 崩溃，已实测，按主 ABI 门控恒走纯 CPU；EP 创建失败自动回退）。
+不进包，留作精度参照）。推理为纯 CPU EP 4 线程；XNNPACK 已于 2026-10-28 经算子
+定量分析放弃：分类模型（耗时大头）主力算子 MatMulInteger 不受 XNNPACK 支持，
+收益上限 <5%，且上游 XNNPACK EP 在含 Resize 的模型上有未修崩溃（onnxruntime
+#32298）、x86_64 模拟器实测 native 崩溃——重新启用需升级 ORT 后真机对拍验证。
 
 ## 5. 安全模型
 
