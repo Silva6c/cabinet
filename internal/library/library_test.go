@@ -172,6 +172,14 @@ func TestRunDebounceReload(t *testing.T) {
 	errCh := make(chan error, 1)
 	go func() { errCh <- m.Run(ctx) }()
 
+	// 等 Run 的监听就绪再写文件：inotify 不回放 w.Add 前的目录事件，
+	// 写早了变更永久丢失（CI Linux runner 冷启动慢，曾致 fired 恒 1）
+	select {
+	case <-m.watchReady:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run 监听未就绪")
+	}
+
 	// 合法库打成 .obk.zip 落入监听目录
 	data, err := os.ReadFile(filepath.Join(dir, "b1.obk"))
 	if err != nil {

@@ -29,11 +29,19 @@ type Manager struct {
 	store *book.Store
 	// onChange 库集合重建完成后的回调（server.SetBook；nil 忽略）
 	onChange func(*book.Store)
+
+	// watchReady Run 建立 fsnotify 监听后关闭的一次性信号。inotify/热加载
+	// 语义：Add 之前落在目录里的文件不会产生事件（Linux inotify 不回放），
+	// 调用方须等本信号再写文件才能保证被感知（测试同步点；生产毫秒级窗口
+	// 内的漏事件由 reload 全量 unzipAll 在下次事件时自愈，无实际影响）。
+	// readyOnce 保证 Run 只 close 一次，可安全并发等待。
+	watchReady chan struct{}
+	readyOnce  sync.Once
 }
 
 // New 创建管理器并立即做一次初始加载。
 func New(dir string, logger *slog.Logger, onChange func(*book.Store)) (*Manager, error) {
-	m := &Manager{dir: dir, log: logger, onChange: onChange}
+	m := &Manager{dir: dir, log: logger, onChange: onChange, watchReady: make(chan struct{})}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
@@ -105,6 +113,8 @@ func (m *Manager) Run(ctx context.Context) error {
 	if err := w.Add(m.dir); err != nil {
 		return err
 	}
+	// 监听已就绪：此后落盘的文件事件必被感知（见 watchReady 注释）
+	m.readyOnce.Do(func() { close(m.watchReady) })
 	if m.log != nil {
 		m.log.Info("库目录监听中", "dir", m.dir)
 	}
