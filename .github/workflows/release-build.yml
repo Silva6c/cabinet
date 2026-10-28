@@ -1,0 +1,125 @@
+# 稳定版自动构建：APK + 便携 zip。
+# —— 只有人工确认的稳定版本才 push/tag；tag stable-* 触发本构建并挂 Release。
+# 普通开发期的提交留在本地，不触发任何 CI（go.yml 的 push 触发随推送天然低频）。
+#
+# 版权物注入：*.onnx/*.tflite/皮卡鱼引擎包/桔库均不进 git（gitignore 版权红线），
+# 一次性上传到本仓 Release 的 assets 标签，构建时经 gh 下载注入——缺资产时
+# 本构建会失败并提示"资产未上传"，而不是产出缺件的残废包。
+name: release-build
+
+on:
+  push:
+    tags: ["stable-*"]
+  workflow_dispatch: {} # 手动补包/重跑：只出 artifact，不挂 Release
+
+permissions:
+  contents: write # tag 触发时向 Release 上传产物需要
+
+# 产物命名日期统一北京时区：runner 本地是 UTC，stable-20261028 首跑产物
+# 全叫 20261027（比北京时间早一天）。TZ 对 GNU date 与 Go time.Now 双端生效。
+env:
+  TZ: Asia/Shanghai
+
+jobs:
+  android-apk:
+    name: 构建 APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # versionCode = git 提交数，浅克隆下 rev-list 只数到 1——必须全历史
+          fetch-depth: 0
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: 下载模型资产注入 assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p phone/app/src/main/assets/models
+          gh release download assets --repo "$GITHUB_REPOSITORY" \
+            --pattern "*.onnx" --dir phone/app/src/main/assets/models
+          gh release download assets --repo "$GITHUB_REPOSITORY" \
+            --pattern "*.tflite" --dir phone/app/src/main/assets
+          ls -la phone/app/src/main/assets/models/
+
+      - name: 构建 APK
+        working-directory: phone
+        run: |
+          # runner 预装 SDK 未必含 compileSdk 34，先接受 license 让 gradle 自动补装
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null 2>&1 || true
+          # bash 直调绕过执行位：仓库 gradlew 曾以 644 入库，Linux runner 上
+          # ./gradlew 报 Permission denied（exit 126，2026-10-28 stable-20261028
+          # 首跑实录）；git 索引执行位已补，此处 bash 双保险
+          bash gradlew :app:assembleArmv8DotprodRelease --no-daemon --console=plain
+
+      - name: 按交付惯例改名（ABI 分包：arm64 主交付 + x86_64 模拟器）
+        run: |
+          VC=$(git rev-list HEAD --count)
+          DATE=$(date +%Y%m%d)
+          OUT=phone/app/build/outputs/apk/Armv8Dotprod/release
+          cp "$OUT/app-Armv8Dotprod-arm64-v8a-release.apk" "cabinet_${DATE}_vc${VC}_arm64.apk"
+          cp "$OUT/app-Armv8Dotprod-x86_64-release.apk" "cabinet_${DATE}_vc${VC}_x86_64.apk"
+          ls -la cabinet_*.apk
+
+      - name: 上传 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk
+          path: cabinet_*.apk
+
+      - name: 挂 Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: cabinet_*.apk
+
+  windows-portable:
+    name: 构建便携 zip
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # exe 版本注入 vc<提交数>-<日期>，同样依赖完整 git 历史
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - name: 下载并解压引擎与桔库资产
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          gh release download assets --repo $env:GITHUB_REPOSITORY --pattern "Pikafish*.zip" --clobber
+          gh release download assets --repo $env:GITHUB_REPOSITORY --pattern "books*.zip" --clobber
+          # 解压出引擎目录 Pikafish.2026-09-06\（portable-pack 锚定路径）
+          Expand-Archive -Path Pikafish*.zip -DestinationPath .
+          # 桔库解压到 library\ 得 library\books\*.obk
+          New-Item -ItemType Directory -Force -Path library | Out-Null
+          Expand-Archive -Path books*.zip -DestinationPath library
+          Get-ChildItem Pikafish.2026-09-06, library/books | Select-Object -First 10
+
+      - name: 打便携双轨包
+        shell: bash
+        run: |
+          # portable-pack 的 buildExe 自带 CGO+windowsgui+版本注入；
+          # CI 无仓内 .tools MinGW，自动回退 runner 自带 gcc
+          go build -o portable-pack.exe ./tools/portable-pack
+          ./portable-pack.exe
+
+      - name: 上传 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: portable-zip
+          path: dist/*.zip
+
+      - name: 挂 Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip

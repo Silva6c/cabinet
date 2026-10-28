@@ -1,0 +1,17 @@
+# 内阁手机端 Kotlin 风格基线（ktlint 12.x 经 .editorconfig 读取）
+# 决策（2026-10-27 规范轮）：清理类规则全开（分号/多余空行/尾逗号调用点），
+# 大重排类规则禁用——function-signature 强制逐参数换行、indent 续行列对齐等
+# 会对现有 9k 行代码产生纯格式重排噪音（含悬浮窗布局代码），收益配不上
+# diff 噪音与回归风险；风格以"现有代码已统一的事实"为准。
+root = true
+
+[*.{kt,kts}]
+ktlint_standard_function-signature = disabled
+ktlint_standard_multiline-expression-wrapping = disabled
+ktlint_standard_trailing-comma-on-declaration-site = disabled
+ktlint_standard_trailing-comma-on-call-site = disabled
+ktlint_standard_indent = disabled
+ktlint_standard_statement-wrapping = disabled
+ktlint_standard_if-else-bracing = disabled
+ktlint_standard_blank-line-before-declaration = disabled
+ktlint_standard_class-signature = disabled

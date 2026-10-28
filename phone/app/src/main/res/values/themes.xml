@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 连线页主题：全屏无 ActionBar；墨底 + 朱砂强调（棋韵）。
+     主页默认背景（墨底+细网格）由 AssistActivity 用 QiGridDrawable 绘制，
+     windowBackground 只保证冷启动不闪色 -->
+<resources>
+    <style name="Theme.Cabinet.Assist" parent="Theme.AppCompat.NoActionBar">
+        <item name="android:windowBackground">@color/qi_ink</item>
+        <item name="colorPrimary">@color/qi_zhu</item>
+        <item name="colorPrimaryDark">@color/qi_ink</item>
+        <item name="colorAccent">@color/qi_zhu</item>
+        <item name="android:statusBarColor">@color/qi_ink</item>
+        <item name="android:navigationBarColor">@color/qi_ink</item>
+        <item name="android:textColorPrimary">@color/qi_ivory</item>
+        <item name="android:textColorSecondary">@color/qi_muted</item>
+    </style>
+</resources>

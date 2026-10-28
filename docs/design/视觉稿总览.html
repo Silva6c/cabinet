@@ -1,0 +1,953 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>内阁 · 美学设计视觉稿（真尺寸）</title>
+<!--
+  内阁美学设计视觉稿总览（研究产出物，不改产品代码）
+  - 尺寸：手机界面按 dp 1:1（393×829，换算自 1080×2280 @440dpi）；控制台按 fyne 窗口内尺寸 900×540 / 900×770
+  - 素材：全部引用仓库真实位图（棋盘/棋子/背景/图标），与真机渲染同源
+  - 悬浮窗"伪玻璃"：半透明 + 高光描边 + 顶部微渐变（真机可实现的极限，不含背景模糊——
+    Android 悬浮窗（FLAG_SECURE + 覆盖他人应用）物理上无法采样身后内容）
+  - 截图用法：URL 加 #only=<shot-id> 只渲染单张视觉稿，便于逐张导出 PNG
+-->
+<style>
+/* ============ 设计 token（双端同一套语义规范） ============ */
+:root{
+  /* 中性 */
+  --ink:#14171C;            /* 墨底：控制台背景、深色基准 */
+  --surface:#1B1E24;        /* 炭面：卡片/弹层 */
+  --inset:#101216;          /* 凹陷面：输入框/表格底 */
+  --ivory:#E8E6E1;          /* 象牙：主前景 */
+  --muted:#9A9EA6;          /* 次级文字 */
+  --dim:#565B64;            /* 弱化/禁用 */
+  /* 主色与语义 */
+  --zhu:#D05A44;            /* 朱砂：主色（红方/品牌/描边标记） */
+  --zhu-btn:#C35440;        /* 朱砂·按：白字实心按钮底（白字对比 4.5:1，达 AA 正文） */
+  --zhu-deep:#BF360C;       /* 朱砂深：浅色面上的主按钮 */
+  --zhu-lite:#E2705A;       /* 朱砂亮：悬停 */
+  --amber:#FFC107;          /* 琥珀：候选/待定（线） */
+  --amber-text:#FFE082;     /* 浅琥珀：深色面上的琥珀文字 */
+  --amber-deep:#9A5B00;     /* 琥珀深：浅色面上的琥珀文字（4.7:1） */
+  --jade:#2E7D32;           /* 玉：成功/就绪（线） */
+  --jade-fill:#A5D6A7;      /* 玉填充（箭头/就绪） */
+  --jade-text:#81C784;      /* 玉文字（深色面） */
+  --jade-deep:#1B6B32;      /* 玉深（浅色面） */
+  --jade-arrow:#1B5E20;     /* 玉·箭头描边：木色棋盘上 4.45:1（原 #2E7D32 仅 2.9 临界） */
+  --blue:#2B6FFF;           /* 暂定蓝（未成熟候选箭头） */
+  --blue-fill:#8AB6FF;
+  --info:#90CAF9;           /* 石青：信息态 */
+  --danger:#FF5252;         /* 警示（关闭二次确认） */
+  --red-side:#E53935;       /* 红方色条 */
+  --dark-side:#37474F;      /* 黑方色条 */
+  /* 描边（以边框分层，不用阴影） */
+  --line-1:rgba(255,255,255,.10);
+  --line-2:rgba(255,255,255,.16);
+  --line-3:rgba(255,255,255,.28);
+  /* 玻璃（伪玻璃：半透明 + 高光，无背景模糊） */
+  --glass:rgba(27,30,36,.72);
+  --glass-hi:rgba(255,255,255,.14);
+  --sheen:linear-gradient(180deg,rgba(255,255,255,.07),rgba(255,255,255,0) 42%);
+  /* 字号阶梯（sp） */
+  --fs-11:11px; --fs-12:12px; --fs-13:13px; --fs-15:15px; --fs-17:17px; --fs-22:22px; --fs-28:28px;
+  /* 圆角（dp） */
+  --r-s:8px; --r-m:12px; --r-l:16px; --r-xl:20px;
+  /* 间距（4 基准） */
+  --sp-1:4px; --sp-2:8px; --sp-3:12px; --sp-4:16px; --sp-5:20px; --sp-6:24px;
+  --mono:"Cascadia Mono","Consolas","SFMono-Regular",ui-monospace,monospace;
+  --sans:system-ui,-apple-system,"Microsoft YaHei","PingFang SC","Noto Sans CJK SC","Source Han Sans SC",sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0B0E13;color:var(--ivory);font-family:var(--sans);font-size:14px;line-height:1.5;padding:40px 32px 80px}
+a{color:var(--info)}
+.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+
+/* ============ 文档外壳 ============ */
+.pagehead{max-width:1400px;margin:0 auto 36px}
+.pagehead .kicker{font-size:11px;letter-spacing:.22em;color:var(--muted);text-transform:uppercase}
+.pagehead h1{font-size:30px;font-weight:800;letter-spacing:.02em;margin-top:6px}
+.pagehead p{color:var(--muted);font-size:13px;margin-top:10px;max-width:900px}
+.pagehead .rules{display:flex;gap:26px;flex-wrap:wrap;margin-top:14px;font-size:12px;color:var(--muted)}
+.pagehead .rules b{color:var(--ivory);font-weight:600}
+.group{max-width:1400px;margin:0 auto 56px;border-top:1px solid var(--line-1);padding-top:26px}
+.group>h2{font-size:19px;font-weight:700;letter-spacing:.02em}
+.group>h2 span{color:var(--zhu);font-family:var(--mono);font-size:13px;margin-right:10px}
+.group>.note{color:var(--muted);font-size:12.5px;margin-top:8px;max-width:980px}
+.row{display:flex;gap:34px;flex-wrap:wrap;margin-top:22px;align-items:flex-start}
+.shot{flex:0 0 auto}
+.shotcap{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);margin-bottom:10px}
+.shotcap i{font-style:normal;font-family:var(--mono);color:var(--zhu);font-size:12px}
+
+/* ============ 手机框（393×829 dp 1:1） ============ */
+.phone{position:relative;width:393px;height:829px;border-radius:20px;overflow:hidden;background:#0b0d11;
+  box-shadow:0 0 0 1px rgba(255,255,255,.10),0 18px 50px rgba(0,0,0,.55)}
+.statusbar{position:relative;z-index:6;height:24px;display:flex;align-items:center;justify-content:space-between;
+  padding:0 16px;font-size:11px;color:rgba(255,255,255,.78);font-family:var(--mono)}
+.appbg{position:absolute;inset:0;background:url(../../phone/app/src/main/res/drawable/chessbg.jpg) center/cover}
+/* 自定义背景（含现有默认竹叶图）：统一压暗，保证任意图上的文字对比度 */
+.appbg:not(.default)::after{content:"";position:absolute;inset:0;
+  background:linear-gradient(180deg,rgba(8,10,14,.80) 0%,rgba(8,10,14,.87) 45%,rgba(8,10,14,.93) 100%)}
+/* 新默认背景（本方案建议）：墨底 + 极细网格（瑞士/包豪斯网格语言，零图片资产、暗色不刺眼） */
+.appbg.default{background:#14171C;background-image:
+  repeating-linear-gradient(0deg,rgba(255,255,255,.035) 0 1px,transparent 1px 26px),
+  repeating-linear-gradient(90deg,rgba(255,255,255,.035) 0 1px,transparent 1px 26px)}
+.appbg.default::after{display:none}
+.appbody{position:absolute;left:0;right:0;top:24px;bottom:0;overflow:hidden;padding:14px 20px 0}
+/* 整页长图：取消高度裁剪，页面按内容自然展开（展示滚动后的完整内容） */
+.phone.long{height:auto}
+.phone.long .appbody{position:relative;top:auto;bottom:auto;height:auto;overflow:visible}
+
+/* 主页头部（瑞士式：标记 + 大字 + 微标 + 细线） */
+.hdr .mark{display:flex;gap:5px;align-items:center;margin-bottom:10px}
+.hdr .mark i{width:10px;height:10px;display:block}
+.hdr .mark i:first-child{background:var(--zhu)}
+.hdr .mark i:nth-child(2){background:var(--line-3)}
+.hdr .mark i:nth-child(3){background:var(--amber)}
+.hdr h1{font-size:34px;line-height:1.15;font-weight:800;letter-spacing:.06em}
+.hdr .sub{margin-top:3px;font-size:11px;letter-spacing:.20em;color:var(--muted)}
+.hdr .rule{height:1px;background:var(--line-1);margin-top:12px}
+
+/* 状态条（玻璃细条：状态点 + 主状态 + 次级信息） */
+.status{display:flex;align-items:center;gap:9px;height:40px;margin-top:12px;padding:0 12px;
+  background:rgba(255,255,255,.055);border:1px solid var(--line-1);border-radius:var(--r-m)}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--dim);flex:0 0 auto}
+.dot.jade{background:#4CAF50;box-shadow:0 0 0 3px rgba(76,175,80,.18)}
+.dot.amber{background:var(--amber);box-shadow:0 0 0 3px rgba(255,193,7,.16)}
+.status .st-main{font-size:14px;font-weight:600;color:var(--ivory)}
+.status .st-sub{margin-left:auto;font-size:11.5px;color:var(--muted);font-family:var(--mono)}
+
+/* 卡片（玻璃卡：半透明 + 高光描边 + 顶部微渐变） */
+.card{margin-top:12px;background:var(--glass);border:1px solid var(--line-2);border-radius:var(--r-l);
+  padding:14px;background-image:var(--sheen)}
+.card-hd{display:flex;align-items:baseline;gap:9px;margin-bottom:11px}
+.card-hd .num{font-family:var(--mono);font-size:12px;color:var(--muted);letter-spacing:.08em}
+.card-hd h3{font-size:15px;font-weight:700;letter-spacing:.02em}
+.chip{margin-left:auto;font-size:11px;padding:3px 9px;border-radius:999px;border:1px solid var(--line-2);color:var(--muted);white-space:nowrap}
+.chip.jade{border-color:rgba(76,175,80,.55);color:var(--jade-text);background:rgba(76,175,80,.12)}
+.chip.amber{border-color:rgba(255,193,7,.5);color:var(--amber-text);background:rgba(255,193,7,.10)}
+
+/* 按钮三级：主（朱砂实心）/ 次（描边）/ 文本 */
+.btn{border:none;font-family:var(--sans);font-size:14px;font-weight:600;border-radius:var(--r-m);
+  height:48px;display:flex;align-items:center;justify-content:center;gap:8px;width:100%;color:#fff}
+.btn-primary{background:var(--zhu-btn)}
+.btn-primary .ic{width:20px;height:20px;flex:0 0 auto}
+.btn-run{background:rgba(76,175,80,.16);border:1px solid rgba(76,175,80,.5);color:var(--jade-text)}
+.btn-ghost{height:40px;font-size:13px;font-weight:500;background:rgba(255,255,255,.05);
+  border:1px solid var(--line-2);color:var(--ivory)}
+.btn-sm{height:32px;font-size:12px;font-weight:600;width:auto;padding:0 14px;border-radius:9px}
+
+/* 输入（凹陷玻璃） */
+.input{width:100%;height:42px;margin-top:8px;padding:0 12px;border-radius:10px;
+  background:rgba(255,255,255,.06);border:1px solid var(--line-2);color:var(--ivory);font-size:13px;
+  font-family:var(--sans);display:flex;align-items:center}
+.input.ph{color:#6E7681}
+.orline{display:flex;align-items:center;gap:10px;margin:12px 0 2px;color:var(--muted);font-size:11px}
+.orline::before,.orline::after{content:"";height:1px;background:var(--line-1);flex:1 1 auto}
+.lnk{margin-top:10px;font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px}
+.lnk b{color:var(--info);font-weight:500}
+
+/* 步骤行（包豪斯几何序号） */
+.step{display:flex;align-items:center;gap:10px;height:40px}
+.sdot{width:22px;height:22px;border-radius:50%;flex:0 0 auto;display:flex;align-items:center;justify-content:center;
+  font-size:11px;font-family:var(--mono);border:1px solid var(--line-2);color:var(--muted)}
+.sdot.done{background:rgba(76,175,80,.16);border-color:rgba(76,175,80,.55);color:var(--jade-text)}
+.sdot.next{background:rgba(208,90,68,.16);border-color:rgba(208,90,68,.65);color:#F0A08E}
+.slabel{font-size:13.5px;color:var(--ivory)}
+.slabel .hint{font-size:11px;color:var(--muted);margin-left:6px}
+.sact{margin-left:auto;font-size:11.5px;color:var(--jade-text)}
+.sact.need{color:#F0A08E;border:1px solid rgba(208,90,68,.6);border-radius:8px;padding:4px 10px}
+
+/* 行内标签 + 分段控件 / 值芯片 */
+.rowline{display:flex;align-items:center;gap:10px;margin-top:11px}
+.rowline>label{font-size:12.5px;color:var(--muted);flex:0 0 auto}
+.seg{margin-left:auto;display:flex;background:rgba(255,255,255,.05);border:1px solid var(--line-1);
+  border-radius:10px;padding:2px}
+.seg>span{font-size:12px;padding:5px 12px;border-radius:8px;color:var(--muted);display:flex;align-items:center;gap:6px}
+.seg>span.on{background:rgba(255,255,255,.13);color:var(--ivory);box-shadow:inset 0 0 0 1px var(--line-2)}
+.seg .sw{width:22px;height:12px;border-radius:4px;display:block}
+.sw-dark{background:linear-gradient(180deg,rgba(255,255,255,.22),rgba(0,0,0,.15)),#232B36;border:1px solid var(--line-2)}
+.sw-black{background:#000;border:1px solid #2A2E33}
+.sw-light{background:#E8ECEF;border:1px solid #A9B2B8}
+.vchip{margin-left:auto;display:flex;align-items:center;gap:7px;background:rgba(255,255,255,.06);
+  border:1px solid var(--line-1);border-radius:9px;padding:7px 12px;font-size:12.5px;color:var(--ivory)}
+.vchip .v{color:var(--amber-text);font-variant-numeric:tabular-nums}
+.rowsplit{display:flex;gap:10px;margin-top:12px}
+.hintline{margin-top:6px;font-size:11px;color:var(--dim)}
+.foot{margin-top:16px;text-align:center;padding-bottom:14px}
+.foot .rule{height:1px;background:var(--line-1);margin-bottom:12px}
+.foot span{font-size:12px;color:var(--muted)}
+
+/* ============ 棋盘（真实素材渲染，几何与 OverlayChessView 一致） ============ */
+.board{position:relative;background:url(../../phone/app/src/main/res/drawable/chessboard.png) center/100% 100% no-repeat}
+.board .pc{position:absolute;width:8.871%;transform:translate(-50%,-50%)}
+.board .bar{position:absolute;left:0;right:0;height:.448%;background:var(--red-side)}
+.board svg{position:absolute;inset:0;width:100%;height:100%}
+
+/* ============ 被识别应用仿真（悬浮窗视觉稿的背景） ============ */
+.simwrap{position:absolute;inset:0;background:#101318;overflow:hidden}
+.simtop{position:absolute;left:0;right:0;top:24px;height:36px;display:flex;align-items:center;
+  justify-content:space-between;padding:0 14px;background:#171A20;color:#CFD6DE;font-size:13px}
+.simtop .r{display:flex;gap:14px;color:#7A828C;font-size:12px}
+.simboard{position:absolute;left:0;top:60px;width:393px;height:424.6px}
+.simctrl{position:absolute;left:0;right:0;bottom:0;height:240px;background:#101318;
+  display:flex;align-items:center;justify-content:center;gap:14px}
+.simctrl span{border:1px solid #2B3138;border-radius:10px;padding:9px 22px;color:#8B939D;font-size:13px}
+
+/* ============ 悬浮窗（392×197 dp 1:1，玻璃三档） ============ */
+/* 392×197 契约：5+114+2+171+2+90+5+2(边框) = 391≈392，列不参与收缩。
+   （Android 端描边画在形状内侧不占尺寸；CSS 盒模型边框占尺寸，故垂直内边距 6→5 补偿） */
+.panel{width:392px;height:197px;border-radius:var(--r-xl);padding:5px 5px 5px 6px;display:flex;gap:2px;
+  position:relative;overflow:hidden;box-sizing:border-box}
+.panel .pcol,.panel .pboardwrap{flex:0 0 auto}
+.panel::before{content:"";position:absolute;inset:0;pointer-events:none}
+/* 深色玻璃（默认） */
+.t-dark{background:rgba(27,30,36,.72);border:1px solid var(--glass-hi);background-image:var(--sheen)}
+.t-dark::before{border-radius:inherit;box-shadow:inset 0 1px 0 rgba(255,255,255,.10)}
+/* 纯黑 OLED */
+.t-black{background:rgba(0,0,0,.95);border:1px solid rgba(255,255,255,.09)}
+.t-black::before{border-radius:inherit;box-shadow:inset 0 1px 0 rgba(255,255,255,.06)}
+/* 浅色纸感 */
+.t-light{background:rgba(236,239,241,.90);border:1px solid rgba(0,0,0,.14);background-image:linear-gradient(180deg,rgba(255,255,255,.65),rgba(255,255,255,0) 45%)}
+.pcol{display:flex;flex-direction:column}
+.pcol.left{width:114px;padding:4px 6px 0 6px}
+.pcol.right{width:90px;padding-top:3px;gap:2px}
+.pstat{display:flex;align-items:center;gap:6px;font-size:10px;color:var(--muted)}
+.pbig{font-size:15px;font-weight:700;color:var(--amber-text);margin-top:4px;letter-spacing:.01em;white-space:nowrap}
+.pscore{font-size:12.5px;color:var(--jade-text);margin-top:2px;font-family:var(--mono)}
+.prule{height:1px;background:var(--line-1);margin:7px 0 6px}
+.pcand{font-size:12px;color:var(--ivory);white-space:nowrap}
+.pdots{display:flex;gap:4px;margin-top:5px}
+.pdots i{width:6px;height:6px;border-radius:50%;background:rgba(255,255,255,.22)}
+.pdots i.on{background:var(--amber)}
+.pbtns{display:flex;gap:4px;margin-top:auto;padding-bottom:2px}
+.pbtns span{flex:1;height:28px;display:flex;align-items:center;justify-content:center;font-size:11px;
+  color:var(--ivory);border:1px solid var(--line-2);border-radius:7px;background:rgba(255,255,255,.05)}
+.pboardwrap{width:171px;height:185px;border-radius:var(--r-s);overflow:hidden;border:1px solid var(--line-1);position:relative;flex:0 0 auto}
+.vchip2{height:23px;display:flex;align-items:center;justify-content:center;gap:5px;border-radius:6px;
+  background:rgba(255,255,255,.06);font-size:10px;color:var(--muted)}
+.vchip2 b{font-size:11px;color:var(--amber-text);font-variant-numeric:tabular-nums;font-weight:600}
+.abtn{height:23px;display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--ivory);
+  border:1px solid var(--line-2);border-radius:6px;background:rgba(255,255,255,.03)}
+.abtn.warn{border-color:rgba(255,193,7,.55);color:var(--amber-text)}
+/* 浅色档配色翻转 */
+.t-light .pbig{color:var(--amber-deep)}
+.t-light .pscore{color:var(--jade-deep)}
+.t-light .pcand{color:#263238}
+.t-light .pstat{color:#5C6B74}
+.t-light .prule{background:rgba(0,0,0,.12)}
+.t-light .pdots i{background:rgba(0,0,0,.18)}
+.t-light .pdots i.on{background:var(--amber-deep)}
+.t-light .pbtns span{color:#263238;border-color:rgba(0,0,0,.18);background:rgba(255,255,255,.5)}
+.t-light .vchip2{background:rgba(0,0,0,.05);color:#5C6B74}
+.t-light .vchip2 b{color:var(--amber-deep)}
+.t-light .abtn{color:#263238;border-color:rgba(0,0,0,.18);background:rgba(255,255,255,.45)}
+.t-light .abtn.warn{border-color:rgba(178,106,0,.55);color:var(--amber-deep)}
+.t-light .pboardwrap{border-color:rgba(0,0,0,.16)}
+
+/* 详情窗（190×约 118 dp 1:1） */
+.detail{width:190px;border-radius:var(--r-l);padding:9px 12px;position:relative}
+.detail.t-dark{background:rgba(27,30,36,.78);border:1px solid var(--glass-hi);background-image:var(--sheen)}
+.dscore{font-size:22px;font-weight:800;color:var(--jade-text);line-height:1.1;
+  text-shadow:0 1px 4px rgba(0,0,0,.5)}
+.dscore b{font-family:var(--mono);font-weight:800}
+.dstate{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted);margin-top:3px}
+.dgrid{display:grid;grid-template-columns:1fr 1fr;gap:4px 10px;margin-top:7px}
+.dgrid div{display:flex;align-items:baseline;gap:5px}
+.dgrid em{font-style:normal;font-size:9.5px;color:var(--muted);flex:0 0 auto}
+.dgrid b{font-family:var(--mono);font-size:11px;color:var(--amber-text);font-weight:600}
+.dsrc{margin-top:6px;font-size:10.5px;color:var(--muted)}
+
+/* 悬浮窗三档主题对比条 */
+.themecell{width:392px}
+.themecap{font-size:12px;color:var(--muted);margin-bottom:8px;display:flex;align-items:center;gap:8px}
+.themecap i{font-style:normal;font-family:var(--mono);color:var(--zhu);font-size:12px}
+.themebg{position:relative;width:392px;height:257px;border-radius:var(--r-xl);overflow:hidden;border:1px solid var(--line-1)}
+.themebg .board{position:absolute;left:0;bottom:0;width:392px;height:423.7px}
+.themebg .panel{position:absolute;left:0;bottom:0}
+
+/* 遮挡标注 */
+.anno{position:absolute;border:1px dashed rgba(255,193,7,.85);border-radius:8px;pointer-events:none}
+.anno .tag{position:absolute;left:0;top:-20px;font-size:10px;font-family:var(--mono);color:#0B0E13;
+  background:var(--amber);padding:2px 6px;border-radius:4px;white-space:nowrap}
+
+/* ============ 电脑控制台（900 内尺寸 1:1，Fyne 可实现形态） ============ */
+.console{width:900px;background:var(--ink);border-radius:10px;overflow:hidden;
+  box-shadow:0 0 0 1px rgba(255,255,255,.12),0 18px 50px rgba(0,0,0,.55);padding:18px 20px 16px}
+.console.tall{height:770px}
+.console.short{height:540px}
+.cs-head{display:flex;align-items:center;gap:14px}
+.cs-logo{width:34px;height:34px;border-radius:9px;border:1px solid var(--line-2)}
+.cs-kicker{font-size:10.5px;letter-spacing:.22em;color:var(--muted)}
+.cs-head h1{font-size:19px;font-weight:800;letter-spacing:.04em;margin-top:1px}
+.cs-chips{margin-left:auto;display:flex;gap:10px}
+.cs-chips .chip{margin-left:0;display:flex;align-items:center;gap:7px}
+.bento{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px}
+.tile{background:var(--surface);border:1px solid var(--line-1);border-radius:var(--r-m);padding:11px 14px;position:relative}
+.tile-hd{display:flex;align-items:baseline;gap:8px;margin-bottom:10px}
+.tile-hd .num{font-family:var(--mono);font-size:11px;color:var(--zhu)}
+.tile-hd h4{font-size:13.5px;font-weight:700;letter-spacing:.03em}
+.tile-hd .r{margin-left:auto;font-size:11px;color:var(--muted);font-family:var(--mono)}
+.span2{grid-column:span 2}
+.stats3{display:grid;grid-template-columns:repeat(3,1fr);gap:6px 18px}
+.stat em{display:block;font-style:normal;font-size:10.5px;letter-spacing:.10em;color:var(--muted)}
+.stat b{font-variant-numeric:tabular-nums;font-size:21px;font-weight:700;display:block;margin-top:2px;letter-spacing:.01em}
+.stat b i{font-style:normal;font-size:12px;color:var(--muted);font-weight:500;margin-left:3px}
+.stat b.ok{color:var(--jade-text)}
+.stat b.amber{color:var(--amber-text)}
+.kvrow{display:flex;gap:22px;margin-top:8px;padding-top:8px;border-top:1px solid var(--line-1)}
+.kv em{font-style:normal;font-size:10.5px;color:var(--muted);margin-right:6px}
+.kv b{font-variant-numeric:tabular-nums;font-size:12.5px;font-weight:600}
+.hashbar{height:3px;border-radius:2px;background:rgba(255,255,255,.10);margin-top:6px;overflow:hidden}
+.hashbar i{display:block;height:100%;width:25%;background:var(--zhu)}
+table.tbl{width:100%;border-collapse:collapse;font-size:12px}
+.tbl th{font-size:10.5px;letter-spacing:.10em;color:var(--muted);font-weight:600;text-align:left;
+  padding:5px 8px;border-bottom:1px solid var(--line-1)}
+.tbl td{padding:6px 8px;border-bottom:1px solid rgba(255,255,255,.05);font-variant-numeric:tabular-nums;color:var(--ivory)}
+.tbl td.t{color:var(--muted)}
+.tbl tr:last-child td{border-bottom:none}
+.tbl .mv{color:var(--amber-text)}
+.tbl .sc{color:var(--jade-text)}
+.fp{display:flex;align-items:center;gap:9px;margin-top:9px;font-size:11px;color:var(--muted)}
+.fp code{font-family:var(--mono);font-size:10.5px;color:var(--ivory);background:var(--inset);
+  border:1px solid var(--line-1);border-radius:6px;padding:4px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:520px}
+.btnrow2{display:flex;gap:10px;margin-top:11px}
+.cbtn{height:32px;display:flex;align-items:center;gap:7px;padding:0 14px;border-radius:8px;font-size:12.5px;
+  border:1px solid var(--line-2);background:rgba(255,255,255,.05);color:var(--ivory)}
+.cbtn.pri{background:var(--zhu-btn);border-color:var(--zhu-btn);color:#fff;font-weight:600}
+.cbtn.dang{border-color:rgba(229,57,53,.55);color:#FF8A80}
+.advchips{display:flex;gap:10px}
+.advchips .cbtn.on{background:rgba(255,255,255,.13);border-color:var(--line-3)}
+/* 托盘菜单 */
+.traymenu{width:284px;background:#1E2126;border:1px solid rgba(255,255,255,.14);border-radius:10px;
+  padding:8px;box-shadow:0 16px 44px rgba(0,0,0,.6)}
+.tray-hd{padding:8px 10px 9px;border-bottom:1px solid var(--line-1);display:flex;align-items:center;gap:9px}
+.tray-hd img{width:18px;height:18px;border-radius:4px}
+.tray-hd .tt{font-size:12.5px;font-weight:700}
+.tray-hd .ts{display:block;font-size:10.5px;color:var(--muted);font-family:var(--mono);margin-top:1px}
+.tray-item{padding:8px 10px;font-size:12.5px;border-radius:7px;color:var(--ivory)}
+.tray-item.hl{background:var(--zhu-btn);color:#fff;font-weight:600}
+.tray-item.danger{color:#FF8A80}
+.tray-sep{height:1px;background:var(--line-1);margin:7px 4px}
+
+/* ============ token 附录 ============ */
+.tokwrap{display:flex;gap:40px;flex-wrap:wrap}
+.swgrid{display:grid;grid-template-columns:repeat(4,186px);gap:10px}
+.swcard{background:var(--surface);border:1px solid var(--line-1);border-radius:var(--r-m);padding:10px 11px}
+.swcard .c{height:34px;border-radius:8px;border:1px solid var(--line-1)}
+.swcard .n{font-size:12px;font-weight:600;margin-top:8px}
+.swcard .h{font-family:var(--mono);font-size:10.5px;color:var(--muted)}
+.swcard .u{font-size:10.5px;color:var(--dim);margin-top:2px}
+.typebox{display:flex;flex-direction:column;gap:9px;min-width:430px}
+.typerow{display:flex;align-items:baseline;gap:14px;border-bottom:1px solid rgba(255,255,255,.05);padding-bottom:8px}
+.typerow .sp{font-family:var(--mono);font-size:10.5px;color:var(--muted);width:44px;flex:0 0 auto}
+.radiibox{display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap}
+
+/* ============ 单张导出模式 ============ */
+body.only{padding:0;background:#0B0E13}
+body.only .pagehead,body.only .group>h2,body.only .group>.note{display:none}
+body.only .group{border:none;margin:0;padding:0}
+body.only .row{gap:0;margin:0}
+body.only .shot{margin:0}
+body.only .shot:not(.focus){display:none}
+</style>
+</head>
+<body>
+
+<header class="pagehead">
+  <div class="kicker">内阁 · Cabinet — Aesthetic Design</div>
+  <h1>内阁 · 美学设计视觉稿</h1>
+  <p>风格主线：<b>场景分工混合</b> —— 悬浮窗＝极简 × 玻璃拟态；手机主页＝瑞士 × 包豪斯；电脑控制台＝便当盒 × 瑞士。
+     本页所有界面均为真尺寸 1:1（手机按 dp，控制台按 Fyne 窗口内尺寸），素材直接引用仓库真实位图（棋盘 / 棋子 / 背景 / 图标），与真机渲染同源。</p>
+  <div class="rules">
+    <span><b>伪玻璃</b>：半透明 ＋ 高光描边 ＋ 顶部微渐变；不含背景模糊（Android 悬浮窗物理上无法采样身后内容）</span>
+    <span><b>契约</b>：悬浮窗保持 392×197dp 与 11sp 按钮；板 171×185 的棋盘几何与 OverlayChessView 一致</span>
+    <span><b>导出</b>：URL 加 <code>#only=shot-id</code> 可只渲染单张视觉稿</span>
+  </div>
+</header>
+
+<!-- ================= 一 · 手机主页 ================= -->
+<section class="group" id="g-home">
+  <h2><span>01</span>手机主页（瑞士 × 包豪斯）</h2>
+  <p class="note">瑞士式信息层级（大字标题 / 微标 / 细分割线 / 大量留白）＋ 包豪斯几何序号（01/02/03、状态圆点）＋ 玻璃卡片（保证在任意自定义主页背景上可读）。
+     强调色收敛为朱砂一支主色，语义色仅用于状态（玉＝就绪 / 琥珀＝等待 / 灰＝未启动）。
+     背景策略：现有默认竹叶图（1600×1800 亮绿插画）与「棋韵」墨底朱砂体系冲突且文字对比度不稳，
+     建议默认改为墨底＋细网格（零图片资产、暗色不刺眼），自定义图片统一叠加压暗层——两态分别见 ①②。</p>
+  <div class="row">
+
+    <!-- 未连接态 -->
+    <div class="shot" id="shot-home-idle">
+      <div class="shotcap"><i>①</i>手机主页 · 未连接 · 393×829dp · 新默认背景（墨底＋细网格）</div>
+      <div class="phone">
+        <div class="appbg default"></div>
+        <div class="statusbar"><span>9:41</span><span>▲ ▮ 86%</span></div>
+        <div class="appbody">
+          <div class="hdr">
+            <div class="mark"><i></i><i></i><i></i></div>
+            <h1>内阁</h1>
+            <div class="sub">象棋连线识别指导 · 内阁 CABINET</div>
+            <div class="rule"></div>
+          </div>
+
+          <div class="status">
+            <span class="dot"></span>
+            <span class="st-main">未启动</span>
+            <span class="st-sub">先扫码配对电脑</span>
+          </div>
+
+          <div class="card">
+            <div class="card-hd"><span class="num">01</span><h3>连接电脑</h3><span class="chip amber">未连接</span></div>
+            <button class="btn btn-primary">
+              <svg class="ic" viewBox="0 0 20 20" fill="none" stroke="#fff" stroke-width="1.6">
+                <rect x="1.5" y="1.5" width="6" height="6" rx="1.2"/><rect x="12.5" y="1.5" width="6" height="6" rx="1.2"/>
+                <rect x="1.5" y="12.5" width="6" height="6" rx="1.2"/>
+                <path d="M12.5 12.5h2.6v2.6h-2.6zM15.9 15.9h2.6v2.6h-2.6zM12.5 17.2v1.3M17.2 12.5h1.3"/>
+              </svg>
+              扫二维码连接电脑
+            </button>
+            <div class="orline">或手动填写</div>
+            <div class="input ph">电脑地址，如 wss://192.168.1.10:9527/ws</div>
+            <div class="input ph">配对令牌（电脑端配置文件 token）</div>
+            <div class="lnk">证书指纹（可选，扫码自动填入）<b>›</b></div>
+          </div>
+
+          <div class="card">
+            <div class="card-hd"><span class="num">02</span><h3>启动识别</h3><span class="chip amber">待授权</span></div>
+            <div class="step"><span class="sdot next">1</span><span class="slabel">悬浮窗权限<span class="hint">显示建议面板</span></span><span class="sact need">去授予</span></div>
+            <div class="step"><span class="sdot next">2</span><span class="slabel">通知权限<span class="hint">Android 13+</span></span><span class="sact need">去授予</span></div>
+            <div class="step"><span class="sdot">3</span><span class="slabel">屏幕识别<span class="hint">全自动识别棋盘</span></span></div>
+            <button class="btn btn-primary" style="height:44px;margin-top:2px">开始屏幕识别</button>
+            <div class="rowline">
+              <label>识别引擎</label>
+              <div class="seg"><span class="on">ONNX 角点式</span><span>YOLO 检测式</span></div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-hd"><span class="num">03</span><h3>外观与设置</h3></div>
+            <div class="rowline" style="margin-top:2px"><label>悬浮窗主题</label></div>
+            <div class="seg" style="margin-left:0;margin-top:8px">
+              <span class="on" style="flex:1;justify-content:center"><i class="sw sw-dark"></i>深色玻璃</span>
+              <span style="flex:1;justify-content:center"><i class="sw sw-black"></i>纯黑</span>
+              <span style="flex:1;justify-content:center"><i class="sw sw-light"></i>浅色纸感</span>
+            </div>
+            <div class="rowline"><label>引擎线程</label><span class="vchip"><span class="v">跟随电脑端</span> ›</span></div>
+            <div class="rowline"><label>主页背景</label><span class="vchip">默认棋韵 ›</span></div>
+            <div class="rowsplit">
+              <button class="btn btn-ghost" style="flex:1">从图库选择</button>
+              <button class="btn btn-ghost" style="flex:1">恢复默认</button>
+            </div>
+          </div>
+
+          <div class="foot"><div class="rule"></div><span>关于内阁 · 免责声明</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 运行中 -->
+    <div class="shot" id="shot-home-run">
+      <div class="shotcap"><i>②</i>手机主页 · 运行中 · 自定义背景（现有竹叶图统一压暗）· 393×829dp</div>
+      <div class="phone">
+        <div class="appbg"></div>
+        <div class="statusbar"><span>9:41</span><span>▲ ▮ 86%</span></div>
+        <div class="appbody">
+          <div class="hdr">
+            <div class="mark"><i></i><i></i><i></i></div>
+            <h1>内阁</h1>
+            <div class="sub">象棋连线识别指导 · 内阁 CABINET</div>
+            <div class="rule"></div>
+          </div>
+
+          <div class="status">
+            <span class="dot jade"></span>
+            <span class="st-main">运行中</span>
+            <span class="st-sub">192.168.1.10 · RTT 12ms</span>
+          </div>
+
+          <div class="card">
+            <div class="card-hd"><span class="num">01</span><h3>连接电脑</h3><span class="chip jade">已连接</span></div>
+            <button class="btn btn-ghost" style="height:44px">
+              <svg class="ic" viewBox="0 0 20 20" fill="none" stroke="#E8E6E1" stroke-width="1.6" style="width:18px;height:18px">
+                <rect x="1.5" y="1.5" width="6" height="6" rx="1.2"/><rect x="12.5" y="1.5" width="6" height="6" rx="1.2"/>
+                <rect x="1.5" y="12.5" width="6" height="6" rx="1.2"/>
+                <path d="M12.5 12.5h2.6v2.6h-2.6zM15.9 15.9h2.6v2.6h-2.6z"/>
+              </svg>
+              查看 / 重新扫码
+            </button>
+            <div class="input">wss://192.168.1.10:9527/ws</div>
+            <div class="lnk">证书指纹已锁定 · SHA-256 9f3c…a17e <b>›</b></div>
+          </div>
+
+          <div class="card">
+            <div class="card-hd"><span class="num">02</span><h3>启动识别</h3><span class="chip jade">运行中</span></div>
+            <div class="step"><span class="sdot done">✓</span><span class="slabel">悬浮窗权限</span><span class="sact">已授权</span></div>
+            <div class="step"><span class="sdot done">✓</span><span class="slabel">通知权限</span><span class="sact">已就绪</span></div>
+            <div class="step"><span class="sdot done">✓</span><span class="slabel">屏幕识别<span class="hint">全自动识别棋盘</span></span></div>
+            <button class="btn btn-run" style="height:44px;margin-top:2px">屏幕识别运行中 ✓</button>
+            <div class="rowline">
+              <label>识别引擎</label>
+              <div class="seg"><span class="on">ONNX 角点式</span><span>YOLO 检测式</span></div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-hd"><span class="num">03</span><h3>外观与设置</h3></div>
+            <div class="rowline" style="margin-top:2px"><label>悬浮窗主题</label></div>
+            <div class="seg" style="margin-left:0;margin-top:8px">
+              <span class="on" style="flex:1;justify-content:center"><i class="sw sw-dark"></i>深色玻璃</span>
+              <span style="flex:1;justify-content:center"><i class="sw sw-black"></i>纯黑</span>
+              <span style="flex:1;justify-content:center"><i class="sw sw-light"></i>浅色纸感</span>
+            </div>
+            <div class="rowline"><label>引擎线程</label><span class="vchip"><span class="v">8 线程</span> ›</span></div>
+            <div class="rowline"><label>主页背景</label><span class="vchip">默认棋韵 ›</span></div>
+            <div class="rowsplit">
+              <button class="btn btn-ghost" style="flex:1">从图库选择</button>
+              <button class="btn btn-ghost" style="flex:1">恢复默认</button>
+            </div>
+          </div>
+
+          <div class="foot"><div class="rule"></div><span>关于内阁 · 免责声明</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 整页长图（内容超出视口，滚动后可见；机身由 JS 克隆未连接态并取消裁剪） -->
+    <div class="shot" id="shot-home-long">
+      <div class="shotcap"><i>③</i>手机主页 · 整页长图（未连接态 · 滚动可见全部内容 · 宽 393dp 1:1）</div>
+    </div>
+
+  </div>
+</section>
+<!-- ================= 二 · 悬浮窗 ================= -->
+<section class="group" id="g-overlay">
+  <h2><span>02</span>悬浮窗（极简 × 玻璃拟态）</h2>
+  <p class="note">HUD「一眼原则」：轮次与优势提炼为唯一大字，状态语义色化（轮到我方走＝琥珀 / 优势＝按我方视角玉或朱砂 / 停止＝灰），
+     候选进度用点阵列，低频操作按钮降噪（值芯片无描边、动作按钮细描边）。
+     缩略图下方为真实遮挡关系：面板默认停屏幕底部，遮住的是对手 App 的控制区而非棋盘。</p>
+  <div class="row">
+
+    <!-- 主面板 + 详情窗（叠在仿真棋局上） -->
+    <div class="shot" id="shot-overlay-full">
+      <div class="shotcap"><i>①</i>悬浮窗 · 深色玻璃（默认档）· 叠在棋局上 · 393×829dp ｜ 虚线＝主面板占位：392×197dp ≈ 屏幕 23.7%，默认位置对棋盘遮挡 0%</div>
+      <div class="phone">
+        <div class="statusbar"><span>9:41</span><span>▲ ▮ 86%</span></div>
+        <div class="simwrap">
+          <div class="simtop"><span>中国象棋 · 对局中</span><span class="r"><span>悔棋</span><span>设置</span></span></div>
+          <div class="board simboard" data-board data-bar="bottom"></div>
+          <div class="simctrl"><span>悔棋</span><span>提示</span><span>认输</span></div>
+          <!-- 详情窗：自动避让棋盘（先试棋盘正下方、再正上方） -->
+          <div class="detail t-dark" id="ovl-detail-1">
+            <div class="dscore">红优 <b>+0.8</b></div>
+            <div class="dstate"><span class="dot jade"></span>引擎运行中 · 用时 1.2s</div>
+            <div class="dgrid">
+              <div><em>深度</em><b>20/24</b></div><div><em>节点</em><b>12.4M</b></div>
+              <div><em>速率</em><b>1.8M/s</b></div><div><em>哈希</em><b>128M</b></div>
+            </div>
+            <div class="dsrc">来源：开局库 · 桔库（第 3 变例）</div>
+          </div>
+          <div class="panel t-dark" id="ovl-panel-1" data-panel style="position:absolute;left:0.5px;bottom:8px"></div>
+          <div class="anno" style="left:0.5px;top:624px;width:391px;height:197px"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 三档主题 1:1 对比 -->
+    <div class="shot" id="shot-overlay-themes">
+      <div class="shotcap"><i>②</i>悬浮窗三档主题 · 1:1（玻璃高光在真实棋盘底上）</div>
+      <div style="display:flex;gap:24px">
+        <div class="themecell">
+          <div class="themecap"><i>a</i>深色玻璃（默认）· 半透明 72% ＋ 暖白高光描边</div>
+          <div class="themebg"><div class="board" data-board data-bar="bottom"></div><div class="panel t-dark" data-panel></div></div>
+        </div>
+        <div class="themecell">
+          <div class="themecap"><i>b</i>纯黑 OLED · 省电档，黑底不发光</div>
+          <div class="themebg" style="background:#0B0D11"><div class="board" data-board data-bar="bottom"></div><div class="panel t-black" data-panel></div></div>
+        </div>
+        <div class="themecell">
+          <div class="themecap"><i>c</i>浅色纸感 · 护眼档，文字整体加深</div>
+          <div class="themebg"><div class="board" data-board data-bar="bottom"></div><div class="panel t-light" data-panel></div></div>
+        </div>
+      </div>
+      <div class="shotcap" style="margin-top:14px"><i>③</i>详情窗（独立可拖，自动避让棋盘）· 指标改 2×2 网格 ＋ 等宽数字</div>
+      <div class="themebg" style="height:150px;background:linear-gradient(180deg,#1A1D23,#101318)">
+        <div class="detail t-dark" style="position:absolute;left:16px;top:16px">
+          <div class="dscore">红优 <b>+0.8</b></div>
+          <div class="dstate"><span class="dot jade"></span>引擎运行中 · 用时 1.2s</div>
+          <div class="dgrid">
+            <div><em>深度</em><b>20/24</b></div><div><em>节点</em><b>12.4M</b></div>
+            <div><em>速率</em><b>1.8M/s</b></div><div><em>哈希</em><b>128M</b></div>
+          </div>
+          <div class="dsrc">来源：开局库 · 桔库（第 3 变例）</div>
+        </div>
+        <div class="detail t-dark" style="position:absolute;left:230px;top:16px;width:220px">
+          <div class="dscore" style="color:var(--amber-text)">黑方 <b>3 步杀</b></div>
+          <div class="dstate"><span class="dot amber"></span>杀棋已定 · 深度 18/24</div>
+          <div class="dgrid">
+            <div><em>深度</em><b>18/24</b></div><div><em>节点</em><b>6.1M</b></div>
+            <div><em>速率</em><b>0.9M/s</b></div><div><em>哈希</em><b>128M</b></div>
+          </div>
+          <div class="dsrc">来源：引擎（象棋·杀棋模式）</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<!-- ================= 三 · 电脑控制台 ================= -->
+<section class="group" id="g-console">
+  <h2><span>03</span>电脑控制台（便当盒 × 瑞士）</h2>
+  <p class="note">同权信息装进 bento tile：引擎大 tile（三格仪表＋三格明细）＋ 连接全宽 tile ＋ 高级功能按钮排。
+     数字全部等宽、右对齐；分区用「朱砂编号 ＋ 细描边」而非色块；状态点语言与手机端一致（玉＝就绪 / 琥珀＝需注意）。
+     全部为 Fyne 可实现形态：矩形 ＋ 圆角 ＋ 边框 ＋ 等宽字体，无渐变、无模糊依赖（渐变仅作可选装饰）。</p>
+  <div class="row">
+
+    <!-- 折叠态 900×540 -->
+    <div class="shot" id="shot-console-fold">
+      <div class="shotcap"><i>①</i>控制台 · 折叠态 900×540（Fyne 窗口内尺寸 1:1）</div>
+      <div class="console short">
+        <div class="cs-head">
+          <img class="cs-logo" src="../../assets/icon/cabinet.png" alt="">
+          <div>
+            <div class="cs-kicker">内阁 · CABINET</div>
+            <h1>内阁 · 控制台</h1>
+          </div>
+          <div class="cs-chips">
+            <span class="chip jade"><i class="dot jade" style="width:7px;height:7px"></i>引擎 就绪</span>
+            <span class="chip">库 12,345</span>
+            <span class="chip amber"><i class="dot amber" style="width:7px;height:7px"></i>连接 1</span>
+          </div>
+        </div>
+
+        <div class="bento">
+          <div class="tile">
+            <div class="tile-hd"><span class="num">01</span><h4>引擎</h4><span class="r">皮卡鱼 · UCI</span></div>
+            <div class="stats3">
+              <div class="stat"><em>状态</em><b class="ok">就绪</b></div>
+              <div class="stat"><em>深度 / 目标</em><b>20<i>/24</i></b></div>
+              <div class="stat"><em>搜索速率</em><b>1.8M<i>n/s</i></b></div>
+            </div>
+            <div class="kvrow">
+              <span class="kv"><em>节点</em><b>12.4M</b></span>
+              <span class="kv"><em>哈希</em><b>128M<i style="font-size:10px;color:var(--muted)">/512M</i></b></span>
+              <span class="kv"><em>配置</em><b>线程 8 · 变招 3</b></span>
+            </div>
+          </div>
+
+          <div class="tile">
+            <div class="tile-hd"><span class="num">02</span><h4>开局库</h4><span class="r">桔库 · 热加载</span></div>
+            <div class="stat"><em>收录局面</em><b>12,345</b></div>
+            <div class="hashbar" style="margin-top:12px"><i style="width:38%"></i></div>
+            <div class="kvrow" style="margin-top:8px">
+              <span class="kv"><em>今日命中率</em><b>38%</b></span>
+              <span class="kv"><em>最近更新</em><b>09-28</b></span>
+            </div>
+          </div>
+
+          <div class="tile span2">
+            <div class="tile-hd"><span class="num">03</span><h4>连接</h4><span class="r">WSS · 自签证书（指纹锁定）</span></div>
+            <table class="tbl">
+              <tr><th style="width:86px">会话</th><th>客户端</th><th style="width:70px">版本</th><th style="width:70px">RTT</th><th style="width:110px">路径</th><th style="width:150px">最后 position</th></tr>
+              <tr><td class="mv">3f2a…c9</td><td>Android · 内阁</td><td>v1</td><td class="sc">12ms</td><td>LAN</td><td class="t">r1ba1/9/1c2c4/p1…</td></tr>
+            </table>
+            <div class="fp"><span>证书指纹</span><code>SHA-256 9f3c 71ad 04be … a17e</code></div>
+            <div class="btnrow2">
+              <span class="cbtn pri">连接二维码</span>
+              <span class="cbtn dang">断开会话</span>
+            </div>
+          </div>
+
+          <div class="tile span2">
+            <div class="tile-hd" style="margin-bottom:8px"><span class="num">04</span><h4>高级功能</h4><span class="r">一次展开一个面板</span></div>
+            <div class="advchips">
+              <span class="cbtn">引擎调参</span>
+              <span class="cbtn">建议流</span>
+              <span class="cbtn">开局库</span>
+              <span class="cbtn">日志</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 展开态 900×770 -->
+    <div class="shot" id="shot-console-expand">
+      <div class="shotcap"><i>②</i>控制台 · 展开态 900×770（示例：建议流面板）</div>
+      <div class="console tall" style="height:770px">
+        <div class="cs-head">
+          <img class="cs-logo" src="../../assets/icon/cabinet.png" alt="">
+          <div>
+            <div class="cs-kicker">内阁 · CABINET</div>
+            <h1>内阁 · 控制台</h1>
+          </div>
+          <div class="cs-chips">
+            <span class="chip jade"><i class="dot jade" style="width:7px;height:7px"></i>引擎 就绪</span>
+            <span class="chip">库 12,345</span>
+            <span class="chip amber"><i class="dot amber" style="width:7px;height:7px"></i>连接 1</span>
+          </div>
+        </div>
+
+        <div class="bento">
+          <div class="tile">
+            <div class="tile-hd"><span class="num">01</span><h4>引擎</h4><span class="r">皮卡鱼 · UCI</span></div>
+            <div class="stats3">
+              <div class="stat"><em>状态</em><b class="ok">就绪</b></div>
+              <div class="stat"><em>深度 / 目标</em><b>20<i>/24</i></b></div>
+              <div class="stat"><em>搜索速率</em><b>1.8M<i>n/s</i></b></div>
+            </div>
+            <div class="kvrow">
+              <span class="kv"><em>节点</em><b>12.4M</b></span>
+              <span class="kv"><em>哈希</em><b>128M<i style="font-size:10px;color:var(--muted)">/512M</i></b></span>
+              <span class="kv"><em>配置</em><b>线程 8 · 变招 3</b></span>
+            </div>
+          </div>
+
+          <div class="tile">
+            <div class="tile-hd"><span class="num">02</span><h4>开局库</h4><span class="r">桔库 · 热加载</span></div>
+            <div class="stat"><em>收录局面</em><b>12,345</b></div>
+            <div class="hashbar" style="margin-top:12px"><i style="width:38%"></i></div>
+            <div class="kvrow" style="margin-top:8px">
+              <span class="kv"><em>今日命中率</em><b>38%</b></span>
+              <span class="kv"><em>最近更新</em><b>09-28</b></span>
+            </div>
+          </div>
+
+          <div class="tile span2">
+            <div class="tile-hd"><span class="num">03</span><h4>连接</h4><span class="r">WSS · 自签证书（指纹锁定）</span></div>
+            <table class="tbl">
+              <tr><th style="width:86px">会话</th><th>客户端</th><th style="width:70px">版本</th><th style="width:70px">RTT</th><th style="width:110px">路径</th><th style="width:150px">最后 position</th></tr>
+              <tr><td class="mv">3f2a…c9</td><td>Android · 内阁</td><td>v1</td><td class="sc">12ms</td><td>LAN</td><td class="t">r1ba1/9/1c2c4/p1…</td></tr>
+            </table>
+            <div class="fp"><span>证书指纹</span><code>SHA-256 9f3c 71ad 04be … a17e</code></div>
+            <div class="btnrow2">
+              <span class="cbtn pri">连接二维码</span>
+              <span class="cbtn dang">断开会话</span>
+            </div>
+          </div>
+
+          <div class="tile span2" style="background:var(--inset)">
+            <div class="tile-hd" style="margin-bottom:8px"><span class="num">04</span><h4>高级功能</h4><span class="r">一次展开一个面板</span></div>
+            <div class="advchips">
+              <span class="cbtn">引擎调参</span>
+              <span class="cbtn on">建议流</span>
+              <span class="cbtn">开局库</span>
+              <span class="cbtn">日志</span>
+            </div>
+
+            <!-- 展开的"建议流"面板（含 FEN 局面语境，对应审查报告 P1-4） -->
+            <div style="margin-top:12px;background:var(--surface);border:1px solid var(--line-1);border-radius:10px;padding:11px 13px">
+              <div class="tile-hd" style="margin-bottom:6px"><h4 style="font-size:12.5px">建议流（历史沉淀 · 最近 50 条）</h4><span class="r">今日 128 条</span></div>
+              <table class="tbl">
+                <tr><th style="width:78px">时间</th><th style="width:112px">来源</th><th>局面（FEN 摘要）</th><th style="width:96px">着法</th><th style="width:70px">分数</th><th style="width:56px">深度</th></tr>
+                <tr><td class="t">21:04:12</td><td>开局库·桔库</td><td class="t">r1ba1/9/1c2c4/p1…</td><td class="mv">马三进二</td><td class="sc">+0.82</td><td>—</td></tr>
+                <tr><td class="t">21:03:47</td><td>引擎</td><td class="t">2bak4/9/2c1c4/p…</td><td class="mv">炮八平五</td><td class="sc">+0.41</td><td>20</td></tr>
+                <tr><td class="t">21:02:03</td><td>引擎</td><td class="t">3ak4/4a4/9/…</td><td class="mv">车九平八</td><td class="t">-0.17</td><td>22</td></tr>
+                <tr><td class="t">20:58:55</td><td>引擎</td><td class="t">r1ba1/4k4/…</td><td class="mv">兵七进一</td><td class="sc">+1.05</td><td>21</td></tr>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 托盘菜单 -->
+    <div class="shot" id="shot-tray">
+      <div class="shotcap"><i>③</i>托盘菜单（Win 系统托盘右键）· 1:1</div>
+      <div class="traymenu">
+        <div class="tray-hd">
+          <img src="../../assets/icon/cabinet.png" alt="">
+          <div><span class="tt">内阁 · 运行中</span><span class="ts">引擎:就绪 · 库:12345 · 连接:1</span></div>
+        </div>
+        <div class="tray-item hl">打开面板</div>
+        <div class="tray-item">打开日志目录</div>
+        <div class="tray-item">连接二维码</div>
+        <div class="tray-sep"></div>
+        <div class="tray-item danger">退出</div>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<!-- ================= 四 · token 附录 ================= -->
+<section class="group" id="g-tokens">
+  <h2><span>04</span>设计 token（两端共享语义）</h2>
+  <p class="note">两端色值同源：手机端现有 #BF360C 与电脑端 #D05A44 收敛为同一支朱砂；语义色只用于状态，不再混用。</p>
+  <div class="row">
+    <div class="shot" id="shot-tokens">
+      <div class="tokwrap">
+        <div class="swgrid">
+          <div class="swcard"><div class="c" style="background:#14171C"></div><div class="n">墨底</div><div class="h">#14171C</div><div class="u">控制台背景 · 深色基准</div></div>
+          <div class="swcard"><div class="c" style="background:#1B1E24"></div><div class="n">炭面</div><div class="h">#1B1E24</div><div class="u">卡片 / 弹层 / tile</div></div>
+          <div class="swcard"><div class="c" style="background:#E8E6E1"></div><div class="n">象牙</div><div class="h">#E8E6E1</div><div class="u">主前景文字</div></div>
+          <div class="swcard"><div class="c" style="background:#9A9EA6"></div><div class="n">次级字</div><div class="h">#9A9EA6</div><div class="u">说明 / 标签</div></div>
+          <div class="swcard"><div class="c" style="background:#D05A44"></div><div class="n">朱砂（主色）</div><div class="h">#D05A44 · 按 #C35440</div><div class="u">品牌/描边 · 红方 · 白字按钮底</div></div>
+          <div class="swcard"><div class="c" style="background:#FFC107"></div><div class="n">琥珀</div><div class="h">#FFC107 / #FFE082 / #9A5B00</div><div class="u">候选·待定（线 / 深色面字 / 浅色面字）</div></div>
+          <div class="swcard"><div class="c" style="background:#2E7D32"></div><div class="n">玉（建议）</div><div class="h">#1B5E20 / #A5D6A7</div><div class="u">建议箭头描边 / 填充·就绪</div></div>
+          <div class="swcard"><div class="c" style="background:#90CAF9"></div><div class="n">石青（信息）</div><div class="h">#90CAF9</div><div class="u">中性信息提示</div></div>
+        </div>
+        <div class="typebox">
+          <div class="typerow"><span class="sp">28 sp</span><span style="font-size:28px;font-weight:800">内阁 车马炮</span><span style="font-size:11px;color:var(--muted)">页面大标题</span></div>
+          <div class="typerow"><span class="sp">22 sp</span><span style="font-size:22px;font-weight:800">红优 +0.8</span><span style="font-size:11px;color:var(--muted)">优势大字（详情窗）</span></div>
+          <div class="typerow"><span class="sp">17 sp</span><span style="font-size:17px;font-weight:700">分区标题</span><span style="font-size:11px;color:var(--muted)">瑞士式层级</span></div>
+          <div class="typerow"><span class="sp">15 sp</span><span style="font-size:15px;font-weight:700;color:var(--amber-text)">轮到我方走</span><span style="font-size:11px;color:var(--muted)">悬浮窗主状态</span></div>
+          <div class="typerow"><span class="sp">13 sp</span><span style="font-size:13px">正文与输入</span><span style="font-size:11px;color:var(--muted)">卡片正文</span></div>
+          <div class="typerow"><span class="sp">12 sp</span><span style="font-size:12px;color:var(--muted)">标签 / 次级说明</span><span style="font-size:11px;color:var(--muted)">说明文字</span></div>
+          <div class="typerow" style="border:none"><span class="sp">11 sp</span><span style="font-size:11px">悬浮窗按钮（契约下限）</span><span style="font-size:11px;color:var(--muted)">「深度24」四字符不溢出</span></div>
+          <div class="radiibox">
+            <div><div style="width:88px;height:40px;border-radius:var(--r-s);background:var(--surface);border:1px solid var(--line-2);display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--muted)">8 dp</div></div>
+            <div><div style="width:88px;height:40px;border-radius:var(--r-m);background:var(--surface);border:1px solid var(--line-2);display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--muted)">12 dp</div></div>
+            <div><div style="width:88px;height:40px;border-radius:var(--r-l);background:var(--surface);border:1px solid var(--line-2);display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--muted)">16 dp</div></div>
+            <div><div style="width:88px;height:40px;border-radius:var(--r-xl);background:var(--surface);border:1px solid var(--line-2);display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--muted)">20 dp</div></div>
+            <span style="font-size:11px;color:var(--muted);padding-bottom:12px">圆角四级：输入/按钮/卡片/悬浮窗</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 悬浮窗面板模板（JS 注入到各容器，避免重复） ============ -->
+<template id="tpl-panel">
+  <div class="panel">
+    <div class="pcol left">
+      <div class="pstat"><span class="dot jade" style="width:7px;height:7px"></span>运行中 · 用时 1.2s</div>
+      <div class="pbig">轮到我方走</div>
+      <div class="pscore">红方优势 +0.8</div>
+      <div class="prule"></div>
+      <div class="pcand">候选 1/3 · 马三进二</div>
+      <div class="pdots"><i class="on"></i><i></i><i></i></div>
+      <div class="pbtns"><span>变招</span><span>悔棋</span><span>手动</span></div>
+    </div>
+    <div class="pboardwrap"><div class="board" data-board data-flip="false" data-bar="bottom" style="width:100%;height:100%"></div></div>
+    <div class="pcol right">
+      <span class="vchip2">深度 <b>20</b></span>
+      <span class="vchip2">哈希 <b>2g</b></span>
+      <span class="abtn">更新</span>
+      <span class="abtn warn">停止</span>
+      <span class="abtn">关闭</span>
+      <span class="abtn">详情</span>
+    </div>
+  </div>
+</template>
+
+<script>
+/* ===== 与 OverlayChessView.kt 一致的棋盘几何（1240×1340 基准） ===== */
+const G = {W:1240, H:1340, XO:22, YO:5, IV:136, PS:110};
+/* 局中盘面（canonical：红恒在下方 y=9；与视觉稿文字说明的走法一致） */
+const POS = [
+  // 红方
+  [4,9,'r_shuai'],[3,9,'r_shi'],[5,9,'r_shi'],[2,9,'r_xiang'],[6,9,'r_xiang'],
+  [0,9,'r_ju'],[8,9,'r_ju'],[2,7,'r_ma'],[6,7,'r_ma'],[1,7,'r_pao'],[4,7,'r_pao'],
+  [0,6,'r_bing'],[4,6,'r_bing'],[6,6,'r_bing'],[8,6,'r_bing'],[2,5,'r_bing'],
+  // 黑方
+  [4,0,'b_jiang'],[3,0,'b_shi'],[5,0,'b_shi'],[2,0,'b_xiang'],[6,0,'b_xiang'],
+  [0,0,'b_ju'],[8,0,'b_ju'],[2,2,'b_ma'],[7,0,'b_ma'],[1,2,'b_pao'],[7,2,'b_pao'],
+  [0,3,'b_zu'],[2,3,'b_zu'],[4,3,'b_zu'],[6,3,'b_zu'],[8,4,'b_zu'],
+];
+/* 建议着法（绿箭头 · 定着）：马(6,7) → (7,5)，记谱「马三进二」 */
+const ARROW = {from:[6,7], to:[7,5], mature:true};
+
+const IMG  = '../../phone/app/src/main/res/drawable/';
+/* 几何换算：格心 = (77 + i*136) * scale（与 OverlayChessView.center 相同） */
+const cx = i => (G.XO + i*G.IV + G.PS/2) / G.W * 100;
+const cy = i => (G.YO + i*G.IV + G.PS/2) / G.H * 100;
+
+function buildBoard(el){
+  const flip = el.dataset.flip === 'true';
+  const gx = x => flip ? 8-x : x, gy = y => flip ? 9-y : y;
+  for (const [x,y,code] of POS){
+    const img = document.createElement('img');
+    img.className = 'pc';
+    img.src = IMG + code + '.png';
+    img.alt = '';
+    img.style.left = cx(gx(x)) + '%';
+    img.style.top  = cy(gy(y)) + '%';
+    el.appendChild(img);
+  }
+  // 建议走法箭头（玉：填充 + 描边双层，参数按 1240×1340 基准）
+  if (el.dataset.arrow !== 'off'){
+    const [fx,fy] = ARROW.from, [tx,ty] = ARROW.to;
+    const x1 = (G.XO + gx(fx)*G.IV + G.PS/2), y1 = (G.YO + gy(fy)*G.IV + G.PS/2);
+    const x2 = (G.XO + gx(tx)*G.IV + G.PS/2), y2 = (G.YO + gy(ty)*G.IV + G.PS/2);
+    const ang = Math.atan2(y2-y1, x2-x1), HL = 118, HW = 56, SW = 24;
+    const bx = x2 - Math.cos(ang)*HL, by = y2 - Math.sin(ang)*HL;
+    const px = -Math.sin(ang), py = Math.cos(ang);
+    const ns = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(ns,'svg');
+    svg.setAttribute('viewBox', '0 0 1240 1340');
+    const line = document.createElementNS(ns,'line');
+    line.setAttribute('x1',x1); line.setAttribute('y1',y1);
+    line.setAttribute('x2',bx); line.setAttribute('y2',by);
+    line.setAttribute('stroke', ARROW.mature ? '#1B5E20' : '#2B6FFF');
+    line.setAttribute('stroke-width', SW); line.setAttribute('stroke-linecap','round');
+    const head = document.createElementNS(ns,'polygon');
+    head.setAttribute('points',
+      `${x2},${y2} ${bx+px*HW},${by+py*HW} ${bx-px*HW},${by-py*HW}`);
+    head.setAttribute('fill', ARROW.mature ? '#A5D6A7' : '#8AB6FF');
+    head.setAttribute('stroke', ARROW.mature ? '#1B5E20' : '#2B6FFF');
+    head.setAttribute('stroke-width','6');
+    svg.appendChild(line); svg.appendChild(head);
+    el.appendChild(svg);
+  }
+  // 「我方」色条（底部 = 红方一侧）
+  if (el.dataset.bar !== 'none'){
+    const bar = document.createElement('i');
+    bar.className = 'bar';
+    bar.style.bottom = '0.6%';
+    el.appendChild(bar);
+  }
+}
+
+/* 主面板：把模板注入所有 [data-panel]（保留宿主的主题类/定位样式），再渲染其中的迷你棋盘 */
+function stampPanels(){
+  const tpl = document.getElementById('tpl-panel');
+  document.querySelectorAll('[data-panel]').forEach(host=>{
+    const frag = tpl.content.cloneNode(true);
+    const el = frag.firstElementChild;
+    host.classList.forEach(c=>{ if (c !== 'panel') el.classList.add(c); });
+    if (host.id) el.id = host.id;
+    if (host.getAttribute('style')) el.setAttribute('style', host.getAttribute('style'));
+    host.replaceWith(frag);
+  });
+}
+stampPanels();
+document.querySelectorAll('[data-board]').forEach(buildBoard);
+
+/* 整页长图：克隆未连接态机身并取消高度裁剪（展示滚动后的完整内容） */
+(function(){
+  const host = document.getElementById('shot-home-long');
+  const src = document.querySelector('#shot-home-idle .phone');
+  if (!host || !src) return;
+  const clone = src.cloneNode(true);
+  clone.classList.add('long');
+  host.appendChild(clone);
+})();
+
+/* 详情窗在主视觉稿中的定位（棋盘正下方，再避让底部主面板） */
+(function(){
+  const d = document.getElementById('ovl-detail-1');
+  const app = d && d.closest('.simwrap');
+  if (d && app){
+    const boardBottom = 60 + 424.6;            // 仿真棋盘底边（应用标题栏 24+36 之后）
+    d.style.position = 'absolute';
+    d.style.left = '16px';
+    d.style.top = boardBottom + 6 + 'px';     // 先试棋盘正下方（真机逻辑同：不足则试正上方）
+  }
+})();
+
+/* ===== 单张导出模式：#only=<shot-id>（支持动态切换，便于逐张测量与导出） ===== */
+function applyOnly(){
+  const m = location.hash.match(/only=([\w-]+)/);
+  document.querySelectorAll('.shot').forEach(s=>s.classList.remove('focus'));
+  if (!m){ document.body.classList.remove('only'); return; }
+  const keep = document.getElementById(m[1]);
+  if (!keep) return;
+  document.body.classList.add('only');
+  keep.classList.add('focus');
+  window.__ONLY__ = m[1];
+}
+applyOnly();
+window.addEventListener('hashchange', applyOnly);
+</script>
+</body>
+</html>

@@ -1,0 +1,42 @@
+# 内阁（Cabinet）配置示例
+# 复制为 configs/cabinet.toml 后修改；首次运行 cabinet 也会自动生成默认配置。
+# 注意：configs/cabinet.toml 含令牌，不进 git（已在 .gitignore 排除）。
+
+# WSS 监听地址；":9527" 监听所有网卡（局域网手机需能访问）
+bind = ":9527"
+
+# 配对令牌（64 hex 字符）。为空时首次启动自动生成随机令牌并回写本文件。
+# 用 `cabinet -gen-token` 可手动生成。手机端配对即用此令牌。
+token = "请运行 cabinet -gen-token 生成并粘贴到这里"
+
+[tls]
+# 自签证书目录。铁律：证书一经生成绝不自动重建（手机端固定证书指纹，
+# 重建 = 全部手机断联）。确需重签请人工删除目录内文件并重新配对。
+cert_dir = "cert"
+
+[log]
+# 日志级别：debug / info / warn / error
+level = "info"
+# 日志文件（控制台+文件双写）；留空则只写控制台
+file = "logs/cabinet.log"
+# 单文件上限（MB）与保留个数，超过滚动压缩
+max_size_mb = 10
+max_backups = 5
+
+[engine]
+# 引擎桥开关；关闭时服务退化为无引擎模式（position 回 not_ready）
+enable = true
+# 皮卡鱼可执行文件（官方 universal 构建自带 CPU 特性分发）
+path = "library/engine/pikafish.exe"
+# NNUE 权重（EvalFile）。相对路径按"资源根"解析（exe 目录；便携包为 appdata\），
+# 绝对路径原样使用；资源根解析见 internal/config/root.go
+nnue = "library/nnue/pikafish.nnue"
+# 引擎线程数；0 = 引擎自定（占满物理核）
+threads = 0
+# 哈希表大小（MB）；悬浮窗/面板切换后 PC 自动落盘回写本文件（重启保持）
+hash_mb = 256
+# 多路 PV 线数（悬浮窗"变招"按钮的多路候选来源）。1 = 单线最强棋力；
+# 调大后同深度搜索树分散、棋力下降（变招是用户手动开启的功能）
+multi_pv = 1
+# 固定深度制搜索目标深度
+depth = 20

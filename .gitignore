@@ -1,0 +1,73 @@
+# 运行时产物（证书/数据/库文件不进 git）
+cert/
+# 锚定根：根 data/ 是外部数据集与沉淀库；internal/ 等源码目录不受影响
+/data/
+# 根目录 library/ 是皮卡鱼等版权物部署位；必须锚定根，否则误伤 internal/library/ 源码包
+/library/
+# 日志整树与便携包运行时资源根（scripts/package-portable.bat 以仓库为根运行时生成）
+/logs/
+/appdata/
+configs/cabinet.toml
+*.log
+
+# 构建产物
+*.exe
+*.apk
+
+# 便携双轨打包产物（scripts/package-portable.bat 输出：zip 与 staging 中间目录）
+/dist/
+
+# vector-gen 构建输出与第三方 jar（构建说明见 tools/vector-gen/README.md）
+tools/vector-gen/out/
+tools/vector-gen/lib/
+
+# 版权物：模型与开局库（GPL/版权限制，另行分发）
+*.tflite
+*.onnx
+*.obk*
+*.nnue
+
+# 皮卡鱼官方发布包（含版权 exe/nnue/文档，仅本机部署用）
+Pikafish.*/
+
+# reference/ 是 GPL 代码的开发参考拷贝，不进编译不进版本库，
+# 避免未来开源时混淆许可边界（改写产出放 phone/ 等自研目录）
+reference/
+
+# 本机工具工作文件
+.zcode/
+.zcodeignore
+
+# 本机 CGO 工具链（MinGW-w64，构建说明见 README）
+.tools/
+
+# 构建备份文件
+*.exe~
+*.exe.old
+
+# 研发缓存（评测 npz/调试截图/临时产物等）
+/.cache/
+
+__pycache__/
+
+# 本机会话截图/调试产物
+/.shots/
+
+# 审查/联调证据截图（纯过程产物：结论已写进 docs）
+phone/tools/evidence/
+
+# 模型库（三家对照模型集中管理，大二进制不进 git）
+/模型库/
+
+# 构建资产上传暂存（版权物 zip，上传 GitHub Release assets 前的暂存位）
+/dist-upload/
+
+# 本机维护文件（不入库）
+AGENTS.md
+当前状态.md
+
+# 本机维护文件（不入库）
+docs/美学设计研究.md
+
+# 本机验证产物（悬停状态矩阵，配合设计研究文档使用）
+docs/design/hilite-states.png

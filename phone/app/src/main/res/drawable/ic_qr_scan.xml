@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 扫码图标（三定位角 + 中心块），主按钮 drawableStart 用 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="18dp"
+    android:height="18dp"
+    android:viewportWidth="18"
+    android:viewportHeight="18"
+    android:tint="#FFFFFF">
+    <path
+        android:pathData="M1.5,1.5 h5 v5 h-5 z"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="1.4" />
+    <path
+        android:pathData="M11.5,1.5 h5 v5 h-5 z"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="1.4" />
+    <path
+        android:pathData="M1.5,11.5 h5 v5 h-5 z"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="1.4" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M8,8 h2.5 v2.5 h-2.5 z" />
+</vector>

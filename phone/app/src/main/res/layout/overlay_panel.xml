@@ -1,0 +1,216 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 悬浮窗主面板（392×197dp 工程契约不变）：
+     左列 = 结构化 HUD（状态行 → 主状态大字 → 优势 → 细线 → 候选 + 点阵 → 三按钮），
+     中列 = 迷你棋盘（171×185dp，几何与 OverlayChessView 一致），
+     右列 = 值芯片（深度/哈希）＋ 动作按钮（更新/停止/关闭/详情）两级分权。
+     列宽 114/171/90 与内外距（6+114+2+2+171+2+90+6）不得改动——ScreenAssistService
+     按 392dp 计算默认位置与遮挡判定 -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/overlay_root"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:background="@drawable/overlay_bg"
+    android:clickable="true"
+    android:focusable="true"
+    android:orientation="horizontal"
+    android:padding="6dp">
+
+    <!-- 左列：状态行 + 主状态大字 + 优势 + 候选（1 秒读清，其余全部降噪） -->
+    <LinearLayout
+        android:layout_width="114dp"
+        android:layout_height="wrap_content"
+        android:orientation="vertical">
+
+        <!-- 状态行：● 运行中 · 用时 1.2s（点色 = 运行玉 / 等待琥珀 / 停止灰 / 异常红） -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <View
+                android:id="@+id/overlay_state_dot"
+                android:layout_width="6dp"
+                android:layout_height="6dp"
+                android:background="@drawable/step_num_idle" />
+
+            <TextView
+                android:id="@+id/overlay_state"
+                style="@style/OverlayState"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="5dp"
+                android:layout_weight="1" />
+        </LinearLayout>
+
+        <!-- 遮挡提醒：悬浮窗盖住已定位棋盘时显示（不影响识别但挡视线，移开即消失）。
+             独立小行而非挤占状态行（2026-10-03 教训：常驻提示顶掉"运行中·用时"被判异常）；
+             GONE 态不占高，392×197dp 面板契约不受影响 -->
+        <TextView
+            android:id="@+id/overlay_occluded"
+            style="@style/OverlayState"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="3dp"
+            android:text="挡住棋盘，建议移开"
+            android:visibility="gone" />
+
+        <!-- 主状态大字：轮到我方走 / 已停止指导 / 连接异常… -->
+        <TextView
+            android:id="@+id/overlay_status"
+            style="@style/OverlayHeadline"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="识别中" />
+
+        <!-- 优势行：红方优势 +0.8（我方视角：占优玉 / 劣势警示红） -->
+        <TextView
+            android:id="@+id/overlay_advantage"
+            style="@style/OverlayAdvantage"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:textColor="@color/qi_jade_text"
+            android:visibility="gone" />
+
+        <View
+            android:id="@+id/overlay_divider"
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_marginTop="6dp"
+            android:background="@color/qi_line1" />
+
+        <!-- 候选/预案：候选 1/3 · 马三进二 ✓（点阵同行尾部，见 OverlayPanelView） -->
+        <TextView
+            android:id="@+id/overlay_candidate"
+            style="@style/OverlayCandidate"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:textColor="@color/qi_ivory"
+            android:visibility="gone" />
+
+        <!-- 低频小按钮 2x2：变招/悔棋/手动/路数。23dp 双行（与右列动作按钮同高）——
+             若用 28dp，"两行大字+优势+两行候选"全可见时左列约 189dp，会顶破
+             185dp 棋盘主导线；23dp 最坏约 175dp 安全收进 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:orientation="vertical">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:id="@+id/overlay_btn_change"
+                    style="@style/OverlayAction"
+                    android:layout_width="0dp"
+                    android:layout_height="23dp"
+                    android:layout_marginEnd="2dp"
+                    android:layout_weight="1"
+                    android:text="变招" />
+
+                <TextView
+                    android:id="@+id/overlay_btn_undo"
+                    style="@style/OverlayAction"
+                    android:layout_width="0dp"
+                    android:layout_height="23dp"
+                    android:layout_weight="1"
+                    android:paddingHorizontal="0dp"
+                    android:text="悔棋" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="2dp"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:id="@+id/overlay_btn_manual"
+                    style="@style/OverlayAction"
+                    android:layout_width="0dp"
+                    android:layout_height="23dp"
+                    android:layout_marginEnd="2dp"
+                    android:layout_weight="1"
+                    android:paddingHorizontal="0dp"
+                    android:text="手动" />
+
+                <TextView
+                    android:id="@+id/overlay_btn_multipv"
+                    style="@style/OverlayAction"
+                    android:layout_width="0dp"
+                    android:layout_height="23dp"
+                    android:layout_weight="1"
+                    android:paddingHorizontal="0dp"
+                    android:text="路数" />
+            </LinearLayout>
+        </LinearLayout>
+    </LinearLayout>
+
+    <com.cabinet.assist.ui.OverlayChessView
+        android:id="@+id/overlay_chess"
+        android:layout_width="171dp"
+        android:layout_height="185dp"
+        android:layout_marginHorizontal="2dp" />
+
+    <!-- 右列：值芯片（深度/哈希，无描边）＋ 动作按钮（更新/停止/关闭/详情，1dp 描边）
+         按钮 23dp 高 + 2dp 间距，总高 146dp 收进棋盘高度内；
+         水平 padding 让按钮/芯片两侧各收 2dp——不顶面板圆角边框（392dp 列宽契约不动） -->
+    <LinearLayout
+        android:layout_width="90dp"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="2dp"
+        android:orientation="vertical"
+        android:paddingHorizontal="2dp">
+
+        <TextView
+            android:id="@+id/overlay_btn_strength"
+            style="@style/OverlayChip"
+            android:text="深度 —" />
+
+        <TextView
+            android:id="@+id/overlay_btn_hash"
+            style="@style/OverlayChip"
+            android:layout_marginTop="2dp"
+            android:text="哈希 —" />
+
+        <TextView
+            android:id="@+id/overlay_btn_turn"
+            style="@style/OverlayAction"
+            android:layout_width="match_parent"
+            android:layout_height="23dp"
+            android:layout_marginTop="2dp"
+            android:text="更新" />
+
+        <TextView
+            android:id="@+id/overlay_btn_pause"
+            style="@style/OverlayAction"
+            android:layout_width="match_parent"
+            android:layout_height="23dp"
+            android:layout_marginTop="2dp"
+            android:background="@drawable/overlay_action_stop_bg"
+            android:text="停止" />
+
+        <TextView
+            android:id="@+id/overlay_btn_close"
+            style="@style/OverlayAction"
+            android:layout_width="match_parent"
+            android:layout_height="23dp"
+            android:layout_marginTop="2dp"
+            android:text="关闭" />
+
+        <TextView
+            android:id="@+id/overlay_btn_detail"
+            style="@style/OverlayAction"
+            android:layout_width="match_parent"
+            android:layout_height="23dp"
+            android:layout_marginTop="2dp"
+            android:text="详情" />
+
+    </LinearLayout>
+</LinearLayout>
