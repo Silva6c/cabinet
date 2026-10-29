@@ -2,6 +2,14 @@
 
 # 内阁（Cabinet）
 
+<p align="center">
+  <a href="https://github.com/Silva6c/cabinet/actions/workflows/go.yml"><img src="https://github.com/Silva6c/cabinet/actions/workflows/go.yml/badge.svg" alt="Go 门禁"></a>
+  <a href="https://github.com/Silva6c/cabinet/actions/workflows/release-build.yml"><img src="https://github.com/Silva6c/cabinet/actions/workflows/release-build.yml/badge.svg" alt="构建与发布"></a>
+  <a href="https://github.com/Silva6c/cabinet/releases"><img src="https://img.shields.io/github/v/release/Silva6c/cabinet" alt="最新稳定版"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0-blue.svg" alt="许可证"></a>
+  <img src="https://img.shields.io/badge/platform-Windows%20%2F%20Android-green.svg" alt="平台">
+</p>
+
 **手机做"眼睛"，电脑做"脑子"**——手机端通过录屏识别棋盘局面，电脑端用
 皮卡鱼（Pikafish）引擎与开局库实时分析，建议以悬浮窗呈现在手机对局界面上。
 适用于象棋 App 对局、复盘与学习场景。
