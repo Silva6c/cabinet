@@ -106,6 +106,11 @@ type EngineState struct {
 	State  string `json:"state"`
 	Depth  int    `json:"depth,omitempty"`
 	HashMB int    `json:"hash_mb,omitempty"`
+	// MoveTimeMS 思考模式时间制上限（毫秒，2026-10-28 同步补链）：仅 welcome
+	// 填写，与 Depth/HashMB 同款。指针语义：nil = 引擎桥不可调（旧端忽略），
+	// 0 = 深度制、>0 = 时间制（go movetime）——0 必须能传到，故用指针不用
+	// omitempty int
+	MoveTimeMS *int `json:"movetime_ms,omitempty"`
 }
 
 // Welcome 会话建立帧（PC→手机，auth 成功后）。
@@ -241,10 +246,11 @@ type Bye struct {
 // 越界整帧拒绝。旧端忽略新增字段（协议 §7，无需升版本）。
 type SetEngine struct {
 	frameBase
-	Depth   *int `json:"depth,omitempty"`
-	HashMB  *int `json:"hash_mb,omitempty"`
-	Threads *int `json:"threads,omitempty"`
-	MultiPV *int `json:"multi_pv,omitempty"`
+	Depth      *int `json:"depth,omitempty"`
+	MoveTimeMS *int `json:"movetime_ms,omitempty"` // 时间制上限毫秒；0 = 深度制（旧端忽略，协议 §7）
+	HashMB     *int `json:"hash_mb,omitempty"`
+	Threads    *int `json:"threads,omitempty"`
+	MultiPV    *int `json:"multi_pv,omitempty"`
 }
 
 // Log 手机端诊断日志上行帧（手机→PC，协议 §4.11）。

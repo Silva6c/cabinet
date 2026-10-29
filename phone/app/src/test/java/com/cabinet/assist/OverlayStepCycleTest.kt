@@ -38,3 +38,37 @@ class OverlayStepCycleTest {
         assertEquals(12, ScreenAssistService.nextStepValue(intArrayOf(12, 16, 20), 41))
     }
 }
+
+/** 思考单芯片（2026-10-28 重设计：短按模式内循环档位 + 长按模式切换） */
+class OverlayThinkChipTest {
+
+    private val timeSteps = intArrayOf(0, 1000, 3000, 5000, 10000, 20000)
+    private val depthSteps = intArrayOf(12, 16, 20, 24, 28, 32, 36, 40)
+
+    @Test
+    fun `时间制内短按循环且尾档回首档`() {
+        assertEquals(1000, ScreenAssistService.nextStepValue(timeSteps, 0))
+        assertEquals(5000, ScreenAssistService.nextStepValue(timeSteps, 3000))
+        assertEquals(0, ScreenAssistService.nextStepValue(timeSteps, 20000))
+    }
+
+    @Test
+    fun `深度制内短按循环不变`() {
+        assertEquals(24, ScreenAssistService.nextStepValue(depthSteps, 20))
+        assertEquals(12, ScreenAssistService.nextStepValue(depthSteps, 40))
+    }
+
+    @Test
+    fun `旧存档非档值迁移`() {
+        assertEquals(1000, ScreenAssistService.nextStepValue(timeSteps, 800))
+        assertEquals(3000, ScreenAssistService.nextStepValue(timeSteps, 2000))
+    }
+
+    @Test
+    fun `芯片文案按现行模式自明`() {
+        assertEquals("不限", ScreenAssistService.moveTimeChipText(0))
+        assertEquals("3秒", ScreenAssistService.moveTimeChipText(3000))
+        assertEquals("时间3秒", ScreenAssistService.thinkChipText(true, 20, 3000))
+        assertEquals("深度20", ScreenAssistService.thinkChipText(false, 20, 0))
+    }
+}

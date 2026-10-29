@@ -116,6 +116,14 @@ class ScreenAssistService : Service() {
          * （尾档循环回首档）；不在档内（旧存档迁移）→跳到第一个更大的档，全部
          * 档都更小则回最低档。纯函数抽出便于单测。
          */
+        /** 时间芯片/状态文案：0 = "不限"（深度制），其余按秒 */
+        internal fun moveTimeChipText(ms: Int): String =
+            if (ms <= 0) "不限" else "${ms / 1000}秒"
+
+        /** 思考芯片文案：现行模式自明——时间制 "时间3秒" / 深度制 "深度20" */
+        internal fun thinkChipText(timeMode: Boolean, depth: Int, timeMs: Int): String =
+            if (timeMode) "时间" + moveTimeChipText(timeMs) else "深度$depth"
+
         internal fun nextStepValue(steps: IntArray, current: Int): Int {
             val idx = steps.indexOf(current)
             if (idx >= 0) return steps[(idx + 1) % steps.size]
@@ -446,6 +454,12 @@ class ScreenAssistService : Service() {
      *  协议 §4.10 校验 1–5，手机端只露 1–3——放宽产品档位改这里即可，
      *  上限受 PC 端 handleSetEngine 的 5 约束 */
     private val multiPvSteps = intArrayOf(1, 2, 3)
+    /** 时间制档位（悬浮窗"时间"芯片循环；0 = 按深度，其余 = go movetime 毫秒）。
+     *  档位与 PC 面板"时间上限"下拉完全一致（2026-10-28 思考模式定稿）；
+     *  PC 端校验 0 / 500–20000，本表值全部落在合法域 */
+    private val moveTimeSteps = intArrayOf(0, 1000, 3000, 5000, 10000, 20000)
+    /** 时间制记忆值（长按切回深度制时保留，再切回时间制恢复；会话级，非持久化） */
+    private var lastThinkTimeMs = 0
 
     /**
      * ⚠实验临时开关（2026-10-04 识别引擎对比实验专用，勿提交为 true）：
@@ -1516,7 +1530,7 @@ class ScreenAssistService : Service() {
             mainHandler.post { postRender() }
         }
 
-        override fun onServerEngineConfig(depth: Int, hashMB: Int) {
+        override fun onServerEngineConfig(depth: Int, hashMB: Int, movetimeMS: Int?) {
             // PC 实际算力同步（welcome 携带，2026-10-02）：按钮显示与循环起点改为
             // PC 真实值——此前显示手机本地默认档，出现"手机 0.25g / 电脑 2048"错位。
             // 只在 PC 报了有效值时覆盖对应档（depth/hash 各自独立，缺省侧保持原样）
@@ -1528,6 +1542,13 @@ class ScreenAssistService : Service() {
                 if (hashMB > 0 && config.engineHashMB != hashMB) {
                     RLog.i(TAG, "同步 PC 实际 Hash: ${config.engineHashMB} -> $hashMB")
                     config.engineHashMB = hashMB
+                }
+                // 思考模式同步（2026-10-28 补链）：movetime_ms 字段存在即以 PC 为准
+                // （0 = 深度制也是有效值）；同时刷新时间记忆，芯片显示立即跟随
+                if (movetimeMS != null && config.engineMoveTimeMs != movetimeMS) {
+                    RLog.i(TAG, "同步 PC 思考模式: ${config.engineMoveTimeMs} -> $movetimeMS")
+                    config.engineMoveTimeMs = movetimeMS
+                    if (movetimeMS > 0) lastThinkTimeMs = movetimeMS
                 }
                 postRender()
             }
@@ -1809,14 +1830,39 @@ class ScreenAssistService : Service() {
      */
     private fun onOverlayAction(action: OverlayAction) {
         when (action) {
-            OverlayAction.CYCLE_DEPTH -> {
-                // 远程调算力（协议 §4.10）：循环深度档位并上行 set_engine。
-                // PC 端 TuneEngine 应用后自动落盘回写 cabinet.toml（切换记住
-                // 选择 2026-10-18）——本机 config.engineDepth 只是显示起点
-                val next = nextStepValue(depthSteps, config.engineDepth)
-                config.engineDepth = next
-                remote?.sendSetEngine(next, null)
-                setStatus("电脑引擎深度 → $next")
+            OverlayAction.CYCLE_THINK -> {
+                // 思考档循环（单芯片短按，协议 §4.10 set_engine）：时间制内循环
+                // 时间档、深度制内循环深度档。PC 端 TuneEngine 应用后自动落盘
+                // （重启保持）——本机持久化值只是显示起点
+                if (config.engineMoveTimeMs > 0) {
+                    val next = nextStepValue(moveTimeSteps, config.engineMoveTimeMs)
+                    config.engineMoveTimeMs = next
+                    remote?.sendSetEngine(null, null, movetimeMS = next)
+                    setStatus("思考 → 时间制 ${moveTimeChipText(next)}（已生效）")
+                } else {
+                    val next = nextStepValue(depthSteps, config.engineDepth)
+                    config.engineDepth = next
+                    remote?.sendSetEngine(next, null)
+                    setStatus("思考 → 深度制 $next 层（已生效）")
+                }
+                postRender()
+            }
+            OverlayAction.SWITCH_THINK_MODE -> {
+                // 模式切换（单芯片长按，2026-10-28 重设计）：深度制 ↔ 时间制。
+                // 切时间制用记忆的时间值（会话内记住上次秒数，无记忆默认 3s）；
+                // 切深度制把 movetime_ms 归零（时间制优先语义下这是唯一退出路径）。
+                // 一帧同时带 depth+movetime_ms，服务端整帧校验原子应用。
+                if (config.engineMoveTimeMs > 0) {
+                    lastThinkTimeMs = config.engineMoveTimeMs
+                    config.engineMoveTimeMs = 0
+                    remote?.sendSetEngine(config.engineDepth, null, movetimeMS = 0)
+                    setStatus("思考 → 深度制 ${config.engineDepth} 层（已生效）")
+                } else {
+                    val ms = if (lastThinkTimeMs > 0) lastThinkTimeMs else 3000
+                    config.engineMoveTimeMs = ms
+                    remote?.sendSetEngine(null, null, movetimeMS = ms)
+                    setStatus("思考 → 时间制 ${moveTimeChipText(ms)}（已生效）")
+                }
                 postRender()
             }
             OverlayAction.CYCLE_HASH -> {
@@ -2344,7 +2390,7 @@ class ScreenAssistService : Service() {
             paused = paused,
             manualMode = manualMode,
             selectedCell = manualSelected,
-            depthText = depthLabel(),
+            thinkText = thinkLabel(),
             hashText = hashLabel(),
             multiPvText = config.engineMultiPv.toString(),
         ))
@@ -2357,8 +2403,15 @@ class ScreenAssistService : Service() {
     // ==================== 详情窗（窗口2） ====================
 
     /** 深度档芯片值（"20"；未配置/未连接返回 null → 芯片显示占位） */
-    private fun depthLabel(): String? =
-        if (remote == null) null else config.engineDepth.toString()
+    /** 思考芯片值文案（"深度20"/"时间3秒"——现行模式自明）；未连接返回 null */
+    private fun thinkLabel(): String? {
+        if (remote == null) return null
+        return if (config.engineMoveTimeMs > 0) {
+            "时间" + moveTimeChipText(config.engineMoveTimeMs)
+        } else {
+            "深度" + config.engineDepth
+        }
+    }
 
     /** 状态行"用时"：整数档（2026-10-03 用户要求去小数点）——60s 内显秒、1h 内显分、以上显时；未启动返回空串省略用时 */
     private fun elapsedText(): String {

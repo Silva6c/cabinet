@@ -7,6 +7,8 @@
 //   - 版本比较用 tag 日期（stable-YYYYMMDD），不用 vc 提交数——提交数随
 //     历史重建会重置，前后不可比；
 //   - 免 token 匿名查公开 API；私有仓期间 404 属预期，静默失败；
+//   - 代理失败直连兜底一次（代理节点抖动常见，直连可达时保成功率）；
+//     失败文案归类为短句上屏，完整错误链只进日志；
 //   - 手机端不做更新检查（APK 手动交付；api.github.com 过不了 GFW）。
 //
 // 绿色软件铁律：安装位置 = exe 自身目录；全部中间文件
@@ -22,7 +24,9 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 )
@@ -91,14 +95,16 @@ type Checker struct {
 	assetSize   int64
 	progress    float64
 
-	ownerRepo   string
-	apiBase     string // 默认 https://api.github.com；测试注入 httptest 地址
-	version     string
-	logger      *slog.Logger
-	client      *http.Client       // API 查询（3 秒超时，拍板定值）
-	dlClient    *http.Client       // 下载（无总超时——大文件慢速经代理属正常；读空闲 30s 由 download.go 兜底）
-	cancel      context.CancelFunc // 下载取消（Cancel 置发）
-	idleExpired bool               // 下载读空闲超时标志（定时器置位，错误分类时消费）
+	ownerRepo    string
+	apiBase      string // 默认 https://api.github.com；测试注入 httptest 地址
+	version      string
+	logger       *slog.Logger
+	proxy        func(*http.Request) (*url.URL, error) // 代理选择（env→系统代理）；判别"曾走代理"
+	client       *http.Client                          // API 查询（3 秒超时，拍板定值）
+	directClient *http.Client                          // 直连兜底（代理失败后重试一次）
+	dlClient     *http.Client                          // 下载（无总超时——大文件慢速经代理属正常；读空闲 30s 由 download.go 兜底）
+	cancel       context.CancelFunc                    // 下载取消（Cancel 置发）
+	idleExpired  bool                                  // 下载读空闲超时标志（定时器置位，错误分类时消费）
 }
 
 // New 创建检查器。ownerRepo 形如 "Silva6c/cabinet"；version 为 ldflags 注入的
@@ -107,15 +113,18 @@ func New(ownerRepo, version string, logger *slog.Logger) *Checker {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	proxy := proxyFunc()
 	return &Checker{
-		ownerRepo: ownerRepo,
-		apiBase:   "https://api.github.com",
-		version:   version,
-		state:     StateIdle,
-		message:   "尚未检查",
-		logger:    logger,
-		client:    newClient(3*time.Second, proxyFunc()),
-		dlClient:  newClient(0, proxyFunc()),
+		ownerRepo:    ownerRepo,
+		apiBase:      "https://api.github.com",
+		version:      version,
+		state:        StateIdle,
+		message:      "尚未检查",
+		logger:       logger,
+		proxy:        proxy,
+		client:       newClient(3*time.Second, proxy),
+		directClient: newClient(3*time.Second, nil),
+		dlClient:     newClient(0, proxy),
 	}
 }
 
@@ -222,16 +231,18 @@ func (c *Checker) Check(ctx context.Context) {
 // 端点：assets 版权物 Release 也是正式 Release，会污染 latest 语义——列表
 // 过滤 + 日期取最大，双保险。
 func (c *Checker) fetchReleases(ctx context.Context) (*ghRelease, error) {
-	url := c.apiBase + "/repos/" + c.ownerRepo + "/releases?per_page=10"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("构造请求失败: %w", err)
+	full := c.apiBase + "/repos/" + c.ownerRepo + "/releases?per_page=10"
+	resp, err := c.apiGet(ctx, full, c.client)
+	if err != nil && c.viaProxy(full) {
+		// 代理路径失败：直连兜底一次——代理客户端节点抖动时（系统代理开着、
+		// TUN 直连反而可达的组合很常见）多试一次；直连本就不通的场景多耗
+		// 一次 3 秒超时，属可接受代价。
+		c.logger.Info("代理请求失败，直连重试", "err", err)
+		resp, err = c.apiGet(ctx, full, c.directClient)
 	}
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("User-Agent", "cabinet/"+c.version) // GitHub API 强制 UA
-	resp, err := c.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("网络不可达: %w", err)
+		c.logger.Info("网络请求失败", "err", err) // 全量错误链只进日志
+		return nil, errors.New(failureMessage(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 	switch {
@@ -250,6 +261,51 @@ func (c *Checker) fetchReleases(ctx context.Context) (*ghRelease, error) {
 		return nil, errNoStable
 	}
 	return rel, nil
+}
+
+// viaProxy 判别该地址当前是否会经代理发出（直连兜底的触发条件：仅当本就
+// 配置了代理时才值得多试一次直连）。
+func (c *Checker) viaProxy(full string) bool {
+	if c.proxy == nil {
+		return false
+	}
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, full, nil)
+	if err != nil {
+		return false
+	}
+	u, _ := c.proxy(req)
+	return u != nil
+}
+
+// apiGet 构造 GET 请求并经指定 client 发出（Accept/UA 统一在此设置，
+// GitHub API 强制 UA）。
+func (c *Checker) apiGet(ctx context.Context, full string, client *http.Client) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, full, nil)
+	if err != nil {
+		return nil, fmt.Errorf("构造请求失败: %w", err)
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", "cabinet/"+c.version)
+	return client.Do(req)
+}
+
+// failureMessage 把网络层错误归类为简短中文文案：上屏文案必须短——结果行
+// 宽度有限，长错误串（含 URL 与 Go 错误链）会撑破面板（2026-10-28 用户
+// 真机实录）；完整错误链已在调用方记日志。
+func failureMessage(err error) string {
+	s := strings.ToLower(err.Error())
+	switch {
+	case os.IsTimeout(err), strings.Contains(s, "client.timeout"), strings.Contains(s, "context deadline exceeded"):
+		return "网络超时，可稍后重试"
+	case strings.Contains(s, "eof"), strings.Contains(s, "connection reset"):
+		return "连接被中断（代理或网络抖动），可重试"
+	case strings.Contains(s, "connection refused"):
+		return "无法连接代理或网络"
+	case strings.Contains(s, "no such host"), strings.Contains(s, "proxyconnect"):
+		return "代理或域名不可达，请检查网络"
+	default:
+		return "网络不可达，请检查代理设置"
+	}
 }
 
 // pickLatestStable 从 release 列表过滤出最新稳定版：tag 名必须精确匹配

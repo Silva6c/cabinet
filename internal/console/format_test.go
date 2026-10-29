@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"fyne.io/fyne/v2/theme"
 )
 
 // TestFmtInt 千分位。
@@ -188,6 +190,73 @@ func TestTailLines(t *testing.T) {
 	}
 	if lines := tailLines(path, 15); len(lines) != 2 || lines[0] != "a" || lines[1] != "b" {
 		t.Fatalf("短文件应全量返回, got %v", lines)
+	}
+}
+
+// TestParseLogLine slog TextHandler 行解析：带引号（含转义）与中文无引号两形态，
+// 时间取时分秒段；解析失败 ok=false。
+func TestParseLogLine(t *testing.T) {
+	e, ok := parseLogLine(`time=2026-10-29T02:34:03.686+08:00 level=INFO msg="WSS 服务启动" addr=:9527`)
+	if !ok || e.time != "02:34:03" || e.level != "INFO" || e.msg != "WSS 服务启动" || e.rest != "addr=:9527" {
+		t.Fatalf("带引号行解析不符: %+v ok=%v", e, ok)
+	}
+	e, ok = parseLogLine(`time=2026-10-29T02:34:03.686+08:00 level=INFO msg=收到局面 fen=abc def=1`)
+	if !ok || e.msg != "收到局面" || e.rest != "fen=abc def=1" {
+		t.Fatalf("无引号中文行解析不符: %+v ok=%v", e, ok)
+	}
+	// 带引号 + 内嵌转义引号（错误串实录形态）：反转义还原原始值
+	e, ok = parseLogLine(`time=2026-10-29T02:34:03.686+08:00 level=INFO msg="Get \"https://api.github.com\": EOF"`)
+	if !ok || e.msg != `Get "https://api.github.com": EOF` {
+		t.Fatalf("转义引号行解析不符: %+v ok=%v", e, ok)
+	}
+	e, ok = parseLogLine(`time=2026-10-29T02:34:03.686+08:00 level=WARN msg="最近局面引擎不安全，跳过重放（等新局面覆盖）" fen=x`)
+	if !ok || e.level != "WARN" || e.msg != "最近局面引擎不安全，跳过重放（等新局面覆盖）" {
+		t.Fatalf("WARN 行解析不符: %+v ok=%v", e, ok)
+	}
+	if _, ok := parseLogLine("乱七八糟不是日志行"); ok {
+		t.Fatal("异构行应解析失败")
+	}
+}
+
+// TestCompactLogLines 批量解析 + 垃圾行剔除：Fyne 翻译失败三连与缩进续行，
+// 异构行原样透传（time/level 为空）。
+func TestCompactLogLines(t *testing.T) {
+	lines := []string{
+		`time=2026-10-29T02:34:03.243+08:00 level=INFO msg="Fyne error:  Translation failure"`,
+		`time=2026-10-29T02:34:03.243+08:00 level=INFO msg="  Cause: message \"(Select one)\" not found in language \"zh-Hans\""`,
+		`time=2026-10-29T02:34:03.243+08:00 level=INFO msg="  At: C:/Users/12567/go/pkg/mod/fyne.io/fyne/v2@v2.8.2/lang/lang.go:99"`,
+		`time=2026-10-29T02:34:03.686+08:00 level=INFO msg=引擎状态 state=ready`,
+		"半行异构内容",
+	}
+	got := compactLogLines(lines)
+	if len(got) != 2 {
+		t.Fatalf("应剔除 3 行垃圾剩 2 行, got %d: %+v", len(got), got)
+	}
+	if got[0].msg != "引擎状态" || got[1].time != "" || got[1].msg != "半行异构内容" {
+		t.Fatalf("保留行内容不符: %+v", got)
+	}
+}
+
+// TestLogLineText 紧凑行文本：结构化行带时间级别前缀，异构行原样。
+func TestLogLineText(t *testing.T) {
+	if got := logLineText(logEntry{time: "02:34:03", level: "INFO", msg: "WSS 服务启动", rest: "addr=:9527"}); got != "02:34:03 INFO  WSS 服务启动 addr=:9527" {
+		t.Fatalf("结构化行不符: %q", got)
+	}
+	if got := logLineText(logEntry{msg: "原样"}); got != "原样" {
+		t.Fatalf("异构行应原样: %q", got)
+	}
+}
+
+// TestLogLevelColor 级别着色走主题机制：WARN/ERROR 为棋韵自定义色名。
+func TestLogLevelColor(t *testing.T) {
+	if got := logLevelColor("WARN"); got != qiColorLogWarn {
+		t.Fatalf("WARN 应映射 qiLogWarn, got %v", got)
+	}
+	if got := logLevelColor("ERROR"); got != qiColorLogError {
+		t.Fatalf("ERROR 应映射 qiLogError, got %v", got)
+	}
+	if got := logLevelColor("INFO"); got != theme.ColorNameForeground {
+		t.Fatalf("INFO 应走前景色, got %v", got)
 	}
 }
 

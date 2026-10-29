@@ -149,6 +149,20 @@ class AssistConfig(context: Context) {
         set(value) { sp.edit().putInt(KEY_ENG_MULTI_PV, value.coerceIn(1, 3)).apply() }
 
     /**
+     * 时间制搜索上限毫秒（set_engine 上行 movetime_ms，悬浮窗"时间"芯片循环；
+     * 协议合法域 0 = 按深度、500–20000 = go movetime，与 PC 面板"时间上限"
+     * 下拉同档：0/1000/3000/5000/10000/20000）。时间制优先于深度——快棋/跟盘
+     * 节奏下深度制在复杂局面会拖慢出建议（2026-10-28 思考模式定稿）。
+     * PC 端无逐次回传帧：此持久化值即悬浮窗显示值（与路数芯片同款语义）。
+     */
+    var engineMoveTimeMs: Int
+        get() = sp.getInt(KEY_ENG_MOVETIME, 0).let { if (it == 0) 0 else it.coerceIn(500, 20000) }
+        set(value) {
+            val v = if (value <= 0) 0 else value.coerceIn(500, 20000)
+            sp.edit().putInt(KEY_ENG_MOVETIME, v).apply()
+        }
+
+    /**
      * 设备稳定标识（协议 §4.1 hello 可选自报字段 devid）：首启随机生成 32 hex
      * 并持久化，用于 PC 端跨重连区分设备。仅展示用途（PC 端不作为鉴权依据）；
      * 与配对信息同生命周期——重装/清数据 = 重新扫码 = 新身份，语义自洽。
@@ -192,6 +206,7 @@ class AssistConfig(context: Context) {
         private const val KEY_ENG_HASH = "engine_hash_mb"
         private const val KEY_ENG_THREADS = "engine_threads"
         private const val KEY_ENG_MULTI_PV = "engine_multi_pv"
+        private const val KEY_ENG_MOVETIME = "engine_movetime_ms"
         private const val KEY_SINGLE_MOVE_REPAIR = "single_move_repair"
         private const val KEY_LAST_CONFIRMED_FEN = "last_confirmed_fen"
         private const val KEY_DEVICE_ID = "device_id"

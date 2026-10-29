@@ -33,6 +33,29 @@ type Config struct {
 	Library LibraryConfig `toml:"library"`
 	// Store 沉淀库（M1c）
 	Store StoreConfig `toml:"store"`
+	// CloudBook 云端开局库（可选，2026-10-28 定稿：默认关——开启后局面 FEN
+	// 会发往所配端点，隐私口径见字段注释）
+	CloudBook CloudBookConfig `toml:"cloudbook"`
+}
+
+// CloudBookConfig 云端开局库配置。端点默认预设 chessdb.cn（免费公开基建，
+// 免 key）；自带 API 的使用者改 endpoint/api_key 即可。
+type CloudBookConfig struct {
+	// Enable 云库查询开关（默认关：开启即同意把对局局面 FEN 发往端点）
+	Enable bool `toml:"enable"`
+	// Endpoint 查询端点（action=queryall&board=<FEN> 形状，chessdb.cn 兼容）
+	Endpoint string `toml:"endpoint"`
+	// APIKey 自带 API 的密钥（chessdb 免费端点留空）
+	APIKey string `toml:"api_key"`
+}
+
+// DefaultCloudBook 云库默认配置：关 + chessdb.cn 预设端点。
+func DefaultCloudBook() CloudBookConfig {
+	return CloudBookConfig{
+		Enable:   false,
+		Endpoint: "https://www.chessdb.cn/chessdb.php",
+		APIKey:   "",
+	}
 }
 
 // LibraryConfig 桔库目录配置。
@@ -75,6 +98,9 @@ type EngineConfig struct {
 	MultiPV int `toml:"multi_pv"`
 	// Depth 固定深度制搜索目标深度
 	Depth int `toml:"depth"`
+	// MoveTimeMS 时间制搜索上限（毫秒）；0 = 按深度（默认）。>0（500–20000）
+	// 时每步 go movetime——快棋/跟盘节奏下深度制会拖慢出建议，时间制恒定耗时
+	MoveTimeMS int `toml:"movetime_ms"`
 }
 
 // DefaultEngine 默认引擎配置（路径相对项目根运行目录）。
@@ -82,13 +108,14 @@ type EngineConfig struct {
 // （最低档，跑大模型期间内存紧张；悬浮窗/面板切换后落盘记住用户的选择）。
 func DefaultEngine() EngineConfig {
 	return EngineConfig{
-		Enable:  true,
-		Path:    "library/engine/pikafish.exe",
-		NNUE:    "library/nnue/pikafish.nnue",
-		Threads: 0,   // 自动 = 逻辑核一半
-		HashMB:  256, // 默认最低档，切换后落盘生效
-		MultiPV: 1,   // 2026-10-18 默认单线（MultiPV>1 分散搜索同深度棋力明显下降；变招功能由用户手动开启）
-		Depth:   20,
+		Enable:     true,
+		Path:       "library/engine/pikafish.exe",
+		NNUE:       "library/nnue/pikafish.nnue",
+		Threads:    0,   // 自动 = 逻辑核一半
+		HashMB:     256, // 默认最低档，切换后落盘生效
+		MultiPV:    1,   // 2026-10-18 默认单线（MultiPV>1 分散搜索同深度棋力明显下降；变招功能由用户手动开启）
+		Depth:      20,
+		MoveTimeMS: 0, // 默认按深度；时间制（500–20000）由用户在面板/手机端开启
 	}
 }
 
@@ -133,6 +160,7 @@ func Default() *Config {
 			Enable: true,
 			Path:   "data/suggestions.db",
 		},
+		CloudBook: DefaultCloudBook(),
 	}
 }
 
@@ -184,6 +212,9 @@ func Load(path string) (*Config, bool, error) {
 	}
 	if cfg.Store.Path == "" {
 		cfg.Store.Path = Default().Store.Path
+	}
+	if cfg.CloudBook.Endpoint == "" {
+		cfg.CloudBook.Endpoint = DefaultCloudBook().Endpoint
 	}
 	return cfg, false, nil
 }

@@ -28,10 +28,12 @@ type EngineBridge interface {
 // 独立小接口：无此能力的引擎桥（测试桩/无引擎模式）收到 set_engine 时回 not_ready。
 type EngineTuner interface {
 	SetDepth(d int) bool
+	SetMoveTimeMS(ms int) bool // 时间制搜索上限（0 = 深度制，500–20000 = go movetime）
 	SetHashMB(mb int) bool
 	SetThreads(n int) bool
 	SetMultiPV(n int) bool
 	Depth() int
+	MoveTimeMS() int
 	HashMB() int
 	Threads() int
 	MultiPV() int
@@ -89,6 +91,22 @@ type Server struct {
 	onAdoption func(rec AdoptionRecord)
 	// onTunePersist 算力参数落盘回调（SetTunePersist 注册，nil = 不落盘）
 	onTunePersist func(kind string, v int)
+	// 走势序列（trend.go）：当前对局的引擎终态分，enginePump 追加 / readLoop
+	// （new_game）重置 / 控制台快照读——三路并发，trendMu 保护
+	trendMu   sync.Mutex
+	trendGame string
+	trendPts  []TrendPoint
+	// 云库状态（cloudbook.go）：FEN 缓存（含未命中）+ 限流时间戳；
+	// cloudEnable 运行时开关（PC 面板切换，SetCloudBookEnable）——配置结构体
+	// 的 Enable 只作启动种子与落盘持久化，查询热路径只读本原子位（并发干净）
+	cloudMu     sync.Mutex
+	cloudCache  map[string]cloudEntry
+	lastCloudMs atomic.Int64
+	cloudEnable atomic.Bool
+	// 本轮搜索起始时刻（UnixNano，0 = 空闲）：时间制仪表"用时/上限"的数据源。
+	// enginePump 在最新局面的首条 info 时起表、任意 bestmove/状态变化时停表——
+	// 计在服务端而非引擎包，避免为展示指标动 EngineBridge 接口（测试桩全要跟着改）
+	searchStartNanos atomic.Int64
 }
 
 // pendingAdvice 采纳比对锚点快照：某一下发局面已报出的候选集（着法 → 槽位，
@@ -167,9 +185,11 @@ func New(cfg *config.Config, cert tls.Certificate, logger *slog.Logger, eng Engi
 		hub:         NewHub(logger),
 		cert:        cert,
 		eng:         eng,
+		cloudCache:  map[string]cloudEntry{},
 		authTimeout: 10 * time.Second,
 		idleTimeout: 45 * time.Second,
 	}
+	s.cloudEnable.Store(cfg.CloudBook.Enable) // 面板开关的启动种子（cfg 值仅此一次进入）
 	return s
 }
 

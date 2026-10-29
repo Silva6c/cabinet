@@ -15,6 +15,9 @@ func (s *Server) handleSetEngine(c *Conn, m *SetEngine) {
 	if m.Depth != nil {
 		fields = append(fields, kv{"depth", *m.Depth})
 	}
+	if m.MoveTimeMS != nil {
+		fields = append(fields, kv{"movetime", *m.MoveTimeMS})
+	}
 	if m.HashMB != nil {
 		fields = append(fields, kv{"hash", *m.HashMB})
 	}
@@ -26,7 +29,7 @@ func (s *Server) handleSetEngine(c *Conn, m *SetEngine) {
 	}
 	if len(fields) == 0 {
 		_ = c.Send(ErrorFrame{frameBase: frame(TypeError), Code: CodeBadFrame,
-			Message: "set_engine 未包含任何字段（depth / hash_mb / threads / multi_pv）"})
+			Message: "set_engine 未包含任何字段（depth / movetime_ms / hash_mb / threads / multi_pv）"})
 		return
 	}
 	if s.eng == nil {
@@ -46,14 +49,23 @@ func (s *Server) handleSetEngine(c *Conn, m *SetEngine) {
 			return
 		}
 	}
+	anyChanged := false
 	for _, f := range fields {
-		s.applyTune(f.kind, f.v)
+		if !s.applyTune(f.kind, f.v) {
+			continue // 值未变：跳过落盘（重连回显同档不重写 toml 不刷日志）
+		}
+		anyChanged = true
 		// 落盘与 TuneEngine（面板链路）同权：此前手机链路只 applyTune 不触发
 		// 回调，悬浮窗调的参数重启即被 toml 旧值打回——用户用手机救回的
 		// 算力选择（如 hash 调回 10240）没被记住，棋力"反复变弱"的直接推手
 		if s.onTunePersist != nil {
 			s.onTunePersist(f.kind, f.v)
 		}
+	}
+	if !anyChanged {
+		// 全帧无实变（典型：手机每次重连回显线程档）：静默——不打日志、
+		// 不以最近局面重搜（无谓重搜是纯算力浪费）
+		return
 	}
 	c.log.Info("远程调节引擎算力", "fields", len(fields),
 		"req_depth", m.Depth, "req_hash_mb", m.HashMB,
@@ -68,7 +80,9 @@ func (s *Server) TuneEngine(kind string, v int) error {
 	if msg := s.validateTune(kind, v); msg != "" {
 		return errors.New(msg)
 	}
-	s.applyTune(kind, v)
+	if !s.applyTune(kind, v) {
+		return nil // 值未变：面板重复选中同档，静默（无谓重搜纯浪费）
+	}
 	s.reSearchLatest()
 	// 落盘记住用户的选择（2026-10-18）：面板链路在此回调；手机悬浮窗链路
 	// （handleSetEngine）在逐字段应用处触发同一回调——重启后以落盘值为准
@@ -97,6 +111,10 @@ func (s *Server) validateTune(kind string, v int) string {
 		if v < 1 || v > 40 {
 			return fmt.Sprintf("depth=%d 超出范围（1–40）", v)
 		}
+	case "movetime":
+		if v != 0 && (v < 500 || v > 20000) {
+			return fmt.Sprintf("movetime_ms=%d 超出范围（0=按深度，或 500–20000）", v)
+		}
 	case "hash":
 		if v != 0 && (v < 32 || v > 32768) {
 			return fmt.Sprintf("hash_mb=%d 超出范围（0=自动，或 32–32768）", v)
@@ -116,14 +134,20 @@ func (s *Server) validateTune(kind string, v int) string {
 }
 
 // applyTune 单字段应用（engine 侧 setter 返回值仅兜底防御）。
-func (s *Server) applyTune(kind string, v int) {
+// 返回是否实际改变了配置：应用前后各读一次当前值比对（getter 返回归一化后的
+// 实际值，hash=0 自动档等原始档差异由"同源读数"天然抹平）。值未变 = no-op，
+// 上层据此静默（2026-10-29 日志降噪：重连回显同值不再打 4 行 + 落盘 + 重搜）。
+func (s *Server) applyTune(kind string, v int) bool {
 	tuner, ok := s.eng.(EngineTuner)
 	if !ok {
-		return
+		return false
 	}
+	before := tuneCurrent(tuner, kind)
 	switch kind {
 	case "depth":
 		tuner.SetDepth(v)
+	case "movetime":
+		tuner.SetMoveTimeMS(v)
 	case "hash":
 		tuner.SetHashMB(v)
 	case "threads":
@@ -131,6 +155,24 @@ func (s *Server) applyTune(kind string, v int) {
 	case "multipv":
 		tuner.SetMultiPV(v)
 	}
+	return tuneCurrent(tuner, kind) != before
+}
+
+// tuneCurrent 按字段读引擎当前目标值（no-op 检测的"同源读数"）。
+func tuneCurrent(tuner EngineTuner, kind string) int {
+	switch kind {
+	case "depth":
+		return tuner.Depth()
+	case "movetime":
+		return tuner.MoveTimeMS()
+	case "hash":
+		return tuner.HashMB()
+	case "threads":
+		return tuner.Threads()
+	case "multipv":
+		return tuner.MultiPV()
+	}
+	return 0
 }
 
 // reSearchLatest 引擎就绪且有最近局面时，以最近局面重新请求（新算力立即体现：

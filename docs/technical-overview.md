@@ -153,8 +153,19 @@ sequenceDiagram
 - **引擎事件泵**（enginePump）：info 帧按 lastFen 过滤（陈旧 info/预热/崩溃残留不下发）；
   depth 或 bestmove 变化立即下发，其余 500ms 节流；bestmove 为终值 + 沉淀 + 广播收束 status
   （指标清零）。分数换算 `engine.ToRedScore`（红方视角），WDL 千分比四舍五入为百分比。
-- **set_engine**：先整帧校验（depth 1–40；hash 0 或 32–32768；threads 0 或 1–64；
-  multi_pv 1–5）任一越界整帧拒绝；逐字段应用后按 lastFen 重搜。桌面面板调参与手机同一条路径。
+- **set_engine**：先整帧校验（depth 1–40；movetime_ms 0 或 500–20000；hash 0 或 32–32768；
+  threads 0 或 1–64；multi_pv 1–5）任一越界整帧拒绝；逐字段应用后按 lastFen 重搜。桌面面板
+  调参与手机同一条路径。**同值静默**（2026-10-29）：整帧与当前值全一致（典型：手机重连回显
+  线程档）按 no-op 处理——不落盘、不重搜、不打日志；welcome 回传 `movetime_ms`（0=深度制
+  也传），手机"思考"芯片连接/重连时校准到 PC 实际模式。
+- **云库**（cloudbook.go，可选默认关）：桔库与沉淀双未命中后的外部开局库补充，端点预设
+  chessdb.cn（免费公开基建，免 key）。异步不阻塞引擎、≥1.5s 限速、FEN 缓存（含未命中，防
+  重复打外网）、失败静默；命中以 `cloud:<域名>` source 复用 suggestion 帧下发（无分数/PV/
+  深度——score 视角语义未考证不猜，同桔库口径）。开关 = PC 面板勾选框（运行时原子位即时
+  生效）+ `[cloudbook]` toml 落盘持久化；**开启即同意把局面 FEN 发往端点**（隐私口径见
+  cabinet.example.toml 同款措辞）。
+- **走势序列**（trend.go）：每局引擎终态分内存序列（≤240 点，trim 至 160），NEW_GAME 重开
+  新局清零起笔；控制台"04 走势"tile 折线渲染（±600cp 裁剪、杀棋 ±1500、胜率三态色）。
 - **手动断开**：控制台选行 → `Server.ConsoleKick` → `Hub.Disconnect`——按完整会话 ID 定位
   （未鉴权连接也可踢），先 bye 帧再 websocket Close 控制帧，走正常关闭分支；
   手机端按断线自动重连（不是拉黑）。
@@ -170,7 +181,8 @@ sequenceDiagram
   UCI_ShowWDL true**（官方要求 Threads 先于 Hash）→ ucinewgame → isready。
   自动档：threads = 逻辑核数一半（`max(1, NumCPU/2)`）、hash = 2048MB。
 - **运行中调参**：setter 只更新目标值；在下一轮搜索开始前的 UCI 空闲窗口应用，顺序
-  Clear Hash → Threads → Hash → MultiPV；depth 直接体现在 `go depth N`。
+  Clear Hash → Threads → Hash → MultiPV；depth 直接体现在 `go depth N`；**时间制**
+  （`movetime_ms` 500–20000）即时生效为 `go movetime N` 且优先于深度（0=按深度）。
 - Windows 细节：子进程隐藏窗口 + CREATE_NO_WINDOW；启动后提权 HIGH_PRIORITY_CLASS
   （失败静默）。
 - 事件通道容量 64，满则丢最旧保新。
@@ -197,10 +209,17 @@ sequenceDiagram
 
 ### 3.6 internal/console / internal/tray
 
-- **控制台**：基础区常显（①引擎仪表 ②连接表 + 证书指纹行 + 断开会话），「③ 高级功能」
-  按钮排展开高级面板（调参/建议流/开局库/日志，一次一个，再点收起），窗口两档
-  900×540 / 900×770。1.5s 自动刷新，取数全经 main 注入的只读回调（服务与 UI 解耦）。
+- **控制台**：基础区常显（①引擎仪表 ②连接表 + 证书指纹行 + 断开会话 ③开局库 tile
+  ——收录/命中率 + **云库开关行**，④走势 tile），「05 高级功能」按钮排展开高级面板
+  （调参/建议流/开局库详情/日志/检查更新，一次一个，再点收起），窗口两档 900×540 /
+  900×770。1.5s 自动刷新，取数全经 main 注入的只读回调（服务与 UI 解耦）。
   跨 goroutine UI 更新一律 `fyne.Do`。
+- **引擎仪表**：时间制下"深度 / 目标"自动切"用时 / 上限"（本轮已搜秒数对时间上限，
+  server 端停表 searchStartNanos；2026-10-29 定稿：时间制不再显示旧深度目标）。
+- **日志面板**：尾部 25 行紧凑渲染——slog 行解析为"时分秒 + 级别 + 消息 + 属性"，
+  WARN 琥珀 / ERROR 警示红着色（自定义主题色名走 qiTheme）；存量垃圾行（Fyne 翻译
+  失败三连等）显示层剔除。噪音源头治理：Fyne zh-Hans 缺词条补注册（fynel10n.go）+
+  set_engine 同值静默。
 - **连接二维码**：payload `cabinet://connect?u=<wss>&k=<令牌>&f=<指纹可选>`；网卡下拉按
   "物理网卡优先 → 私网段排序"，防 VMware/Docker 虚拟网卡排前。
 - **托盘**：动态状态行（2s 刷新，回调包 recover）；左键唤出面板；「连接二维码」「打开日志
@@ -237,9 +256,13 @@ sequenceDiagram
 | `engine.hash_mb` | `0` = 自动 | 自动 = 2048MB |
 | `engine.multi_pv` | `3` | 变招路数 |
 | `engine.depth` | `20` | 目标深度（固定深度制） |
+| `engine.movetime_ms` | `0`（按深度） | 时间制搜索上限毫秒；>0 = `go movetime` 优先于深度 |
 | `library.books_dir` | `"library/books"` | 桔库目录（热加载） |
 | `store.enable` | `true` | 建议沉淀开关 |
 | `store.path` | `"data/suggestions.db"` | SQLite 路径 |
+| `cloudbook.enable` | `false` | 云库查询开关（PC 面板可热切并回写本文件） |
+| `cloudbook.endpoint` | `https://www.chessdb.cn/chessdb.php` | 云库端点（免费公开基建预设） |
+| `cloudbook.api_key` | （空） | 自带 API 的使用者填；空 = 免 key 匿名查询 |
 
 缺失键自动回填默认值；`configs/cabinet.example.toml` 为全量注释示例。
 

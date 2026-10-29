@@ -256,8 +256,9 @@ func (c *statusChip) setHollow(text string, col color.Color) {
 // 【雷区】不用等宽字体渲染大数字：mono 族的 CJK 回退字形与 sans 族不是同一张脸，
 // "就绪"这类含中文的状态字会与全文异形（2026-10-02 实测教训）；数字对齐靠
 // 值格式收敛（fmtCompactN 紧凑短式）而非字体族。
-// 返回主值 setter 与后缀 setter（后缀空串隐藏，如 "n/s"、"/24"）。
-func statBig(label string, col color.Color) (fyne.CanvasObject, func(string), func(string)) {
+// 返回标签/主值/后缀三个 setter（后缀空串隐藏，如 "n/s"、"/24"；标签可动态改——
+// 时间制仪表"深度 / 目标"→"用时 / 上限"）。
+func statBig(label string, col color.Color) (fyne.CanvasObject, func(string), func(string), func(string)) {
 	num, set := qiDynamic("—", qiSize(meterSizeName), col, false, true)
 	suf := qiText("", qiSize(theme.SizeNameCaptionText), qiMuted, false, false)
 	setSuf := func(v string) {
@@ -267,7 +268,15 @@ func statBig(label string, col color.Color) (fyne.CanvasObject, func(string), fu
 		suf.Text = v
 		suf.Refresh()
 	}
-	return container.NewVBox(qiCaption(label), container.NewHBox(num, suf)), set, setSuf
+	lab := qiCaption(label)
+	setLabel := func(v string) {
+		if lab.Text == v {
+			return
+		}
+		lab.Text = v
+		lab.Refresh()
+	}
+	return container.NewVBox(lab, container.NewHBox(num, suf)), setLabel, set, setSuf
 }
 
 // fpChip 证书指纹分组短式 chip（设计稿 §06：1dp 描边圆角 + 内嵌等宽 hex）。

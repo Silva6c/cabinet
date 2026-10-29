@@ -71,7 +71,7 @@ class RemoteAnalysisClient(
          * 手机端算力按钮的显示与循环起点据此与 PC 对齐（此前显示本地默认档，
          * 出现"手机 0.25g / 电脑 2048"的脱节——2026-10-02 用户反馈）。
          */
-        fun onServerEngineConfig(depth: Int, hashMB: Int)
+        fun onServerEngineConfig(depth: Int, hashMB: Int, movetimeMS: Int?)
         /** 收到建议（source="book:库名" 或 "engine"；分数为红方视角，可为空=库命中） */
         fun onSuggestion(sug: RemoteSuggestion)
         /** 引擎实时指标（带指标的 status 帧，搜索中 500ms 节流） */
@@ -318,8 +318,8 @@ class RemoteAnalysisClient(
      * PC 端逐字段校验应用；越界回 error{bad_frame}。未连接时静默丢弃（不排队）。
      * threads=0 是合法值（自动档）；multiPV 范围 1–5（协议 §4.10）。
      */
-    fun sendSetEngine(depth: Int?, hashMB: Int?, threads: Int? = null, multiPV: Int? = null) {
-        send(SetEngineFrame(depth = depth, hashMB = hashMB, threads = threads, multiPV = multiPV))
+    fun sendSetEngine(depth: Int?, hashMB: Int?, threads: Int? = null, multiPV: Int? = null, movetimeMS: Int? = null) {
+        send(SetEngineFrame(depth = depth, hashMB = hashMB, threads = threads, multiPV = multiPV, movetimeMS = movetimeMS))
     }
 
     // ==================== 连接管理 ====================
@@ -435,7 +435,11 @@ class RemoteAnalysisClient(
                 m.optJSONObject("engine")?.let { eng ->
                     val d = eng.optInt("depth")
                     val h = eng.optInt("hash_mb")
-                    if (d > 0 || h > 0) listener.onServerEngineConfig(d, h)
+                    // 时间制上限（2026-10-28 同步补链）：字段存在才同步——
+                    // 0 = 深度制也必须传到（旧 PC 端字段缺省，按无效忽略）
+                    val mt = eng.optInt("movetime_ms", -1)
+                        .takeIf { eng.has("movetime_ms") && !eng.isNull("movetime_ms") }
+                    if (d > 0 || h > 0 || mt != null) listener.onServerEngineConfig(d, h, mt)
                 }
                 // 心跳是自续链 Runnable：重连成功必须先摘旧链再挂，否则 ping 频率随重连次数成倍增长
                 netHandler.removeCallbacks(pingRunnable)
@@ -557,6 +561,8 @@ class RemoteAnalysisClient(
             // threads=0 合法（自动档）。旧 PC 端忽略新增字段（协议 §7）
             if (any.threads != null) put("threads", any.threads)
             if (any.multiPV != null) put("multi_pv", any.multiPV)
+            // 时间制上限（2026-10-28 思考模式定稿）：0 = 深度制、500–20000 = go movetime
+            if (any.movetimeMS != null) put("movetime_ms", any.movetimeMS)
         }
         else -> throw IllegalArgumentException("未知帧类型")
     }
@@ -607,4 +613,5 @@ private data class PositionFrame(
     val newGame: Boolean = false)
 private data class SetEngineFrame(
     val depth: Int?, val hashMB: Int?,
-    val threads: Int? = null, val multiPV: Int? = null)
+    val threads: Int? = null, val multiPV: Int? = null,
+    val movetimeMS: Int? = null)  // 时间制上限毫秒；0 = 按深度（协议 §4.10，旧 PC 端忽略）

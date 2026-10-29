@@ -60,12 +60,13 @@ class OverlayModel(
     val manualMode: Boolean = false,
     /** 手动模式下当前选中的格（canonical x,y），迷你棋盘绘制高亮 */
     val selectedCell: Pair<Int, Int>? = null,
-    /** 引擎深度档值（"20"）；null = 未启用/未连接 */
-    val depthText: String? = null,
+    /** 思考档值（"深度20"/"时间3秒"——现行模式自明）；null = 未启用/未连接 */
+    val thinkText: String? = null,
     /** 引擎 Hash 档值（"0.25g"） */
     val hashText: String? = null,
     /** 变招路数档值（"2"；悬浮窗"路数"按钮文案，PC 端无回显——本地持久化值为准） */
     val multiPvText: String? = null,
+
 )
 
 enum class OverlayAction {
@@ -81,12 +82,14 @@ enum class OverlayAction {
     FLIP_TURN,
     /** 紧急手动模式开关：识别失效时在小棋盘上手工维护局面 */
     MANUAL,
-    /** 引擎深度档循环（set_engine 远程调算力，协议 §4.10） */
-    CYCLE_DEPTH,
+    /** 思考档循环（单芯片短按）：当前模式内循环档位——深度 12–40 层 / 时间 1–20 秒 */
+    CYCLE_THINK,
     /** 引擎 Hash 档循环 */
     CYCLE_HASH,
     /** 变招路数（引擎 MultiPV）1–3 循环：上行 set_engine 热改 PC 引擎，下一轮搜索生效 */
     CYCLE_MULTI_PV,
+    /** 思考模式切换（单芯片长按）：深度制 ↔ 时间制，时间值记忆不清零 */
+    SWITCH_THINK_MODE,
     /** 详情窗（窗口2）显隐切换 */
     TOGGLE_DETAIL,
 }
@@ -114,6 +117,7 @@ class OverlayPanelView @JvmOverloads constructor(
     private val btnTurn: TextView
     private val btnDetail: TextView
     private val btnMultiPv: TextView
+
 
     /** 真正的背景层 = XML 里的 overlay_root：悬浮窗 root 的 background 运行期
      *  替换不生效（首次之后静默失效，实测 TYPE_APPLICATION_OVERLAY 窗口行为），
@@ -182,7 +186,13 @@ class OverlayPanelView @JvmOverloads constructor(
         btnUndo.setOnClickListener { onAction?.invoke(OverlayAction.UNDO) }
         btnManual.setOnClickListener { onAction?.invoke(OverlayAction.MANUAL) }
         btnTurn.setOnClickListener { onAction?.invoke(OverlayAction.FLIP_TURN) }
-        btnDepth.setOnClickListener { onAction?.invoke(OverlayAction.CYCLE_DEPTH) }
+        btnDepth.setOnClickListener { onAction?.invoke(OverlayAction.CYCLE_THINK) }
+        // 长按 = 深度制↔时间制模式切换（短按只在当前模式内循环档位——2026-10-28
+        // 单芯片重设计：现行模式在芯片文案上自明，切换路径不占第二枚芯片）
+        btnDepth.setOnLongClickListener {
+            onAction?.invoke(OverlayAction.SWITCH_THINK_MODE)
+            true
+        }
         btnHash.setOnClickListener { onAction?.invoke(OverlayAction.CYCLE_HASH) }
         btnMultiPv.setOnClickListener { onAction?.invoke(OverlayAction.CYCLE_MULTI_PV) }
         btnDetail.setOnClickListener { onAction?.invoke(OverlayAction.TOGGLE_DETAIL) }
@@ -261,7 +271,7 @@ class OverlayPanelView @JvmOverloads constructor(
         }
 
         // 值芯片：标签灰 + 值琥珀（等宽由 tnum 保证）
-        btnDepth.text = chipText("深度", model.depthText)
+        btnDepth.text = chipText("思考", model.thinkText)
         btnHash.text = chipText("哈希", model.hashText)
         btnMultiPv.text = chipText("路数", model.multiPvText)
         btnPause.text = if (model.paused) "继续" else "停止"

@@ -25,10 +25,11 @@ type fakeBridge struct {
 	state  atomic.Value
 	events chan engine.Event
 	// Tuner 状态（set_engine 测试）：值语义与 engine.Engine 一致（构造即有初值）
-	depth   atomic.Int64
-	hash    atomic.Int64
-	threads atomic.Int64
-	multiPV atomic.Int64
+	depth      atomic.Int64
+	moveTimeMS atomic.Int64
+	hash       atomic.Int64
+	threads    atomic.Int64
+	multiPV    atomic.Int64
 	// onRequest 由测试注入的事件脚本：fen → 事件序列（后台发送）
 	onRequest func(fb *fakeBridge, fen string)
 }
@@ -53,6 +54,14 @@ func (fb *fakeBridge) SetDepth(d int) bool {
 		return false
 	}
 	fb.depth.Store(int64(d))
+	return true
+}
+
+func (fb *fakeBridge) SetMoveTimeMS(ms int) bool {
+	if ms != 0 && (ms < 500 || ms > 20000) {
+		return false
+	}
+	fb.moveTimeMS.Store(int64(ms))
 	return true
 }
 
@@ -86,10 +95,11 @@ func (fb *fakeBridge) SetMultiPV(n int) bool {
 
 func (fb *fakeBridge) ClearHash() {}
 
-func (fb *fakeBridge) Depth() int   { return int(fb.depth.Load()) }
-func (fb *fakeBridge) HashMB() int  { return int(fb.hash.Load()) }
-func (fb *fakeBridge) Threads() int { return int(fb.threads.Load()) }
-func (fb *fakeBridge) MultiPV() int { return int(fb.multiPV.Load()) }
+func (fb *fakeBridge) Depth() int      { return int(fb.depth.Load()) }
+func (fb *fakeBridge) MoveTimeMS() int { return int(fb.moveTimeMS.Load()) }
+func (fb *fakeBridge) HashMB() int     { return int(fb.hash.Load()) }
+func (fb *fakeBridge) Threads() int    { return int(fb.threads.Load()) }
+func (fb *fakeBridge) MultiPV() int    { return int(fb.multiPV.Load()) }
 
 func (fb *fakeBridge) Request(fen string) {
 	fb.mu.Lock()
@@ -782,4 +792,44 @@ func TestServer_OwnerSessionClearedOnDisconnect(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+}
+
+// TestTrendSeries 走势序列（2026-10-28 定稿）：引擎终态逐点追加；NEW_GAME
+// 重置换段——覆盖定稿情形 A（新开局清零）与 C（撤离重开由 NEW_GAME 兜住）。
+func TestTrendSeries(t *testing.T) {
+	fb := newFakeBridge(engine.StateReady)
+	fb.onRequest = replayNormalSearch
+	url, cleanup, srv := startTestServerWithBridgeS(t, fb)
+	defer cleanup()
+	ws := dialWS(t, url)
+	defer ws.Close()
+
+	if _, ok := recv(t, ws, "服务器 hello").(*Hello); !ok {
+		t.Fatal("首帧应为 hello")
+	}
+	_ = ws.WriteJSON(Hello{frameBase: frame(TypeHello), Client: ClientName, Ver: "0.1.0", Caps: []string{CapV1}})
+	_ = ws.WriteJSON(Auth{frameBase: frame(TypeAuth), Token: testToken})
+	if _, ok := recv(t, ws, "welcome").(*Welcome); !ok {
+		t.Fatal("期望 welcome")
+	}
+
+	snap := func() (string, []TrendPoint) { return srv.TrendSnapshot() }
+	fen := "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1"
+	_ = ws.WriteJSON(Position{frameBase: frame(TypePosition), Fen: fen, RedGo: true})
+	waitFor(t, 2*time.Second, func() bool { _, pts := snap(); return len(pts) == 1 })
+	game, pts := snap()
+	if pts[0].ScoreCP != 120 || pts[0].WinRate != -1 {
+		t.Fatalf("走势点=%+v, want 红方 +120 且无 WDL(-1)", pts[0])
+	}
+	if game == "" {
+		t.Log("旧手机形态：无 new_game 标记，对局 ID 空（曲线仍累积）")
+	}
+
+	// A/C：NEW_GAME → 换段（清零后重搜立刻补新点；若未重置这里会是 2 点）
+	oldGame, _ := snap()
+	_ = ws.WriteJSON(Position{frameBase: frame(TypePosition), Fen: fen, RedGo: true, NewGame: true})
+	waitFor(t, 2*time.Second, func() bool {
+		g, pts := snap()
+		return g != oldGame && len(pts) == 1
+	})
 }

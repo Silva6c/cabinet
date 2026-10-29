@@ -17,6 +17,10 @@ type EngineSnap struct {
 	Threads     int
 	MultiPV     int
 	TargetDepth int
+	// MoveTimeMS 时间制搜索上限（0 = 深度制）；SearchMS 本轮已搜用时毫秒
+	//（空闲 0）——控制台深度仪表在时间制下切"用时 / 上限"语义（2026-10-29）
+	MoveTimeMS int
+	SearchMS   int64
 }
 
 // ClientSnap 一个连接的展示快照（控制台连接区一行）。
@@ -55,11 +59,16 @@ func (s *Server) ConsoleSnapshot() ConsoleSnapshot {
 		snap.Engine.MultiPV = t.MultiPV()
 		snap.Engine.HashMB = t.HashMB()
 		snap.Engine.TargetDepth = t.Depth()
+		snap.Engine.MoveTimeMS = t.MoveTimeMS()
 	} else {
 		snap.Engine.Threads = s.cfg.Engine.Threads
 		snap.Engine.MultiPV = s.cfg.Engine.MultiPV
 		snap.Engine.HashMB = s.cfg.Engine.HashMB
 		snap.Engine.TargetDepth = s.cfg.Engine.Depth
+		snap.Engine.MoveTimeMS = s.cfg.Engine.MoveTimeMS
+	}
+	if st := s.searchStartNanos.Load(); st > 0 {
+		snap.Engine.SearchMS = time.Since(time.Unix(0, st)).Milliseconds()
 	}
 	if m, ok := s.engMetrics.Load().(EngineStatus); ok {
 		snap.Engine.Depth = m.Depth

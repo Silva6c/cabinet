@@ -56,6 +56,11 @@ type EngineStat struct {
 	Threads     int // 配置值；0 = 自动
 	MultiPV     int
 	TargetDepth int
+	// MoveTimeMS 时间制搜索上限（>0 = 时间制：仪表从"深度/目标"切换
+	// "用时/上限"语义，旧深度目标不再显示）；SearchMS 本轮搜索已用时毫秒
+	//（空闲 = 0）
+	MoveTimeMS int
+	SearchMS   int64
 }
 
 // ClientRow 连接区一行快照。
@@ -94,11 +99,25 @@ type SugRow struct {
 
 // TuneState 引擎可调参数当前目标值（协议 §4.10；0 = 自动档）。
 type TuneState struct {
-	Depth   int
-	HashMB  int // 0 = 自动
-	Threads int // 0 = 自动
-	MultiPV int
-	Ready   bool // 引擎是否就绪（未就绪时调参控件禁用）
+	Depth      int
+	MoveTimeMs int // 时间制上限毫秒；0 = 按深度（深度/时间二选一，时间制优先）
+	HashMB     int // 0 = 自动
+	Threads    int // 0 = 自动
+	MultiPV    int
+	Ready      bool // 引擎是否就绪（未就绪时调参控件禁用）
+}
+
+// TrendPoint 走势单点（红方视角；server.TrendPoint 的控制台侧拷贝）。
+type TrendPoint struct {
+	TsMs    int64 // 建议下发时刻（毫秒）
+	ScoreCP int   // 红方视角厘兵（将杀压 ±1500）
+	WinRate int   // 红方胜率百分比（引擎 WDL 缺省为 -1）
+}
+
+// TrendSnapshot 当前对局走势序列拷贝。
+type TrendSnapshot struct {
+	GameID string
+	Points []TrendPoint
 }
 
 // Options 控制台配置与数据源（均为只读回调，刷新时调用）。
@@ -123,11 +142,23 @@ type Options struct {
 	ClearSuggestions func() error
 	// TunerGet 当前算力参数（调参区回显；nil = 引擎桥不可调，调参区隐藏）
 	TunerGet func() TuneState
-	// TunerSet 调节参数，kind 取 "depth"/"hash"/"threads"/"multipv"，v 语义与
-	// 协议 §4.10 一致（threads/hash 的 0 = 自动档）。返回错误消息（空串 = 成功）。
+	// TunerSet 调节参数，kind 取 "depth"/"movetime"/"hash"/"threads"/"multipv"，
+	// v 语义与协议 §4.10 一致（threads/hash 的 0 = 自动档，movetime 的 0 = 按深度）。
+	// 返回错误消息（空串 = 成功）。
 	TunerSet func(kind string, v int) string
 	// TunerClearHash 清空置换表（返回错误消息，空串 = 已受理）
 	TunerClearHash func() string
+	// TrendSeries 当前对局走势序列（走势面板数据源；nil = 面板缺席）。
+	// 服务端内存序列（trend.go），每局从 NEW_GAME 起笔、随建议终态生长。
+	TrendSeries func() TrendSnapshot
+	// ── 云库开关（开局库 tile 内的勾选框；CloudBookGet==nil = 整行缺席）──
+	// CloudBookEndpoint 展示用端点域名（静态文本；运行时不改端点，只切开关）
+	CloudBookEndpoint string
+	// CloudBookGet 当前开关状态（刷新循环 1.5s 调一次，只读内存）
+	CloudBookGet func() bool
+	// CloudBookSet 切换开关：实现侧立即生效（服务端原子位）并落盘 toml，
+	// 返回错误消息（空串 = 成功）
+	CloudBookSet func(on bool) string
 	// FirewallStatus 防火墙告警查询：非空 = 横幅告警文案（TCP 端口被防火墙
 	// 静默拦截）；空串 = 不告警。nil = 功能不可用（横幅不出现）。
 	// 刷新循环 1.5s 调一次——实现侧必须读内存缓存，禁止每次拉 netsh 子进程。
@@ -185,11 +216,18 @@ type Console struct {
 	sugCount *widget.Label
 	// 库区 / 日志区
 	bookLabel *widget.Label
-	logLabel  *widget.Label // 等宽字体日志尾部
+	logRich   *widget.RichText // 日志尾部（紧凑渲染：时间+级别着色，见 refreshLog）
 	logScroll *container.Scroll
+	// 云库开关行（tileBooks 内；CloudBookGet==nil 时不创建）
+	cloudChk  *widget.Check
+	cloudBusy atomic.Bool // 刷新回写 SetChecked 时抑制 OnChanged 回环（fyne SetChecked 会回调）
+
+	// 仪表标签动态化（时间制时"深度 / 目标"→"用时 / 上限"）
+	engLabelCells map[string]func(string)
 
 	// 调参区（引擎桥可调时才有）
 	tunerSelects map[string]*widget.Select // kind → 下拉框
+	tunerHint    *widget.Label             // 调参面板提示行（refreshTuner 追加当前思考模式）
 	tunerBusy    atomic.Bool               // 刷新回写 Selected 时抑制 OnChanged 回环
 
 	// 高级面板折叠：基础区（引擎/连接）常显，其余经按钮展开（一次一个）
@@ -228,6 +266,12 @@ type Console struct {
 	updateCancelBtn *hiliteButton       // 取消下载（仅下载中显示）
 	updateBar       *widget.ProgressBar // 下载进度（仅下载中显示）
 	updateAutoChk   *widget.Check       // 启动自检开关
+
+	// 走势面板（main 接线后才有；控件在 sectionTrend 构建）
+	trendCurve   *trendCurve  // 折线带（自绘 canvas.Line）
+	trendWin     *canvas.Text // 头部当前胜率/状态小字
+	trendWinSet  func(string) // 胜率文案 setter（重复值不重绘）
+	trendLastKey string       // 上次重建键（gameID|点数），变了才重建折线
 }
 
 // 窗口默认尺寸（2026-10-18 实测重校"调到刚好"）：
@@ -257,7 +301,8 @@ func Run(opts Options) {
 	if opts.Icon == nil {
 		opts.Icon = Icon()
 	}
-	c := &Console{opts: opts, engCells: map[string]func(string){}, engSufCells: map[string]func(string){}}
+	patchTranslations() // 先于任何控件创建（Select 占位词条缺失会打翻译失败垃圾日志）
+	c := &Console{opts: opts, engCells: map[string]func(string){}, engSufCells: map[string]func(string){}, engLabelCells: map[string]func(string){}}
 	inst = c
 
 	c.app = app.New()
@@ -354,6 +399,7 @@ func (c *Console) buildContent() fyne.CanvasObject {
 		c.firewallBanner(),
 		container.New(&cols2{gap: rootGap}, c.sectionEngine(), c.tileBooks()),
 		c.sectionClients(),
+		c.sectionTrend(),
 		c.sectionAdvancedBar(),
 		c.advStack,
 	)

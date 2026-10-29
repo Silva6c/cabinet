@@ -60,11 +60,25 @@ func demoOptions() Options {
 			}
 		},
 		CountToday: func() int { return 3 },
+		TrendSeries: func() TrendSnapshot {
+			// 演示序列：一波红方优势起伏（终态分 + 胜率），贴近真实对局形态
+			cps := []int{35, 80, 120, 60, -40, -120, 90, 210, 320, 280, 150, 90}
+			wrs := []int{53, 56, 58, 54, 46, 43, 56, 63, 69, 67, 60, 55}
+			pts := make([]TrendPoint, len(cps))
+			base := time.Now().Add(-12 * time.Minute).UnixMilli()
+			for i := range cps {
+				pts[i] = TrendPoint{TsMs: base + int64(i)*90000, ScoreCP: cps[i], WinRate: wrs[i]}
+			}
+			return TrendSnapshot{GameID: "demo", Points: pts}
+		},
 		TunerGet: func() TuneState {
 			return TuneState{Depth: 20, HashMB: 512, Threads: 8, MultiPV: 3, Ready: true}
 		},
-		TunerSet:       func(kind string, v int) string { return "" },
-		TunerClearHash: func() string { return "" },
+		TunerSet:          func(kind string, v int) string { return "" },
+		TunerClearHash:    func() string { return "" },
+		CloudBookEndpoint: "https://www.chessdb.cn/chessdb.php",
+		CloudBookGet:      func() bool { return false },
+		CloudBookSet:      func(on bool) string { return "" },
 	}
 }
 
@@ -93,22 +107,16 @@ func TestConsoleScreenshotExpanded(t *testing.T) {
 	captureConsole(t, cv, c.expandedHeight(), filepath.Join("..", "..", "docs", "console-screenshot-expanded.png"))
 }
 
-// newShotConsole 构造仅渲染折叠态的截图画布。
-func newShotConsole(t *testing.T) software.WindowlessCanvas {
-	t.Helper()
-	cv, _ := newShotConsoleAll()
-	return cv
-}
-
 // newShotConsoleAll 构造截图 Console 与画布（test.NewApp + 棋韵主题 + 演示数据）。
 func newShotConsoleAll() (software.WindowlessCanvas, *Console) {
 	a := test.NewApp()
 	a.Settings().SetTheme(newQiTheme())
 
 	c := &Console{
-		opts:        demoOptions(),
-		engCells:    map[string]func(string){},
-		engSufCells: map[string]func(string){},
+		opts:          demoOptions(),
+		engCells:      map[string]func(string){},
+		engSufCells:   map[string]func(string){},
+		engLabelCells: map[string]func(string){},
 	}
 	content := c.buildContent()
 	c.refresh()

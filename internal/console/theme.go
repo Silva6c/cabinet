@@ -30,11 +30,12 @@ var (
 	qiJadeDot = color.NRGBA{R: 0x4C, G: 0xAF, B: 0x50, A: 0xFF} // 玉点
 	qiDanger  = color.NRGBA{R: 0xFF, G: 0x52, B: 0x52, A: 0xFF} // 警示红
 
-	// 描边三档（分层用，不用阴影；与手机端 qi_line1/2/3 同值）：
-	// line1 进度条轨道 / line2 卡片与按钮边界 / line3 强调与高光档
+	// 描边两档（分层用，不用阴影；与手机端 qi_line1/2 同值）：
+	// line1 进度条轨道 / line2 卡片与按钮边界。
+	// （原 line3 高光档从未被使用，2026-10-29 死代码清扫删除——需要时从
+	// git 历史取回，值 0xFFFFFF @ A:0x47）
 	qiLine1 = color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0x1A}
 	qiLine2 = color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0x29}
-	qiLine3 = color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0x47}
 
 	// 朱砂双色阶（设计稿 §4.2：品牌/悬停与"实心按钮底"两职分离；
 	// 此前 #C35440 一个值包办，悬停亮档与品牌强调无处安放）
@@ -106,6 +107,10 @@ func (t *qiTheme) Color(n fyne.ThemeColorName, v fyne.ThemeVariant) color.Color 
 		return color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0xFF} // 主按钮白字（#C35440 上 4.5:1）
 	case theme.ColorNamePressed:
 		return qiPressed // 点击涟漪色：朱砂加深（原默认灰在朱砂实心上发闷）
+	case qiColorLogWarn:
+		return qiAmber // 日志 WARN 行（琥珀）
+	case qiColorLogError:
+		return qiDanger // 日志 ERROR 行（警示红）
 	default:
 		return t.Theme.Color(n, v)
 	}
@@ -122,6 +127,13 @@ func (t *qiTheme) Font(style fyne.TextStyle) fyne.Resource {
 
 // meterSizeName 引擎仪表大数字的主题字号名（RichText 的 SizeName 引用）。
 const meterSizeName fyne.ThemeSizeName = "qiMeter"
+
+// 日志级别专用主题色名（RichText 段落 ColorName 引用，经 Color() 分发到棋韵
+// 语义色——自定义色名走主题机制而非游离色值，与 meterSizeName 同款套路）。
+const (
+	qiColorLogWarn  fyne.ThemeColorName = "qiLogWarn"  // WARN → 琥珀
+	qiColorLogError fyne.ThemeColorName = "qiLogError" // ERROR → 警示红
+)
 
 // Size 覆盖字号与圆角：仪表大数字 22pt、正文 13pt、标签 11pt（棋韵字级阶梯，
 // 与手机端 11/13/15/22 四档对齐）；圆角对齐设计稿四级 8/12/16/20（§4.4）——

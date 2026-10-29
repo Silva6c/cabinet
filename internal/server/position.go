@@ -208,6 +208,7 @@ func (s *Server) handlePosition(c *Conn, m *Position) {
 	if m.NewGame {
 		id := newGameID()
 		s.currentGameID.Store(id)
+		s.trendReset(id) // 走势序列换段（A：新开局清零；C：撤离重开由识别器 NEW_GAME 兜住）
 		c.log.Info("新局开始（手机 NEW_GAME），对局 ID 已生成", "game_id", id, "fen", m.Fen)
 	}
 
@@ -292,7 +293,11 @@ func (s *Server) handlePosition(c *Conn, m *Position) {
 		}
 	}
 
-	// 3. 引擎路径
+	// 3. 云库（可选，默认关）：桔库/沉淀双未命中后的外部补充——异步不阻塞
+	//    引擎搜索，命中帧随后被引擎建议以最新覆盖语义收束
+	s.cloudLookupAsync(m.Fen)
+
+	// 4. 引擎路径
 	if s.eng == nil {
 		// M0 echo 基准（引擎未启用）：回 status 确认链路
 		_ = c.Send(Status{frameBase: frame(TypeStatus), Engine: EngineStatus{State: s.EngineState()}})

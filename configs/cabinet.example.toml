@@ -40,3 +40,13 @@ hash_mb = 256
 multi_pv = 1
 # 固定深度制搜索目标深度
 depth = 20
+
+# ── 云端开局库（可选，默认关）───────────────────────────────
+# 桔库与沉淀都未命中时，向云端开局库查询该局面。⚠开启即表示同意把
+# 对局局面 FEN 发往所配端点；端点默认预设 chessdb.cn（免费公开基建，
+# 免 key）。自带 API 的使用者替换 endpoint / api_key 即可。查询异步、
+# 限速 ≥1.5s 一次、结果按 FEN 缓存、失败静默不影响引擎建议。
+# [cloudbook]
+# enable = false
+# endpoint = "https://www.chessdb.cn/chessdb.php"
+# api_key = ""

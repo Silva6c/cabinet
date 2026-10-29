@@ -149,14 +149,20 @@ func (s *Server) handshake(c *Conn, ws *websocket.Conn) bool {
 			// welcome 带上引擎当前算力（depth/hash_mb）：手机端按钮显示与循环
 			// 起点从此与 PC 真实值一致（此前手机只能显示本地默认档，出现
 			// "手机 0.25g / 电脑 2048"的脱节——2026-10-02 用户反馈）
-			var engDepth, engHashMB int
+			var engDepth, engHashMB, engMoveTimeMS int
+			var hasMoveTime bool
 			if tuner, ok := s.eng.(EngineTuner); ok {
 				engDepth, engHashMB = tuner.Depth(), tuner.HashMB()
+				engMoveTimeMS, hasMoveTime = tuner.MoveTimeMS(), true
+			}
+			var engMoveTime *int
+			if hasMoveTime {
+				engMoveTime = &engMoveTimeMS
 			}
 			if err := c.Send(Welcome{
 				frameBase: frame(TypeWelcome),
 				SessionID: c.ID,
-				Engine:    EngineState{State: s.EngineState(), Depth: engDepth, HashMB: engHashMB},
+				Engine:    EngineState{State: s.EngineState(), Depth: engDepth, HashMB: engHashMB, MoveTimeMS: engMoveTime},
 				Books:     s.bookNames(),
 			}); err != nil {
 				c.log.Warn("发送 welcome 失败", "err", err)

@@ -7,10 +7,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -307,4 +309,58 @@ func makeTestZip(t *testing.T, payload []byte) []byte {
 		t.Fatal(err)
 	}
 	return buf.Bytes()
+}
+
+// TestCheck_DirectFallback 代理路径失败时直连兜底：系统代理开着但节点抖动
+// （TUN 用户常见组合）时，直连可达即保成功率——2026-10-28 真机实录落地。
+func TestCheck_DirectFallback(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`[{"tag_name":"stable-20261001","html_url":"https://example.com/r"}]`))
+	}))
+	defer srv.Close()
+
+	c := newTestChecker(t, srv.URL, "vc9-20261201")
+	c.proxy = func(*http.Request) (*url.URL, error) {
+		return &url.URL{Scheme: "http", Host: "127.0.0.1:1"}, nil // 恒指向死端口
+	}
+	c.client = newClient(time.Second, c.proxy)
+	c.directClient = newClient(time.Second, nil)
+	c.Check(context.Background())
+	if s := c.Snapshot(); s.State != StateUpToDate || !strings.Contains(s.Message, "已是最新") {
+		t.Fatalf("state = %s (%s), want 直连兜底后 up_to_date", s.State, s.Message)
+	}
+}
+
+// TestCheck_BothPathsFail 代理与直连全败：上屏文案为分类短句——不得含 URL
+// 或 Go 错误链（长串撑破面板的实录），全量细节只进日志。
+func TestCheck_BothPathsFail(t *testing.T) {
+	c := newTestChecker(t, "https://127.0.0.1:1", "vc1-20260101") // 端口 1 恒拒连
+	c.Check(context.Background())
+	s := c.Snapshot()
+	if s.State != StateFailed {
+		t.Fatalf("state = %s (%s), want failed", s.State, s.Message)
+	}
+	if strings.Contains(s.Message, "http") || len([]rune(s.Message)) > 40 {
+		t.Fatalf("文案应为无 URL 短句, got %q", s.Message)
+	}
+}
+
+// TestFailureMessage 分类表：超时/中断/拒连三类归位为短句，且一律不带 URL。
+func TestFailureMessage(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"超时", &url.Error{Op: "Get", URL: "https://api.github.com/x", Err: context.DeadlineExceeded}, "网络超时"},
+		{"中断", &url.Error{Op: "Get", URL: "https://api.github.com/x", Err: io.EOF}, "中断"},
+		{"拒连", &url.Error{Op: "Get", URL: "https://api.github.com/x",
+			Err: errors.New("dial tcp 127.0.0.1:7897: connect: connection refused")}, "无法连接"},
+	}
+	for _, tc := range cases {
+		got := failureMessage(tc.err)
+		if !strings.Contains(got, tc.want) || strings.Contains(got, "http") || len([]rune(got)) > 40 {
+			t.Fatalf("%s: got %q, want 含 %q 的短句", tc.name, got, tc.want)
+		}
+	}
 }

@@ -22,13 +22,14 @@ import (
 // ⚠【雷区】Threads/HashMB/MultiPV/Depth 是用户实测钉死的算力参数（红线，
 // 见 internal/config EngineConfig 注释）：未经用户明确要求严禁改默认值。
 type Options struct {
-	Path    string // 皮卡鱼 exe 路径
-	NNUE    string // pikafish.nnue 绝对路径（EvalFile）
-	Threads int    // 0 = 自动（逻辑处理器数的一半）
-	HashMB  int    // 0 = 自动（defaultHashMB，2GiB）
-	MultiPV int
-	Depth   int          // 固定深度制搜索目标
-	Log     *slog.Logger // 子进程 stderr 落日志用（New 填充；测试 fake 可空）
+	Path       string // 皮卡鱼 exe 路径
+	NNUE       string // pikafish.nnue 绝对路径（EvalFile）
+	Threads    int    // 0 = 自动（逻辑处理器数的一半）
+	HashMB     int    // 0 = 自动（defaultHashMB，2GiB）
+	MultiPV    int
+	Depth      int          // 固定深度制搜索目标
+	MoveTimeMS int          // 时间制搜索上限（毫秒）；>0 时优先于深度生效，0 = 按深度
+	Log        *slog.Logger // 子进程 stderr 落日志用（New 填充；测试 fake 可空）
 }
 
 // 默认值兜底
@@ -46,6 +47,9 @@ func (o Options) withDefaults() Options {
 	}
 	if o.Depth <= 0 {
 		o.Depth = 20
+	}
+	if o.MoveTimeMS < 0 {
+		o.MoveTimeMS = 0
 	}
 	return o
 }
@@ -156,10 +160,11 @@ type Engine struct {
 	cur       atomic.Value // proc：当前进程句柄（stop 打断跨线程用）
 
 	// 运行中可调算力（set_engine 远程调节 / 桌面面板调节，协议 §4.10）：
-	// depth 每轮 go 直接读取；threads/hashMB/multiPV 为目标值，与 applied* 不同时
-	// 在下一轮搜索开始前（UCI 空闲窗口）按 Threads→Hash→MultiPV 顺序应用
-	// （官方要求 Threads 先于 Hash 设置）。
+	// depth/moveTimeMS 每轮 go 直接读取（moveTimeMS>0 时时间制优先）；threads/
+	// hashMB/multiPV 为目标值，与 applied* 不同时在下一轮搜索开始前（UCI 空闲
+	// 窗口）按 Threads→Hash→MultiPV 顺序应用（官方要求 Threads 先于 Hash 设置）。
 	depth          atomic.Int64
+	moveTimeMS     atomic.Int64 // >0 = 时间制（go movetime），0 = 深度制（go depth）
 	tuneMu         sync.Mutex
 	threads        int
 	appliedThreads int
@@ -196,6 +201,7 @@ func New(opts Options, log *slog.Logger) *Engine {
 		done:          make(chan struct{}),
 	}
 	e.depth.Store(int64(opts.Depth))
+	e.moveTimeMS.Store(int64(opts.MoveTimeMS))
 	e.threads, e.appliedThreads = opts.Threads, opts.Threads
 	e.hashMB, e.appliedHash = opts.HashMB, opts.HashMB
 	e.multiPV, e.appliedMultiPV = opts.MultiPV, opts.MultiPV
@@ -214,6 +220,25 @@ func (e *Engine) SetDepth(d int) bool {
 	e.log.Info("搜索目标深度已调整", "depth", d)
 	return true
 }
+
+// SetMoveTimeMS 设置时间制搜索上限（毫秒）。0 = 退回深度制（go depth），
+// 500–20000 = 每步 go movetime。时间制优先于深度——快棋/跟盘节奏场景下
+// 深度制在复杂局面会拖慢出建议（2026-10-28 功能定稿）。
+func (e *Engine) SetMoveTimeMS(ms int) bool {
+	if ms != 0 && (ms < 500 || ms > 20000) {
+		return false
+	}
+	e.moveTimeMS.Store(int64(ms))
+	if ms > 0 {
+		e.log.Info("搜索已切换时间制", "movetime_ms", ms)
+	} else {
+		e.log.Info("搜索已切回深度制", "depth", e.Depth())
+	}
+	return true
+}
+
+// MoveTimeMS 当前时间制上限（0 = 深度制）。
+func (e *Engine) MoveTimeMS() int { return int(e.moveTimeMS.Load()) }
 
 // SetHashMB 设置置换表大小（MB）。0 = 自动（defaultHashMB，2GiB）；
 // 手动范围 32–32768（对齐皮卡鱼 2026-09 版 Hash 上限 33554432MB，按产品档位收敛）。
@@ -666,7 +691,13 @@ func (e *Engine) searchLoop(ctx context.Context, p proc, warmup string) error {
 			lineErr = err
 			break
 		}
-		if err := p.WriteLine(fmt.Sprintf("go depth %d", e.Depth())); err != nil {
+		// 思考模式二选一：时间制（movetime>0）优先——go movetime 自行收束；
+		// 深度制 go depth 由 searchTimeout 兜底。打断/最新覆盖机制两制共用。
+		goCmd := fmt.Sprintf("go depth %d", e.Depth())
+		if mt := e.moveTimeMS.Load(); mt > 0 {
+			goCmd = fmt.Sprintf("go movetime %d", mt)
+		}
+		if err := p.WriteLine(goCmd); err != nil {
 			lineErr = err
 			break
 		}

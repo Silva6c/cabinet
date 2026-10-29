@@ -139,12 +139,13 @@ func run(configPath, resourceRoot string, noTray bool) error {
 		} else {
 			nnue, _ := filepath.Abs(cfg.Engine.NNUE)
 			engConcrete = engine.New(engine.Options{
-				Path:    cfg.Engine.Path,
-				NNUE:    nnue,
-				Threads: cfg.Engine.Threads,
-				HashMB:  cfg.Engine.HashMB,
-				MultiPV: cfg.Engine.MultiPV,
-				Depth:   cfg.Engine.Depth,
+				Path:       cfg.Engine.Path,
+				NNUE:       nnue,
+				Threads:    cfg.Engine.Threads,
+				HashMB:     cfg.Engine.HashMB,
+				MultiPV:    cfg.Engine.MultiPV,
+				Depth:      cfg.Engine.Depth,
+				MoveTimeMS: cfg.Engine.MoveTimeMS,
 			}, logger)
 			eng = engConcrete
 			engDone = engConcrete.Done()
@@ -208,6 +209,9 @@ func run(configPath, resourceRoot string, noTray bool) error {
 			case "depth":
 				snapshot.Engine.Depth = v
 				cfg.Engine.Depth = v
+			case "movetime":
+				snapshot.Engine.MoveTimeMS = v
+				cfg.Engine.MoveTimeMS = v
 			case "hash":
 				snapshot.Engine.HashMB = v
 				cfg.Engine.HashMB = v
@@ -385,6 +389,9 @@ func run(configPath, resourceRoot string, noTray bool) error {
 	}()
 
 	// 主控制台窗口：启动即显示；× 隐藏回托盘；退出只能走托盘菜单
+	// 云库开关落盘互斥（CloudBookSet 与并发刷新可能同时进；算力落盘的
+	// tunePersistMu 作用域不在此，独立一把）
+	var cloudPersistMu sync.Mutex
 	console.Run(console.Options{
 		Version:         server.Version,
 		LogDir:          logDir,
@@ -398,6 +405,7 @@ func run(configPath, resourceRoot string, noTray bool) error {
 				State: s.Engine.State, Depth: s.Engine.Depth, Nodes: s.Engine.Nodes,
 				NPS: s.Engine.NPS, Hashfull: s.Engine.Hashfull, HashMB: s.Engine.HashMB,
 				Threads: s.Engine.Threads, MultiPV: s.Engine.MultiPV, TargetDepth: s.Engine.TargetDepth,
+				MoveTimeMS: s.Engine.MoveTimeMS, SearchMS: s.Engine.SearchMS,
 			}
 			clients := make([]console.ClientRow, 0, len(s.Clients))
 			for _, cl := range s.Clients {
@@ -452,6 +460,32 @@ func run(configPath, resourceRoot string, noTray bool) error {
 			}
 			return n
 		},
+		TrendSeries: func() console.TrendSnapshot {
+			game, pts := srv.TrendSnapshot()
+			out := make([]console.TrendPoint, len(pts))
+			for i, p := range pts {
+				out[i] = console.TrendPoint{TsMs: p.TsMs, ScoreCP: p.ScoreCP, WinRate: p.WinRate}
+			}
+			return console.TrendSnapshot{GameID: game, Points: out}
+		},
+		CloudBookEndpoint: cfg.CloudBook.Endpoint,
+		CloudBookGet:      srv.CloudBookEnabled,
+		CloudBookSet: func(on bool) string {
+			// 立即生效（服务端原子位）+ 落盘 toml（快照 + UnresolvePaths，
+			// 与算力落盘同款便携性铁律）
+			cloudPersistMu.Lock()
+			defer cloudPersistMu.Unlock()
+			srv.SetCloudBookEnable(on)
+			cfg.CloudBook.Enable = on
+			snapshot := *cfg
+			snapshot.UnresolvePaths(resourceRoot)
+			if err := snapshot.Save(configPath); err != nil {
+				logger.Warn("云库开关落盘失败", "enable", on, "err", err)
+				return fmt.Sprintf("已切换但落盘失败: %v", err)
+			}
+			logger.Info("云库开关已切换", "enable", on)
+			return ""
+		},
 		ClearSuggestions: func() error {
 			if st == nil {
 				return fmt.Errorf("沉淀库未启用（配置 store.enable）")
@@ -467,11 +501,12 @@ func run(configPath, resourceRoot string, noTray bool) error {
 				return console.TuneState{}
 			}
 			return console.TuneState{
-				Depth:   engConcrete.Depth(),
-				HashMB:  engConcrete.HashMB(),
-				Threads: engConcrete.Threads(),
-				MultiPV: engConcrete.MultiPV(),
-				Ready:   srv.EngineState() == engine.StateReady,
+				Depth:      engConcrete.Depth(),
+				MoveTimeMs: engConcrete.MoveTimeMS(),
+				HashMB:     engConcrete.HashMB(),
+				Threads:    engConcrete.Threads(),
+				MultiPV:    engConcrete.MultiPV(),
+				Ready:      srv.EngineState() == engine.StateReady,
 			}
 		},
 		TunerSet: func(kind string, v int) string {

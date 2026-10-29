@@ -14,6 +14,8 @@ linters:
     - govet
     # 静态检查主力（SA 系列 + 简化建议）
     - staticcheck
+    # 未使用代码（2026-10-29 启用：首轮清扫 newShotConsole / qiLine3 后清零）
+    - unused
     # 无效赋值（赋值后从未读取）
     - ineffassign
   settings:

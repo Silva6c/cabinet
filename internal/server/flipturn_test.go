@@ -51,19 +51,22 @@ func TestFlipTurnLegalOnRealRejectedFen(t *testing.T) {
 
 // fakeTunerEngine 最小引擎桩：满足 EngineBridge + EngineTuner（引擎桥集成测试注入）。
 type fakeTunerEngine struct {
-	events chan engine.Event
-	depth  int
-	hashMB int
+	events     chan engine.Event
+	depth      int
+	moveTimeMS int
+	hashMB     int
 }
 
 func (f *fakeTunerEngine) Events() <-chan engine.Event { return f.events }
 func (f *fakeTunerEngine) Request(fen string)          {}
 func (f *fakeTunerEngine) State() string               { return engine.StateReady }
 func (f *fakeTunerEngine) SetDepth(d int) bool         { f.depth = d; return true }
+func (f *fakeTunerEngine) SetMoveTimeMS(ms int) bool   { f.moveTimeMS = ms; return true }
 func (f *fakeTunerEngine) SetHashMB(mb int) bool       { f.hashMB = mb; return true }
 func (f *fakeTunerEngine) SetThreads(n int) bool       { return true }
 func (f *fakeTunerEngine) SetMultiPV(n int) bool       { return true }
 func (f *fakeTunerEngine) Depth() int                  { return f.depth }
+func (f *fakeTunerEngine) MoveTimeMS() int             { return f.moveTimeMS }
 func (f *fakeTunerEngine) HashMB() int                 { return f.hashMB }
 func (f *fakeTunerEngine) Threads() int                { return 0 }
 func (f *fakeTunerEngine) MultiPV() int                { return 0 }
@@ -83,7 +86,7 @@ func TestWelcomeEngineConfigAndBadPositionFenEcho(t *testing.T) {
 	cfg.Bind = "127.0.0.1:0"
 	cfg.Token = testToken
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	eng := &fakeTunerEngine{events: make(chan engine.Event, 8), depth: 20, hashMB: 2048}
+	eng := &fakeTunerEngine{events: make(chan engine.Event, 8), depth: 20, hashMB: 2048, moveTimeMS: 3000}
 	srv := New(cfg, cert, logger, eng)
 	srv.authTimeout = 10 * time.Second
 
@@ -117,6 +120,10 @@ func TestWelcomeEngineConfigAndBadPositionFenEcho(t *testing.T) {
 	}
 	if wl.Engine.Depth != 20 || wl.Engine.HashMB != 2048 {
 		t.Fatalf("welcome 应携带引擎实际算力 depth=20 hash_mb=2048, got %+v", wl.Engine)
+	}
+	// 思考模式同步（2026-10-28 补链）：movetime_ms 指针必填（0=深度制也传到）
+	if wl.Engine.MoveTimeMS == nil || *wl.Engine.MoveTimeMS != 3000 {
+		t.Fatalf("welcome 应携带思考模式 movetime_ms=3000, got %+v", wl.Engine.MoveTimeMS)
 	}
 
 	// 走子方标错的局面：错误帧必须回显 fen（手机端丢弃迟到旧错误的依据）

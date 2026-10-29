@@ -167,6 +167,13 @@ func TestTuneEnginePersist(t *testing.T) {
 	if len(got) != 1 || got[0] != "hash=512" {
 		t.Fatalf("落盘回调未按预期触发: %v", got)
 	}
+	// 同值重复调节静默（2026-10-29 日志降噪）：值未变不落盘
+	if err := srv.TuneEngine("hash", 512); err != nil {
+		t.Fatalf("同值调节应静默成功: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("同值调节不应重复落盘: %v", got)
+	}
 	// 非法值：校验拦截，不触发落盘
 	if err := srv.TuneEngine("hash", 999999); err == nil {
 		t.Fatal("超范围 hash 应被拒绝")
@@ -230,10 +237,14 @@ func TestHandleSetEnginePersist(t *testing.T) {
 		}
 		break
 	}
+	// 同值回显静默（2026-10-29 日志降噪，典型场景：手机每次重连回显线程档）：
+	// 全帧无实变 → 不落盘、不打日志、不重搜。无回执可等，靠时窗观察"没有发生"
+	_ = ws.WriteJSON(SetEngine{frameBase: frame(TypeSetEngine), HashMB: &h10240})
+	time.Sleep(300 * time.Millisecond)
 	mu.Lock()
 	defer mu.Unlock()
 	if len(got) != 1 {
-		t.Fatalf("越界帧不应落盘: %v", got)
+		t.Fatalf("越界帧与同值回显均不应落盘: %v", got)
 	}
 }
 

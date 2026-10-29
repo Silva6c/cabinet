@@ -171,13 +171,14 @@
         <TextView
             android:id="@+id/overlay_btn_strength"
             style="@style/OverlayChip"
-            android:text="深度 —" />
+            android:text="思考 —" />
 
         <TextView
             android:id="@+id/overlay_btn_hash"
             style="@style/OverlayChip"
             android:layout_marginTop="2dp"
             android:text="哈希 —" />
+
 
         <TextView
             android:id="@+id/overlay_btn_turn"

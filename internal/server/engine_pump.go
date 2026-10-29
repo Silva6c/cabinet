@@ -24,6 +24,7 @@ func (s *Server) enginePump(ctx context.Context) {
 			switch ev.Kind {
 			case engine.EventState:
 				s.log.Info("引擎状态", "state", ev.State)
+				s.searchStartNanos.Store(0) // 状态变化（重启/就绪）= 无进行中搜索
 				s.hub.Broadcast(Status{frameBase: frame(TypeStatus), Engine: EngineStatus{State: ev.State}})
 
 			case engine.EventInfo:
@@ -37,6 +38,11 @@ func (s *Server) enginePump(ctx context.Context) {
 					continue
 				}
 				info := ev.Info
+				// 时间制仪表计时（server 侧停表，见 searchStartNanos 注）：
+				// 最新局面的首条 info 起表；已计时则保持（同一轮搜索的后续 info）
+				if s.searchStartNanos.Load() == 0 {
+					s.searchStartNanos.Store(time.Now().UnixNano())
+				}
 				best := bestOfLine(info)
 				// 门控细节：Depth>0 排除不带 depth 的杂项 info（否则 0≠-1 每条
 				// 误判为变化）；用 != 而非 > 是因 depth 并非严格单调（多线交错/
@@ -80,6 +86,9 @@ func (s *Server) enginePump(ctx context.Context) {
 				}
 
 			case engine.EventBestmove:
+				// 搜索物理收束即停表（旧局面/被覆盖请求的 bestmove 同样算收束——
+				// 若只在"最新"分支停，下一轮搜索首条 info 会沿用旧起点）
+				s.searchStartNanos.Store(0)
 				r := ev.Result
 				if r == nil {
 					continue
@@ -95,6 +104,10 @@ func (s *Server) enginePump(ctx context.Context) {
 						ScoreCP: sug.ScoreCP(), ScoreMate: sug.ScoreMate(),
 						PV: sug.PV, Depth: sug.Depth,
 					})
+					// 走势序列：每局面一个终态点（redWdlPercent 已换算红方视角）
+					if pt, ok := trendPointFromSug(sug.ScoreCP(), sug.ScoreMate(), sug.WdlW); ok {
+						s.trendAppend(pt)
+					}
 				} else if r.BestMove == "null" {
 					// "null" = 引擎无合法着法（2026-10-24 实锤）：真皮卡鱼对绝杀/
 					// 困毙局面瞬间回 bestmove (none)，此前整条链路静默——不下发、

@@ -385,7 +385,7 @@ class AssistActivity : AppCompatActivity() {
                 }
                 finishTest("连接成功！$eng", ok = true)
             }
-            override fun onServerEngineConfig(depth: Int, hashMB: Int) {}
+            override fun onServerEngineConfig(depth: Int, hashMB: Int, movetimeMS: Int?) {}
             override fun onSuggestion(sug: RemoteSuggestion) {}
             override fun onEngineMetrics(state: String, depth: Int, nodes: Long, nps: Long, hashfull: Int) {}
             override fun onSearchSettled() {}

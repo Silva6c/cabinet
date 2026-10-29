@@ -3,7 +3,12 @@ package console
 
 import (
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
+
+	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/theme"
 )
 
 // fmtState 引擎状态中文名。
@@ -144,4 +149,105 @@ func fmtScore(cp, mate *int) string {
 		return fmt.Sprintf("%+.2f", float64(*cp)/100.0)
 	}
 	return "—"
+}
+
+// ---------- 日志尾部紧凑渲染（2026-10-29 日志显示优化） ----------
+
+// logEntry 一行日志的结构化解析结果（slog TextHandler 产出格式）。
+type logEntry struct {
+	time  string // HH:MM:SS（取自 ISO 时间戳时分秒段）；异构行（解析失败）为空
+	level string // INFO / WARN / ERROR / DEBUG；异构行为空
+	msg   string // 消息主体（带引号形态已反转义）
+	rest  string // 附加属性原文（key=value 空格分隔），可为空
+}
+
+// logLineRe 解析 slog TextHandler 单行：
+// time=<ts> level=<lv> msg=<"转义串" | 无空白串> [attrs...]。
+// 带引号/不带引号两种形态由 group3 是否以引号开头区分（无引号串不含空白，
+// 引号内可含任意转义字符）。
+var logLineRe = regexp.MustCompile(`^time=(\S+) level=(\w+) msg=("((?:[^"\\]|\\.)*)"|(\S+))(?:\s+(.*))?$`)
+
+// parseLogLine 解析一行日志；解析失败 ok=false（调用方原样显示兜底）。
+func parseLogLine(line string) (logEntry, bool) {
+	m := logLineRe.FindStringSubmatch(line)
+	if m == nil {
+		return logEntry{}, false
+	}
+	e := logEntry{level: m[2], rest: m[6]}
+	if strings.HasPrefix(m[3], `"`) {
+		// 带引号形态：strconv.AppendQuote 的逆过程（失败保原文，不做二次猜测）
+		if u, err := strconv.Unquote(m[3]); err == nil {
+			e.msg = u
+		} else {
+			e.msg = m[4]
+		}
+	} else {
+		e.msg = m[5]
+	}
+	if len(m[1]) >= 19 && m[1][10] == 'T' {
+		e.time = m[1][11:19] // ISO 时间戳取本地时分秒段
+	} else {
+		e.time = m[1]
+	}
+	return e, true
+}
+
+// isJunkLogLine 垃圾行判定（显示层兜底，剔除旧日志文件里的存量噪音；
+// 源头根治见 tune.go 调参静默与 fynel10n.go 翻译补丁）：
+// ① Fyne 翻译失败三连（主行 + Cause: + At:）；② Fyne 错误的缩进续行
+// （真实 Fyne 错误保留主行可诊断）。
+func isJunkLogLine(e logEntry) bool {
+	return strings.Contains(e.msg, "Translation failure") ||
+		strings.Contains(e.msg, "not found in language") ||
+		strings.HasPrefix(e.msg, "  ")
+}
+
+// compactLogLines 批量解析 + 剔除垃圾行（UI 映射前的唯一纯函数入口，便于单测）。
+// 解析失败的异构行原样透传（time/level 为空 = 渲染时不加前缀）。
+func compactLogLines(lines []string) []logEntry {
+	out := make([]logEntry, 0, len(lines))
+	for _, ln := range lines {
+		e, ok := parseLogLine(ln)
+		if !ok {
+			out = append(out, logEntry{msg: ln})
+			continue
+		}
+		if isJunkLogLine(e) {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// logLineText 紧凑行文本：时间 + 级别（5 宽对齐）+ 消息 + 属性；异构行原样。
+func logLineText(e logEntry) string {
+	if e.time == "" && e.level == "" {
+		return e.msg
+	}
+	line := e.time + " " + fmt.Sprintf("%-5s", e.level) + " " + e.msg
+	if e.rest != "" {
+		line += " " + e.rest
+	}
+	return line
+}
+
+// logLevelColor 级别 → 主题色名（WARN 琥珀 / ERROR 警示红，其余前景色）。
+func logLevelColor(level string) fyne.ThemeColorName {
+	switch level {
+	case "WARN":
+		return qiColorLogWarn
+	case "ERROR":
+		return qiColorLogError
+	}
+	return theme.ColorNameForeground
+}
+
+// fmtSearchElapsed 时间制仪表的本轮已搜用时：空闲 "—"，其余 "2.3s"（时间制
+// 上限 500ms–20s，小数一位足够读）。
+func fmtSearchElapsed(ms int64) string {
+	if ms <= 0 {
+		return "—"
+	}
+	return fmt.Sprintf("%.1fs", float64(ms)/1000.0)
 }

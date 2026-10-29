@@ -35,7 +35,8 @@ func (c *Console) sectionEngine() fyne.CanvasObject {
 		return o
 	}
 	mkMeter := func(key string, col color.Color) fyne.CanvasObject {
-		o, v, vs := statBig(key, col)
+		o, ls, v, vs := statBig(key, col)
+		c.engLabelCells[key] = ls
 		c.engCells[key] = v
 		c.engSufCells[key] = vs
 		return o
@@ -63,13 +64,35 @@ func (c *Console) tileBooks() fyne.CanvasObject {
 	sub, subSet := qiDynamic("最近更新 —", qiSize(theme.SizeNameCaptionText), qiMuted, false, false)
 	bar, barSet := newHBar()
 	c.bookHeadSet, c.bookTotalSet, c.bookRateSet, c.bookSubSet, c.bookBarSet = headSet, totalSet, rateSet, subSet, barSet
-	return bentoTile(container.NewVBox(
+	rows := []fyne.CanvasObject{
 		sectionHeader("02", "开局库", head),
 		qiCaption("收录局面"),
 		total,
 		bar,
 		container.NewHBox(qiCaption("今日命中率"), rate, layout.NewSpacer(), sub),
-	))
+	}
+	// 云库开关行（可选外部开局库：桔库/沉淀双未命中才查；nil 回调 = 行缺席）
+	if c.opts.CloudBookGet != nil {
+		c.cloudChk = widget.NewCheck("云库查询", func(on bool) {
+			if c.cloudBusy.Load() || c.opts.CloudBookSet == nil {
+				return
+			}
+			if msg := c.opts.CloudBookSet(on); msg != "" {
+				dialog.NewError(errors.New(msg), c.win).Show()
+			}
+		})
+		endpoint := c.opts.CloudBookEndpoint
+		if u, err := url.Parse(endpoint); err == nil && u.Host != "" {
+			endpoint = u.Host
+		}
+		rows = append(rows, container.NewHBox(
+			c.cloudChk,
+			qiCaption(endpoint),
+			layout.NewSpacer(),
+			qiCaption("桔库/沉淀未命中才查"),
+		))
+	}
+	return bentoTile(container.NewVBox(rows...))
 }
 
 // updateBookTile 回填开局库 tile：收录总局面 + 今日命中率 + 最近更新
@@ -101,6 +124,21 @@ func (c *Console) updateBookTile(books []BookRow) {
 		c.bookRateSet("—")
 		c.bookBarSet(0)
 	}
+}
+
+// refreshCloudBook 回写云库开关勾选态（cloudBusy 抑制 SetChecked 的 OnChanged
+// 回环——fyne SetChecked 会主动回调，与 tunerBusy 同款套路）。
+func (c *Console) refreshCloudBook() {
+	if c.cloudChk == nil || c.opts.CloudBookGet == nil {
+		return
+	}
+	on := c.opts.CloudBookGet()
+	if c.cloudChk.Checked == on {
+		return
+	}
+	c.cloudBusy.Store(true)
+	defer c.cloudBusy.Store(false)
+	c.cloudChk.SetChecked(on)
 }
 
 // todayBookRate 今日命中率：今天沉淀的建议里开局库来源占比（今天无样本返回 false）。
@@ -138,6 +176,9 @@ var (
 	// Hash 档封顶 10GB（2026-10-01 用户钉死：32GB 机器给引擎 10GB 置换表已是上限）
 	tunerHashOpts  = []string{"自动", "256MB", "512MB", "1GB", "2GB", "4GB", "8GB", "10GB"}
 	tunerDepthOpts = []string{"8", "12", "16", "20", "24", "28", "32", "36", "40"}
+	// 时间上限档（2026-10-28 思考模式定稿）："不限" = 按深度（movetime=0），
+	// 其余为每步 go movetime 的毫秒档。
+	tunerMoveTimeOpts = []string{"不限（按深度）", "1秒", "3秒", "5秒", "10秒", "20秒"}
 )
 
 // sectionTuner 引擎调参面板：线程数 / MultiPV / Hash / 深度四下拉 + 清空置换表。
@@ -158,17 +199,20 @@ func (c *Console) sectionTuner() fyne.CanvasObject {
 	mp := mk("multipv", tunerMPOpts)
 	hs := mk("hash", tunerHashOpts)
 	dp := mk("depth", tunerDepthOpts)
+	mt := mk("movetime", tunerMoveTimeOpts)
 	clearBtn := newHiliteButton("清空置换表", c.onClearHash)
 
 	hint := widget.NewLabel("改动即时以最近局面重新搜索；与手机端调节双向同步")
+	c.tunerHint = hint // refreshTuner 逐轮追加当前思考模式（含手机端远程调节的跟随回显）
 	hint.TextStyle = fyne.TextStyle{Italic: true}
 	hint.Importance = widget.LowImportance
 
-	row := container.NewGridWithColumns(4,
+	row := container.NewGridWithColumns(5,
 		container.NewVBox(widget.NewLabel("线程数"), th),
 		container.NewVBox(widget.NewLabel("变招路数"), mp),
 		container.NewVBox(widget.NewLabel("置换表"), hs),
 		container.NewVBox(widget.NewLabel("搜索深度"), dp),
+		container.NewVBox(widget.NewLabel("时间上限"), mt),
 	)
 	return container.NewVBox(
 		sectionTitle("引擎调参", clearBtn),
@@ -211,6 +255,7 @@ func (c *Console) onClearHash() {
 }
 
 // parseTunerOption 档位文本 → 数值："自动" → 0（threads/hash 的自动档语义），
+// "不限（按深度）" → 0（movetime 的时间制关闭语义），"Ns" → N*1000 毫秒，
 // 其余解析整数；"1GB" 等 Hash 简写换算 MB。非法返回错误。
 func parseTunerOption(kind, s string) (int, error) {
 	if s == "自动" {
@@ -218,6 +263,17 @@ func parseTunerOption(kind, s string) (int, error) {
 			return 0, fmt.Errorf("%s 不支持自动档", kind)
 		}
 		return 0, nil
+	}
+	if kind == "movetime" {
+		if s == "不限（按深度）" {
+			return 0, nil
+		}
+		t := strings.TrimSuffix(s, "秒")
+		v, err := strconv.Atoi(t)
+		if err != nil {
+			return 0, fmt.Errorf("时间上限档非法 %q", s)
+		}
+		return v * 1000, nil
 	}
 	t := strings.TrimSpace(strings.TrimSuffix(s, "MB"))
 	mult := 1
@@ -236,6 +292,12 @@ func parseTunerOption(kind, s string) (int, error) {
 func tunerOptionText(kind string, v int) string {
 	if v <= 0 && (kind == "threads" || kind == "hash") {
 		return "自动"
+	}
+	if kind == "movetime" {
+		if v <= 0 {
+			return "不限（按深度）"
+		}
+		return fmt.Sprintf("%d秒", v/1000)
 	}
 	if kind == "hash" {
 		if v >= 1024 && v%1024 == 0 {
@@ -273,6 +335,17 @@ func (c *Console) refreshTuner() {
 	set("multipv", tunerOptionText("multipv", ts.MultiPV), ts.Ready)
 	set("hash", tunerOptionText("hash", ts.HashMB), ts.Ready)
 	set("depth", tunerOptionText("depth", ts.Depth), ts.Ready)
+	set("movetime", tunerOptionText("movetime", ts.MoveTimeMs), ts.Ready)
+	// 当前思考模式动态提示（时间制优先于深度——手机端芯片远程调节时此行即
+	// PC 侧的"以谁为准"回显，1.5s 轮询自动跟随）
+	if c.tunerHint != nil {
+		mode := fmt.Sprintf("当前：深度制 %d 层", ts.Depth)
+		if ts.MoveTimeMs > 0 {
+			mode = fmt.Sprintf("当前：时间制 %d 秒", ts.MoveTimeMs/1000)
+		}
+		c.tunerHint.Text = "改动即时以最近局面重新搜索；与手机端调节双向同步 · " + mode
+		c.tunerHint.Refresh()
+	}
 }
 
 // ---------- 高级面板按钮排 ----------
@@ -305,7 +378,7 @@ func (c *Console) sectionAdvancedBar() fyne.CanvasObject {
 	addBtn("update", "检查更新", theme.DownloadIcon())
 	hint := qiCaption("一次展开一个面板")
 	return container.NewVBox(
-		sectionHeader("04", "高级功能", hint),
+		sectionHeader("05", "高级功能", hint),
 		container.NewHBox(btns...),
 	)
 }
@@ -622,17 +695,42 @@ func (c *Console) sectionBooks() fyne.CanvasObject {
 
 // ---------- ⑤ 日志尾部 ----------
 
-// sectionLog 最近 ~15 行日志 + "打开日志目录"按钮；自动滚动到底部（最新）。
+// logTailLines 日志面板取尾部行数（紧凑渲染单行单事件，取 25 行留滚动余量）。
+const logTailLines = 25
+
+// sectionLog 最近日志尾部（紧凑渲染：时间 + 级别着色 + 垃圾行剔除）+
+// "打开日志目录"按钮；自动滚动到底部（最新）。
 func (c *Console) sectionLog() fyne.CanvasObject {
-	c.logLabel = widget.NewLabel("")
-	c.logLabel.TextStyle = fyne.TextStyle{Monospace: true}
-	scroll := container.NewScroll(c.logLabel)
+	c.logRich = widget.NewRichText()
+	c.logRich.Wrapping = fyne.TextWrapWord
+	scroll := container.NewScroll(c.logRich)
 	c.logScroll = scroll
 	openBtn := newHiliteButton("打开日志目录", func() { openDir(c.opts.LogDir) })
 	return container.NewVBox(
 		sectionTitle("日志", openBtn),
 		container.New(&fixedHeight{h: 190}, scroll),
 	)
+}
+
+// refreshLog 解析日志尾部并映射为级别着色的段落（每行独立段落，parse 失败的
+// 异构行原样透传）；垃圾行已在 compactLogLines 剔除。
+func (c *Console) refreshLog() {
+	entries := compactLogLines(tailLines(c.opts.LogFile, logTailLines))
+	if len(entries) == 0 {
+		entries = []logEntry{{msg: "（暂无日志）"}}
+	}
+	segs := make([]widget.RichTextSegment, 0, len(entries))
+	for _, e := range entries {
+		segs = append(segs, &widget.TextSegment{
+			Text: logLineText(e),
+			Style: widget.RichTextStyle{
+				TextStyle: fyne.TextStyle{Monospace: true},
+				ColorName: logLevelColor(e.level),
+			},
+		})
+	}
+	c.logRich.Segments = segs
+	c.logRich.Refresh()
 }
 
 // ---------- ⑥ 检查更新 ----------
@@ -645,6 +743,9 @@ func (c *Console) sectionUpdate() fyne.CanvasObject {
 		return nil // main 未接线（no-tray 模式）：面板缺席，按钮自动隐藏
 	}
 	c.updateText = widget.NewLabel("尚未检查")
+	// 结果文案自动换行：失败文案虽已分类短句化（update 包），仍留此硬兜底——
+	// 任何超长串都不得撑破面板（2026-10-28 用户真机实录）。
+	c.updateText.Wrapping = fyne.TextWrapWord
 	c.updateBtn = newHiliteButton("立即检查", func() {
 		if c.opts.UpdateCheck == nil {
 			return
@@ -789,9 +890,25 @@ func (c *Console) refresh() {
 				f(v)
 			}
 		}
+		setLabel := func(k, v string) {
+			if f, ok := c.engLabelCells[k]; ok {
+				f(v)
+			}
+		}
 		set("状态", fmtState(eng.State))
-		set("深度 / 目标", fmt.Sprintf("%d", eng.Depth))
-		setSuf("深度 / 目标", fmt.Sprintf("/%d", eng.TargetDepth))
+		// 深度仪表随思考模式切换语义（2026-10-29 定稿：时间制下不再显示旧
+		// 深度目标——显示链全部跟随时间走）：时间制 = "用时 / 上限"（本轮已
+		// 搜用时对时间上限），深度制 = "深度 / 目标"（实时层深对目标层深）
+		const gaugeKey = "深度 / 目标"
+		if eng.MoveTimeMS > 0 {
+			setLabel(gaugeKey, "用时 / 上限")
+			set(gaugeKey, fmtSearchElapsed(eng.SearchMS))
+			setSuf(gaugeKey, " /"+tunerOptionText("movetime", eng.MoveTimeMS))
+		} else {
+			setLabel(gaugeKey, "深度 / 目标")
+			set(gaugeKey, fmt.Sprintf("%d", eng.Depth))
+			setSuf(gaugeKey, fmt.Sprintf("/%d", eng.TargetDepth))
+		}
 		set("节点", fmtCompactN(eng.Nodes))
 		set("搜索速率", fmtNPS(eng.NPS))
 		if eng.NPS > 0 {
@@ -833,6 +950,7 @@ func (c *Console) refresh() {
 	c.refreshFirewall()
 	c.refreshTuner()
 	c.refreshUpdate()
+	c.refreshTrend()
 	if c.opts.Books != nil {
 		books := c.opts.Books()
 		if len(books) == 0 {
@@ -847,20 +965,16 @@ func (c *Console) refresh() {
 		}
 		c.updateBookTile(books)
 	}
+	c.refreshCloudBook()
 	if c.opts.Recent != nil {
 		c.sugRows = c.opts.Recent(50)
 		c.sugTable.Refresh()
 		c.sugCount.SetText(fmt.Sprintf("今日 %d 条", c.countToday()))
 	}
-	// 日志尾：填充后滚动到底（最新日志可见）
-	lines := tailLines(c.opts.LogFile, 15)
-	if len(lines) == 0 {
-		lines = []string{"（暂无日志）"}
-	}
-	c.logLabel.SetText(strings.Join(lines, "\n"))
-	// 滚动到底部（最新日志可见）；Offset 单位为内容像素
+	// 日志尾：紧凑渲染后滚动到底（最新日志可见）
+	c.refreshLog()
 	if c.logScroll != nil {
-		contentH := c.logLabel.MinSize().Height
+		contentH := c.logRich.MinSize().Height
 		viewH := c.logScroll.Size().Height
 		if contentH > viewH && viewH > 0 {
 			c.logScroll.Offset = fyne.NewPos(0, contentH-viewH)
