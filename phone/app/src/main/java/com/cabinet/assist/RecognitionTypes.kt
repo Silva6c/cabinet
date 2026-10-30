@@ -36,7 +36,8 @@ class RecognitionResult(
 
 /**
  * 稳定帧跟踪器：连续 confirmCount 帧出现同一局面才确认，并推断轮次/检测重开。
- * @param singleMoveRepair v39 走子连贯性开关（docs/走子连贯性设计与App域解剖-20261017.md）：
+ * @param singleMoveRepair v39 走子连贯性开关（设计见姊妹仓 xiangqi-recognition 的
+ *   docs/走子连贯性设计与App域解剖-20261017.md）：
  *   确认时刻做"单步走子匹配"——枚举旧局面的全部伪合法走子，d==0 直接锁定走子方，
  *   恰好差 1 格且唯一走子可解释则修正后确认（漏检主形态"马跳走原地残留"被规则修复）；
  *   d≥2 或歧义维持现状，12 帧自愈继续兜底。默认开。
@@ -79,8 +80,27 @@ class BoardTracker(private val confirmCount: Int = 3, private val singleMoveRepa
     @Volatile var confirming: Boolean = false
         private set
 
+    /**
+     * 12 帧自愈丢弃旧确认的标志：自愈丢弃 confirmed 重新走首次确认流程后，
+     * 若重新确认出的局面与自愈前相同，FEN 不变会被服务层 lastSentFen 去重闸
+     * 拦死上行——PC 不重推建议，悬浮窗建议区持续空白。服务层在确认链终点
+     * （onBoardConfirmed）消费本标志并清 lastSentFen，与 forceFullRelocate
+     * 同款"重读结果即使 FEN 相同也要重发对账"语义。置位（onFrameInner）与
+     * 消费均在 worker 线程串行，无并发窗口；@Volatile 与其余跨线程可读字段对齐
+     * （主线程诊断读取不受线程限制）。
+     */
+    @Volatile var staleConfirmationDiscarded = false
+        private set
+
     private var candidate: RecognitionResult? = null
     private var candidateHits = 0
+
+    /** 消费自愈标志：置位即返回 true 并清零（服务层据此清 lastSentFen 对账重发） */
+    fun consumeStaleConfirmationDiscarded(): Boolean {
+        val v = staleConfirmationDiscarded
+        staleConfirmationDiscarded = false
+        return v
+    }
 
     // ---- B1 轮次恢复素材（2026-10-24）：进程重启前最后上行的局面 ----
     // 纯盘面 + 轮次，首次确认消费后即清；不持久化在 tracker 内（由服务层从
@@ -106,6 +126,9 @@ class BoardTracker(private val confirmCount: Int = 3, private val singleMoveRepa
         candidateHits = 0
         unstableStreak = 0
         confirming = false
+        // 外部重置（引擎切换）= 跟踪状态整体重建，悬置的自愈标志一并作废——
+        // 否则标志会在后续无关的确认里多触发一次重发（幂等无害，但状态不自洽）
+        staleConfirmationDiscarded = false
         redGo = redGoFirst
     }
 
@@ -117,6 +140,7 @@ class BoardTracker(private val confirmCount: Int = 3, private val singleMoveRepa
         candidateHits = 0
         unstableStreak = 0
         confirming = false
+        staleConfirmationDiscarded = false // 同 reset：悔棋重建跟踪，自愈历史作废
     }
 
     fun onFrame(res: RecognitionResult): Event {
@@ -136,6 +160,8 @@ class BoardTracker(private val confirmCount: Int = 3, private val singleMoveRepa
             candidate = null
             candidateHits = 0
             unstableStreak = 0 // 同步清零:只复位一次,否则下一帧再次清掉正在累计的候选
+            // 旧确认已丢弃：服务层确认后需清 lastSentFen 对账重发（见字段注）
+            staleConfirmationDiscarded = true
         }
         val prev = confirmed
         // 坏帧不清候选：isValid=false 直接返回，candidate/candidateHits 原样保留——
@@ -174,7 +200,7 @@ class BoardTracker(private val confirmCount: Int = 3, private val singleMoveRepa
                     // B1 轮次恢复（2026-10-24）：中局面首次确认时按持久化素材恢复
                     // 走子方——盘面全等直接恢复；差 1 格（停机期间走了一步）用
                     // movedSide 推断（持久化局面是上一手之前，移动方已走 → 轮对方，
-                    // 与确认链 222 行差分推断同构）；差 ≥2（停机期间走了多步/换局）
+                    // 与确认链 NEW_BOARD 分支的差分推断同构）；差 ≥2（停机期间走了多步/换局）
                     // 或素材异常维持现状，bad_position 回环兜底。一次性消费——
                     // 12 帧自愈走回首次确认时素材已清，redGo 保留（自愈不清轮次）
                     restoreBoard?.let { hintBoard ->

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -794,6 +795,165 @@ func TestServer_OwnerSessionClearedOnDisconnect(t *testing.T) {
 	}
 }
 
+// TestTrendMySide 我方执色（2026-10-29）：position.my_red 上报后，走势点记录
+// 执色（控制台据此按我方视角画线）；旧手机不传时点标"未告知"、展示退回红方视角。
+func TestTrendMySide(t *testing.T) {
+	fb := newFakeBridge(engine.StateReady)
+	fb.onRequest = replayNormalSearch
+	url, cleanup, srv := startTestServerWithBridgeS(t, fb)
+	defer cleanup()
+	ws := dialWS(t, url)
+	defer ws.Close()
+
+	if _, ok := recv(t, ws, "服务器 hello").(*Hello); !ok {
+		t.Fatal("首帧应为 hello")
+	}
+	_ = ws.WriteJSON(Hello{frameBase: frame(TypeHello), Client: ClientName, Ver: "0.1.0", Caps: []string{CapV1}})
+	_ = ws.WriteJSON(Auth{frameBase: frame(TypeAuth), Token: testToken})
+	if _, ok := recv(t, ws, "welcome").(*Welcome); !ok {
+		t.Fatal("期望 welcome")
+	}
+
+	// 三个不同局面（仅动 FEN 计数器区分）：2026-10-29 起同局面去重（trendAppend
+	// 替换末点），执色语义须在"不同局面累加"的前提下验证
+	fens := []string{
+		"rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1",
+		"rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 2 3",
+		"rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 4 5",
+	}
+	// 旧手机形态：不带 my_red → 点标记"未告知"（控制台展示红方视角）
+	_ = ws.WriteJSON(Position{frameBase: frame(TypePosition), Fen: fens[0], RedGo: true})
+	waitFor(t, 2*time.Second, func() bool { _, pts := srv.TrendSnapshotFor(""); return len(pts) == 1 })
+	if _, pts := srv.TrendSnapshotFor(""); pts[0].MySideKnown {
+		t.Fatalf("未上报 my_red 时点不应标记已知：%+v", pts[0])
+	}
+
+	// 执黑上报：后续点固化 MyRed=false + 已知
+	black := false
+	_ = ws.WriteJSON(Position{frameBase: frame(TypePosition), Fen: fens[1], RedGo: true, MyRed: &black})
+	waitFor(t, 2*time.Second, func() bool { _, pts := srv.TrendSnapshotFor(""); return len(pts) == 2 })
+	if _, pts := srv.TrendSnapshotFor(""); !pts[1].MySideKnown || pts[1].MyRed != false {
+		t.Fatalf("执黑上报后点应为已知+执黑：%+v", pts[1])
+	}
+
+	// 同值不误报：换局面再报一次执黑，新点执色保持执黑
+	_ = ws.WriteJSON(Position{frameBase: frame(TypePosition), Fen: fens[2], RedGo: true, MyRed: &black})
+	waitFor(t, 2*time.Second, func() bool { _, pts := srv.TrendSnapshotFor(""); return len(pts) == 3 })
+	if _, pts := srv.TrendSnapshotFor(""); !pts[2].MySideKnown || pts[2].MyRed != false {
+		t.Fatalf("执色应持续保持执黑：%+v", pts[2])
+	}
+}
+
+// TestTrendDedupSameFen 同局面去重（2026-10-29）：同一 FEN 重复评估（切算力参数
+// reSearchLatest / 手机补发重搜）替换末点而非追加——曲线"每局面一个点"，切参数
+// 不再产生波动锯齿；不同局面才累加。分组键任意（去重是组内行为）。
+func TestTrendDedupSameFen(t *testing.T) {
+	s := &Server{}
+	s.trendAppend("d:test", TrendPoint{TsMs: 1, ScoreCP: 100, Fen: "fenA"})
+	s.trendAppend("d:test", TrendPoint{TsMs: 2, ScoreCP: 130, Fen: "fenA"}) // 同局面重评估 → 替换
+	s.trendAppend("d:test", TrendPoint{TsMs: 3, ScoreCP: -40, Fen: "fenB"}) // 新局面 → 追加
+	s.trendAppend("d:test", TrendPoint{TsMs: 4, ScoreCP: -60, Fen: "fenB"}) // 同局面再评 → 替换
+	if _, pts := s.TrendSnapshotFor("d:test"); len(pts) != 2 {
+		t.Fatalf("同局面应去重为每局面一点，得 %d 点：%+v", len(pts), pts)
+	}
+	_, pts := s.TrendSnapshotFor("d:test")
+	if pts[0].ScoreCP != 130 || pts[0].TsMs != 2 {
+		t.Fatalf("末点应被最新评估替换：%+v", pts[0])
+	}
+	if pts[1].ScoreCP != -60 {
+		t.Fatalf("第二局面应保持最新分：%+v", pts[1])
+	}
+}
+
+// TestTrendPerDevice 走势按设备分组（2026-10-30 立项）：两台"手机"（hello 自报
+// 不同 devid）各自发局面——序列独立互不混、焦点随最新 position 切换；同 devid
+// 重连（新会话）曲线续接；TrendDevices 返回两组且标签带昵称与 devid 短码。
+// 分组键取舍与信任模型见 trend.go 文件头。
+func TestTrendPerDevice(t *testing.T) {
+	fb := newFakeBridge(engine.StateReady)
+	fb.onRequest = replayNormalSearch
+	url, cleanup, srv := startTestServerWithBridgeS(t, fb)
+	defer cleanup()
+
+	// dialDevice 完整握手并自报设备身份（devid 须过 16-32 hex 校验）；
+	// testToken 单一配对模型下两"设备"同 token——分组键只看 devid。
+	const (
+		devA = "aaaabbbbccccddddeeeeffff00001111"
+		devB = "11112222333344445555666677778888"
+	)
+	dialDevice := func(devid, name string) *websocket.Conn {
+		ws := dialWS(t, url)
+		if _, ok := recv(t, ws, "服务器 hello").(*Hello); !ok {
+			t.Fatal("首帧应为 hello")
+		}
+		_ = ws.WriteJSON(Hello{frameBase: frame(TypeHello), Client: ClientName, Ver: "0.1.0",
+			Devid: devid, Name: name, Caps: []string{CapV1}})
+		_ = ws.WriteJSON(Auth{frameBase: frame(TypeAuth), Token: testToken})
+		if _, ok := recv(t, ws, "welcome").(*Welcome); !ok {
+			t.Fatal("期望 welcome")
+		}
+		return ws
+	}
+	wsA := dialDevice(devA, "测试机A")
+	defer wsA.Close()
+	wsB := dialDevice(devB, "测试机B")
+	defer wsB.Close()
+
+	fenA := "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1"
+	fenA2 := "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 4 5"
+	fenB := "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 2 3"
+
+	// A 先发：焦点 = A，序列只有 A 的点
+	_ = wsA.WriteJSON(Position{frameBase: frame(TypePosition), Fen: fenA, RedGo: true})
+	waitFor(t, 2*time.Second, func() bool {
+		_, pts := srv.TrendSnapshotFor("")
+		return len(pts) == 1 && pts[0].Fen == fenA
+	})
+	devs := srv.TrendDevices()
+	if len(devs) != 1 || devs[0].Key != "d:"+devA {
+		t.Fatalf("A 上报后应只有一组：%+v", devs)
+	}
+
+	// B 后发：焦点切到 B，B 组独立成线；A 组不受影响（关键语义：不再混一条线）
+	_ = wsB.WriteJSON(Position{frameBase: frame(TypePosition), Fen: fenB, RedGo: true})
+	waitFor(t, 2*time.Second, func() bool { return len(srv.TrendDevices()) == 2 })
+	_, ptsFocus := srv.TrendSnapshotFor("") // 焦点 = 最新 position 来源 B
+	if len(ptsFocus) != 1 || ptsFocus[0].Fen != fenB {
+		t.Fatalf("焦点应随最新 position 切到 B：%+v", ptsFocus)
+	}
+	_, ptsA := srv.TrendSnapshotFor("d:" + devA)
+	if len(ptsA) != 1 || ptsA[0].Fen != fenA {
+		t.Fatalf("A 组曲线应独立保留：%+v", ptsA)
+	}
+	// 列表最近活跃在前：B 最新 → 第一项是 B；标签带昵称与 devid 短码
+	devs = srv.TrendDevices()
+	if devs[0].Key != "d:"+devB || !strings.Contains(devs[0].Label, "测试机B") {
+		t.Fatalf("设备列表应最近活跃在前且带昵称：%+v", devs)
+	}
+
+	// A 同 devid 重连（新会话 ID）：曲线续接而非清零——分组键是设备不是会话
+	_ = wsA.Close()
+	// 断联即隐藏入口（2026-10-30 用户定稿）：A 掉线后设备列表只剩 B
+	waitFor(t, 2*time.Second, func() bool { return len(srv.TrendDevices()) == 1 })
+	// 组未删：断联期间曲线仍可按键回看
+	if _, pts := srv.TrendSnapshotFor("d:" + devA); len(pts) != 1 {
+		t.Fatalf("断联后组应保留供回看：%+v", pts)
+	}
+	wsA2 := dialDevice(devA, "测试机A")
+	defer wsA2.Close()
+	// 重连握手完成（尚未发局面）：设备在线即恢复按钮入口
+	waitFor(t, 2*time.Second, func() bool { return len(srv.TrendDevices()) == 2 })
+	_ = wsA2.WriteJSON(Position{frameBase: frame(TypePosition), Fen: fenA2, RedGo: true})
+	waitFor(t, 2*time.Second, func() bool {
+		_, pts := srv.TrendSnapshotFor("d:" + devA)
+		return len(pts) == 2
+	})
+	_, ptsA2 := srv.TrendSnapshotFor("d:" + devA)
+	if ptsA2[0].Fen != fenA || ptsA2[1].Fen != fenA2 {
+		t.Fatalf("重连后曲线应续接（旧点保留 + 新点追加）：%+v", ptsA2)
+	}
+}
+
 // TestTrendSeries 走势序列（2026-10-28 定稿）：引擎终态逐点追加；NEW_GAME
 // 重置换段——覆盖定稿情形 A（新开局清零）与 C（撤离重开由 NEW_GAME 兜住）。
 func TestTrendSeries(t *testing.T) {
@@ -813,7 +973,7 @@ func TestTrendSeries(t *testing.T) {
 		t.Fatal("期望 welcome")
 	}
 
-	snap := func() (string, []TrendPoint) { return srv.TrendSnapshot() }
+	snap := func() (string, []TrendPoint) { return srv.TrendSnapshotFor("") }
 	fen := "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1"
 	_ = ws.WriteJSON(Position{frameBase: frame(TypePosition), Fen: fen, RedGo: true})
 	waitFor(t, 2*time.Second, func() bool { _, pts := snap(); return len(pts) == 1 })

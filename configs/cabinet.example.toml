@@ -40,13 +40,24 @@ hash_mb = 256
 multi_pv = 1
 # 固定深度制搜索目标深度
 depth = 20
+# 思考模式时间制上限（毫秒）；0 = 时间制关闭，按深度制搜索（默认，不限思考时间）。
+# >0（500–20000）时引擎每步限时（go movetime），恒定耗时、出建议更快
+movetime_ms = 0
+# 不走任何库（默认关；PC 高级面板→开局库可热切并回写本文件）。开启后建议链
+# 跳过全部库——桔库、沉淀、云库（含 cloud_first）都不查，每步引擎直搜；只停
+# "查"不停"记"（引擎建议照常沉淀）。优先级高于 cloud_first。
+# skip_books = false
 
 # ── 云端开局库（可选，默认关）───────────────────────────────
 # 桔库与沉淀都未命中时，向云端开局库查询该局面。⚠开启即表示同意把
 # 对局局面 FEN 发往所配端点；端点默认预设 chessdb.cn（免费公开基建，
 # 免 key）。自带 API 的使用者替换 endpoint / api_key 即可。查询异步、
 # 限速 ≥1.5s 一次、结果按 FEN 缓存、失败静默不影响引擎建议。
+# cloud_first = "默认走云库"（2026-10-30，默认关；需 enable = true）：
+# 开启后每步先查云库——命中即采用 cloud 建议并不再查本地库/引擎，
+# 未命中自动回落常规链。⚠隐私口径同 enable：局面 FEN 必然发往端点。
 # [cloudbook]
 # enable = false
+# cloud_first = false
 # endpoint = "https://www.chessdb.cn/chessdb.php"
 # api_key = ""

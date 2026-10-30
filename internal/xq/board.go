@@ -50,25 +50,6 @@ func ParseUcci(s string) (Move, bool) {
 	return Move{From: Vec{int(fx), int(fy)}, To: Vec{int(tx), int(ty)}}, true
 }
 
-// PseudoMoves 枚举 redGo 一方的全部伪合法走子（不含照面步）。
-// 顺序无契约——调用方一律用"解释是否唯一"而非顺序。
-func PseudoMoves(b book.Board, redGo bool) []Move {
-	var out []Move
-	for y := 0; y < 10; y++ {
-		for x := 0; x < 9; x++ {
-			p := b[y][x]
-			if p == book.Empty || IsRed(p) != redGo {
-				continue
-			}
-			from := Vec{x, y}
-			for _, to := range pieceTargets(b, from, p) {
-				out = append(out, Move{From: from, To: to})
-			}
-		}
-	}
-	return out
-}
-
 // isOwn 目标格是否己方子（己方子不可落）。
 func isOwn(b book.Board, redGo bool, v Vec) bool {
 	p := b[v.Y][v.X]

@@ -8,8 +8,9 @@ import (
 // 本文件为桥层热路径提供量化基线（全仓此前 0 个 Benchmark）：实测 parseInfo
 // 全链 ~1.5µs/行、~0.01% 单核（50 行/秒峰值），防止未来有人以"每秒数十条"
 // 为由对解析路径做重构式"优化"——池化 Info/PV 会破坏 server 侧对切片的
-// 异步共享（server.go sug.PV = info.PV），Scanner 替换 ReadString 有 64KB
-// 截断断流风险。任何微优化先跑这里的基线，收益不足一个百分点就不做。
+// 异步共享（server/engine_pump.go 建议帧直接携带 info.PV），Scanner 替换
+// ReadString 有 64KB 截断断流风险。任何微优化先跑这里的基线，收益不足
+// 一个百分点就不做。
 
 // benchInfoLine 真实形态的 MultiPV info 行（depth 爬升期每秒数十条）。
 const benchInfoLine = "info depth 24 seldepth 31 multipv 1 score cp 34 nodes 12400000 " +

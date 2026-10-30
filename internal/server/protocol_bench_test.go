@@ -11,7 +11,7 @@ import (
 // 字段调整、omitempty 语义变化）都必须以这里的 golden 为准绳。
 // golden 是"当前输出钉死"，不是规范文本——协议文档在 docs/protocol-v1.md。
 
-// benchSuggestion 构造真实形态的 suggestion 帧：90B FEN + 12 步 PV +
+// benchSuggestion 构造真实形态的 suggestion 帧：68B FEN + 12 步 PV +
 // 三指针 WDL + 线序（MultiPV>1 时手机端按槽位聚合的真实输入）。
 func benchSuggestion() Suggestion {
 	return Suggestion{

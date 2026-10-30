@@ -5,6 +5,7 @@ import (
 	"fmt"
 )
 
+// errorFrameFor 将解码错误映射为协议错误帧（协议 §5 错误码）。
 func errorFrameFor(err error) ErrorFrame {
 	switch {
 	case errors.Is(err, ErrBadJSON):

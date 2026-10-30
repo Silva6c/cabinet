@@ -51,10 +51,11 @@ func GetZobrist(b Board, redGo bool) int64 {
 }
 
 // VmoveToUcci 解码 vmove 为 UCCI 着法（逐字移植 Zobrist.getMoveFromVmove）：
-// 高 8 位为起点格子编码、低 8 位为终点，输出字符串为"终点坐标 + 起点坐标"。
-// 位义与拼串顺序都是冻结契约：vmove 由 Java 端生成器写入，输出终点在前是
-// 上游既有行为（已核对 Zobrist.java:8-11），看似"反着拼"不是笔误——不得
-// 顺手"纠正"，改动会同时破坏向量测试与全库着法解码。
+// 低 8 位为起点格子编码、高 8 位为终点，输出"起点坐标 + 终点坐标"——即标准
+// UCCI 的起点、终点顺序，与引擎/协议直接同向（向量测试 startpos_red 的
+// "h2c2" = 红炮 h2→c2 可证）。位义与拼串顺序都是冻结契约：vmove 由 Java 端
+// 生成器按同一位义写入，两端逐字对表——改动任一侧都会同时破坏向量测试
+// 与全库着法解码。
 func VmoveToUcci(vmove int) string {
 	first := vmove >> 8
 	second := vmove & 0x00ff

@@ -6,6 +6,11 @@ import static java.lang.Math.abs;
 import java.io.Serializable;
 import java.util.HashMap;
 
+/**
+ * 走法：UCCI 4 字符坐标（fromUCCIString）与中文着法描述（getChsString）。
+ * 绑定构造时传入的 Board 深拷贝快照——getChsString 依赖"走子前"的局面（从
+ * fromPosition 取子名与同线消歧），原局面已变再调用会拿错棋子。
+ */
 public class Move implements Serializable {
     private static final long serialVersionUID = 1L;
 
@@ -33,6 +38,11 @@ public class Move implements Serializable {
     }
 
 
+    /**
+     * 解析 UCCI 坐标走法（如 "h2e2"）：列 'a'..'i' → x=0..8（红方视角自左向右），
+     * 行 '0'..'9' → y=9-行号（即 UCCI 行 0=红方底线、行 9=黑方底线）。
+     * 起点或终点出盘返回 false；只做坐标校验，不判走法是否合乎棋规。
+     */
     public boolean fromUCCIString(String ucciString){
         if(ucciString == null || ucciString.length() != 4){
             return false;
@@ -66,7 +76,7 @@ public class Move implements Serializable {
     * 3. 对于走直线的棋子，需要考虑是进退（最后一个数字是纵坐标的差值），还是平移（最后一个数字是目标位置的横坐标）
     * 4. 对于走斜线的棋子（马、相、士），需要考虑是进退，最后一个数字是目标位置的横坐标
     * 5. 对于红字移动，使用中文的数字；对于黑子移动，使用阿拉伯数字
-    * 6. 还需要处理同一列有相同的棋子，使用前后来区分，比如前炮退二，后炮进二？？
+    * 6. 还需要处理同一列有相同的棋子，使用前后来区分，比如前炮退二，后炮进二.
     * https://www.xqbase.com/protocol/cchess_move.htm
      */
     public String getChsString(){
@@ -139,7 +149,7 @@ public class Move implements Serializable {
     }
 
     /*
-    find same piece on the same vertical line
+    同纵线同种棋子的"前/后（/中/一二三…）"消歧（规则出处见下链接）
     https://www.xqbase.com/protocol/cchess_move.htm
      */
     private String findPiecesOnSameVLine(int piece, Position pos) {

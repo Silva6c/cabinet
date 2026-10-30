@@ -148,6 +148,159 @@ func srvURLHost(u string) string {
 	return p.Host
 }
 
+// handshakeClient 完整 hello/auth/welcome 握手（云库优先三测试共用）。
+func handshakeClient(t *testing.T, ws *websocket.Conn) {
+	t.Helper()
+	if _, ok := recv(t, ws, "服务器 hello").(*Hello); !ok {
+		t.Fatal("首帧应为 hello")
+	}
+	_ = ws.WriteJSON(Hello{frameBase: frame(TypeHello), Client: ClientName, Ver: "0.1.0", Caps: []string{CapV1}})
+	_ = ws.WriteJSON(Auth{frameBase: frame(TypeAuth), Token: testToken})
+	if _, ok := recv(t, ws, "welcome").(*Welcome); !ok {
+		t.Fatal("期望 welcome")
+	}
+}
+
+// TestCloudFirstHit "默认走云库"命中路径（2026-10-30）：cloud_first 开启后
+// 云库命中即终——下发 cloud 建议且**引擎完全不被请求**（与桔库命中"命中即
+// return"同构，省算力正是该功能的收益；语义矩阵见 cloudLookupFirst）。
+func TestCloudFirstHit(t *testing.T) {
+	cloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("move:h2e2,score:25"))
+	}))
+	defer cloud.Close()
+
+	fb := newFakeBridge(engine.StateReady)
+	engineRequests := 0
+	fb.onRequest = func(fb *fakeBridge, fen string) {
+		engineRequests++
+		replayNormalSearch(fb, fen)
+	}
+	url, cleanup, srv := startTestServerWithBridgeS(t, fb)
+	defer cleanup()
+	srv.cfg.CloudBook = config.CloudBookConfig{Enable: true, Endpoint: cloud.URL}
+	srv.SetCloudBookEnable(true)
+	srv.SetCloudFirst(true)
+
+	ws := dialWS(t, url)
+	defer ws.Close()
+	handshakeClient(t, ws)
+
+	fen := "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1"
+	_ = ws.WriteJSON(Position{frameBase: frame(TypePosition), Fen: fen, RedGo: true})
+
+	// 等云库建议到达
+	_ = ws.SetReadDeadline(time.Now().Add(3 * time.Second))
+	defer ws.SetReadDeadline(time.Time{})
+	for {
+		m := recvLoop(t, ws, &[]string{})
+		sug, ok := m.(*Suggestion)
+		if !ok {
+			continue
+		}
+		if sug.Source == "cloud:"+srvURLHost(cloud.URL) {
+			if sug.BestMove != "h2e2" {
+				t.Fatalf("云库主选=%q, want h2e2", sug.BestMove)
+			}
+			break
+		}
+		t.Fatalf("cloud_first 命中时不应有其他来源建议先到：%s", sug.Source)
+	}
+	// 引擎必须零请求：云库命中即终，常规链（含引擎）未走
+	time.Sleep(800 * time.Millisecond)
+	if engineRequests != 0 {
+		t.Fatalf("云库命中后引擎不应被请求，实际 %d 次", engineRequests)
+	}
+}
+
+// TestCloudFirstMiss "默认走云库"未命中路径：云库查询照发，未命中自动回落
+// 常规链——引擎建议照常产出（零缺口，用户无感知断流）。
+func TestCloudFirstMiss(t *testing.T) {
+	cloudHits := make(chan struct{}, 8)
+	cloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cloudHits <- struct{}{}
+		_, _ = w.Write([]byte("unknown:unknown"))
+	}))
+	defer cloud.Close()
+
+	fb := newFakeBridge(engine.StateReady)
+	fb.onRequest = replayNormalSearch
+	url, cleanup, srv := startTestServerWithBridgeS(t, fb)
+	defer cleanup()
+	srv.cfg.CloudBook = config.CloudBookConfig{Enable: true, Endpoint: cloud.URL}
+	srv.SetCloudBookEnable(true)
+	srv.SetCloudFirst(true)
+
+	ws := dialWS(t, url)
+	defer ws.Close()
+	handshakeClient(t, ws)
+
+	fen := "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1"
+	_ = ws.WriteJSON(Position{frameBase: frame(TypePosition), Fen: fen, RedGo: true})
+
+	select {
+	case <-cloudHits:
+	case <-time.After(2 * time.Second):
+		t.Fatal("云库端点从未被请求——云库优先路径未触发")
+	}
+	// 回落常规链：引擎建议最终到达（cloud 未命中不产生建议帧）
+	_ = ws.SetReadDeadline(time.Now().Add(5 * time.Second))
+	defer ws.SetReadDeadline(time.Time{})
+	for {
+		m := recvLoop(t, ws, &[]string{})
+		sug, ok := m.(*Suggestion)
+		if !ok {
+			continue
+		}
+		if sug.Source == "engine" {
+			return // 常规链引擎建议已到，回落成功
+		}
+		t.Fatalf("cloud 未命中时不应有其他来源建议：%s", sug.Source)
+	}
+}
+
+// TestCloudFirstOff cloud_first 关闭 = 完全现状行为：双未命中异步查云库补充 +
+// 引擎照跑——云库建议先到、引擎建议随后覆盖（"最新覆盖"收束语义，2026-10-28
+// 定稿的原始行为，回归锚）。
+func TestCloudFirstOff(t *testing.T) {
+	cloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("move:h2e2,score:25"))
+	}))
+	defer cloud.Close()
+
+	fb := newFakeBridge(engine.StateReady)
+	fb.onRequest = replayNormalSearch
+	url, cleanup, srv := startTestServerWithBridgeS(t, fb)
+	defer cleanup()
+	srv.cfg.CloudBook = config.CloudBookConfig{Enable: true, Endpoint: cloud.URL}
+	srv.SetCloudBookEnable(true)
+	// 不 SetCloudFirst(true)：保持默认关
+
+	ws := dialWS(t, url)
+	defer ws.Close()
+	handshakeClient(t, ws)
+
+	fen := "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1"
+	_ = ws.WriteJSON(Position{frameBase: frame(TypePosition), Fen: fen, RedGo: true})
+
+	seenCloud, seenEngine := false, false
+	_ = ws.SetReadDeadline(time.Now().Add(5 * time.Second))
+	defer ws.SetReadDeadline(time.Time{})
+	for !seenCloud || !seenEngine {
+		m := recvLoop(t, ws, &[]string{})
+		sug, ok := m.(*Suggestion)
+		if !ok {
+			continue
+		}
+		switch sug.Source {
+		case "cloud:" + srvURLHost(cloud.URL):
+			seenCloud = true
+		case "engine":
+			seenEngine = true
+		}
+	}
+}
+
 // recvLoop 同 recv，但失败时带回已见来源清单（诊断用）。
 func recvLoop(t *testing.T, ws *websocket.Conn, seen *[]string) any {
 	t.Helper()

@@ -276,3 +276,14 @@ func TestParseFEN_RowWidth(t *testing.T) {
 		t.Fatalf("合法 FEN 不应报错: %v", err)
 	}
 }
+
+// FENHash 测试专用入口：FEN → 查询键，不做合法性校验。Zobrist 哈希向量的
+// 用例刻意包含两将照面等非法局面（与 Java 端逐字比对），不能走 Validated
+// 版——此函数只服务于本文件，不进生产构建（生产一律 FENHashValidated）。
+func FENHash(fen string) (int64, bool, error) {
+	b, redGo, err := ParseFEN(fen)
+	if err != nil {
+		return 0, false, err
+	}
+	return GetZobrist(b, redGo), redGo, nil
+}

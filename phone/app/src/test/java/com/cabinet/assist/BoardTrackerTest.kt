@@ -130,9 +130,6 @@ class BoardTrackerTest {
         // frameTick 重放同一静止帧 → 第二帧即确认
         assertEquals(BoardTracker.Event.NEW_BOARD, t.onFrame(next))
         assertTrue("补帧确认后不再 confirming", !t.confirming)
-        // v39 走子连贯性（248861c）：本场景"黑卒消失"可作多重解释（被吃/漏检/
-        // 挪动）→ 歧义拒绝修复，行为与旧版一致（confirmed=原始漏检帧 next）。
-        // 单步修复只在唯一差异格可被唯一走子解释时启用（如 (9,7) 错位邻格类）
         // v39 走子连贯性（248861c）：next=开局黑卒 (3,0) 挺进到 (4,0) 后识别
         // 漏检新位（单帧画面少画一枚卒）——确认时刻单步修复找到唯一解释
         // （黑卒前进，d=1 唯一）并把漏画的卒补到新位 (4,0)，confirmed 是

@@ -107,7 +107,7 @@ func run(lite, withEngine, withBooks bool) error {
 		return errors.New("缺少桔库文件 library/books/*.obk（若确要无库打包请加 -lite）")
 	}
 
-	// ── 第 1 步：构建 cabinet.exe（与 build-exe.bat 同逻辑：CGO+MinGW+windowsgui）──
+	// ── 第 1 步：构建 cabinet.exe（与 scripts/build-exe.bat 同逻辑：CGO+MinGW+windowsgui）──
 	log.Printf("[1/4] 构建 %s ...", exeName)
 	if err := buildExe(); err != nil {
 		return err
@@ -172,7 +172,7 @@ func buildExe() error {
 		return fmt.Errorf("%s 正在运行，请先从托盘退出再打包（否则无法覆盖产物）", exeName)
 	}
 
-	// 版本注入与 build-exe.bat 同口径（2026-10-27）：git 可用时写
+	// 版本注入与 scripts/build-exe.bat 同口径（2026-10-27）：git 可用时写
 	// vc<提交数>-<HEAD日期>，非 git 环境留空回退 protocol.go 默认值——
 	// 本地打包与 CI 打包的 exe 版本号保证一致可追溯
 	ldflags := "-H windowsgui"

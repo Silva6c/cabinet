@@ -41,7 +41,7 @@ class RecognizePacerTest {
         val p = RecognizePacer(minFloorMs = 1000)
         p.markEnd(now = 10_000, costMs = 300, ok = true)
         assertEquals(1000L, p.minIntervalMs())
-        // YOLO 下限 500：角点缓存复用帧 200ms 时不被 ONNX 的 1000 下限拖累
+        // YOLO 下限 500：YOLO 推理更便宜（快帧 ~200ms 级），不被 ONNX 的 1000 下限拖累
         val y = RecognizePacer(minFloorMs = 500)
         y.markEnd(now = 10_000, costMs = 200, ok = true)
         assertEquals(500L, y.minIntervalMs())
@@ -92,7 +92,7 @@ class RecognizePacerTest {
         assertEquals(2000L, p.minIntervalMs())
         p.requestBurst()
         assertEquals(1100L, p.minIntervalMs())
-        // 下限 400:快帧(YOLO 200ms)时不低于 400
+        // 下限 300:快帧(~200ms 级)时不低于 300
         val y = RecognizePacer(minFloorMs = 500)
         y.requestBurst()
         assertEquals(RecognizePacer.BURST_FLOOR_MS, y.minIntervalMs())
@@ -142,7 +142,7 @@ class RecognizePacerTest {
     fun `burst 重复请求取最大次数`() {
         val p = RecognizePacer(minFloorMs = 1000)
         p.requestBurst(times = 2)
-        p.markEnd(now = 0, costMs = 0, ok = true) // 剩 1,仍 burst(间隔 400)
+        p.markEnd(now = 0, costMs = 0, ok = true) // 剩 1,仍 burst(间隔 300)
         assertEquals(RecognizePacer.BURST_FLOOR_MS, p.minIntervalMs())
         p.requestBurst(times = 4) // max(1,4)=4,不叠加
         repeat(4) { p.markEnd(now = 0, costMs = 0, ok = true) } // 剩 0,回常规

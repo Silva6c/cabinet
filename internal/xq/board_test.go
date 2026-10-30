@@ -20,14 +20,17 @@ func countFrom(b book.Board, redGo bool, v Vec) int {
 }
 
 // TestPseudoMoves_Start 开局各子着法数（逐子手核，不依赖"开局总数"这类口口
-// 相传的数字）。y 轴：y=0 黑底、y=9 红底；红兵前进 = y 减小（rank=9-y 增大）。
-//   - 兵 5×1（未过河只进不横；前进格行 5 全空）
-//   - 马 2×2（b9→a7/c7；d8 被 c9 相蹩腿、a7 方向 b8 空不蹩——蹩马腿）
-//   - 车 2×2（a9→a8/a7 后被 a6 红兵挡；横被 b9 马挡）
-//   - 炮 2×12（b2：横 6 + 竖下平移 4 + 隔 b4? 无——竖下 y=6..3 空 4 格后
-//     y=2 b7 黑炮可吃 1、再被相断；竖上仅 b1 平移 1，b0 己马架后出界）
-//   - 帅 1（e1 宫心；d9/f9 被仕占）、仕 1（e1；c1 出宫被拒）
-//   - 相 2+2（c9→a7/e7 均红半场；g9→e7/i7）
+// 相传的数字）。推演坐标统一用 (x,y)：y=0 黑底、y=9 红底，红兵前进 = y 减小。
+// 注意：cases 的 name 串（如"帅 e9"）只是显示标签、部分沿用了错位记号，UCCI
+// 正名以 rank=9-y 为准（(4,9) 帅 = e0）；断言只依赖 Vec，标签不参与判定。
+//   - 兵 5×1（未过河只进不横；前进格 y=5 行全空）
+//   - 马 2×2（(1,9)：a/c 两向可跳（共用腿 (1,8) 空）；(3,8) 向被 (2,9) 相蹩腿）
+//   - 车 2×2（(0,9)：直进 (0,8)/(0,7) 后被 (0,6) 红兵挡；横被 (1,9) 马挡）
+//   - 炮 2×12（(1,7)：横 6 = 左 1 + 右 5（(7,7) 己炮停）；竖下 y=6..3 平移 4，
+//     y=2 黑炮作架隔吃 (1,0) 黑马 1；竖上 y=8 平移 1，(1,9) 己马截停）
+//   - 帅 1（(4,9)：左右被仕占，可进宫心 (4,8)）
+//   - 仕 1（(3,9)：斜进 (4,8) 宫内；(2,8) 出宫被拒）
+//   - 相 2+2（(2,9)→(0,7)/(4,7)、(6,9)→(4,7)/(8,7)，均红半场 y≥5）
 func TestPseudoMoves_Start(t *testing.T) {
 	b, redGo, err := book.ParseFEN(startFen)
 	if err != nil {
@@ -63,11 +66,11 @@ func TestPseudoMoves_Start(t *testing.T) {
 // TestPseudoLegal_Boundaries 边界语义：蹩马腿/塞象眼/出宫/照面步不生成。
 func TestPseudoLegal_Boundaries(t *testing.T) {
 	b, redGo, _ := book.ParseFEN(startFen)
-	// h9 马去 f8：腿 (6,9)=g9 相 → 蹩
+	// (7,9) 马去 (5,8)（h0→f1）：腿 (6,9)=g0 相 → 蹩（t.Error 文案沿用旧记号）
 	if PseudoLegal(b, redGo, Move{Vec{7, 9}, Vec{5, 8}}) {
 		t.Error("h9 马→f8 应被 g9 相蹩腿拒绝")
 	}
-	// 仕 d9 出宫（c1 = x2 越出 x3-5 宫带）拒绝
+	// 仕 (3,9)=d0 出宫（去 (2,8)=c1，x2 越出 x3-5 宫带）拒绝
 	if PseudoLegal(b, redGo, Move{Vec{3, 9}, Vec{2, 8}}) {
 		t.Error("仕出九宫应拒绝")
 	}
@@ -151,8 +154,30 @@ func TestFenAfter(t *testing.T) {
 	if next != want2 {
 		t.Fatalf("第二步 FEN = %q, want %q", next, want2)
 	}
-	// 非法着法（开局 e9 帅直出宫）拒绝
+	// 非法着法拒绝："e9e6" 起子是黑将 (4,0) 而开局红方行棋——非行棋方的子
+	// 直接拒（即便换黑行棋，将一步也不能走到 (4,3)，双重不合法）
 	if _, ok := FenAfter(startFen, "e9e6"); ok {
 		t.Error("帅出宫应拒绝")
 	}
+}
+
+// PseudoMoves 测试专用：枚举 redGo 一方的全部伪合法走子（不含照面步），
+// 供棋规覆盖测试全盘扫描用。生产代码只走单子枚举（pieceTargets，经
+// DiffSingleMove/FenAfter），全盘枚举不进生产构建。
+// 顺序无契约——测试只断言集合，不断言顺序。
+func PseudoMoves(b book.Board, redGo bool) []Move {
+	var out []Move
+	for y := 0; y < 10; y++ {
+		for x := 0; x < 9; x++ {
+			p := b[y][x]
+			if p == book.Empty || IsRed(p) != redGo {
+				continue
+			}
+			from := Vec{x, y}
+			for _, to := range pieceTargets(b, from, p) {
+				out = append(out, Move{From: from, To: to})
+			}
+		}
+	}
+	return out
 }

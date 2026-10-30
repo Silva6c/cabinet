@@ -6,7 +6,10 @@ import java.io.Serializable;
 
 /**
  * Created by zfdang on 2016-4-17.
- * This class represents the chess board data, basically it's represention of FEN string;
+ * 棋盘数据（9×10 int 数组），本质是 FEN 局面的内存表示：restoreFromFEN 解析 FEN，
+ * piece[y][x] 存 Piece 常量（0=空）。坐标系：x=0..8 自左向右、y=0..9 自上而下
+ * （y=0 黑方底线、y=9 红方底线）。取子一律走 getPieceByPosition——数组是 [y][x]
+ * 行主序，直接下标极易把 x/y 写反。
  */
 public class Board implements Serializable {
     private static final long serialVersionUID = 2194052829642412444L;
@@ -14,8 +17,7 @@ public class Board implements Serializable {
     static public int BOARD_PIECE_WIDTH = 9;
     static public int BOARD_PIECE_HEIGHT = 10;
 
-    // do not access piece value directly, use getPieceByPosition instead
-    // it's easy to make mistake with values of (x,y)
+    // 勿直接访问 piece 数组：[y][x] 行主序，直接下标极易把 x/y 写反，取子走 getPieceByPosition
     private int[][] piece = new int[][]{
             {Piece.BJU, Piece.BMA, Piece.BXIANG, Piece.BSHI, Piece.BJIANG, Piece.BSHI, Piece.BXIANG, Piece.BMA, Piece.BJU},
             {0, 0, 0, 0, 0, 0, 0, 0, 0},
@@ -60,11 +62,17 @@ public class Board implements Serializable {
         }
     }
 
+    /**
+     * 解析 FEN 逐格覆盖整个棋盘（合法 FEN 恰好写满 90 格，复用实例无需先清盘）。
+     * 防御有限：仅校验段数/行棋方/回合数三处，返回 false 时棋盘内容不变；但盘面段
+     * 含未知棋子字符会因查表拆箱抛 NPE，格子数不足则残留旧子且仍返回 true——
+     * 调用方须保证 FEN 来自可信端（协议/引擎），勿把用户输入直接灌入。
+     */
     public boolean restoreFromFEN(String fenString) {
         if(fenString == null) return false;
         fenString = fenString.trim();
 
-        // append missing parts
+        // 容忍只写到行棋方的短 FEN（"…盘面 w/b"）：补齐后缀凑满 6 段再解析
         if(fenString.endsWith("w") || fenString.endsWith("b")) {
             fenString += " - - 0 1";
         }

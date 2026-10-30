@@ -9,6 +9,7 @@ import (
 	"time"
 )
 
+// recordSuggestion 沉淀回调（nil 安全）：把已下发建议转交注册的 sink 落库。
 func (s *Server) recordSuggestion(rec SuggestionRecord) {
 	// GameID 在此统一取当前局 ID（调用点无须各自传）：NEW_GAME 首帧已切换
 	// currentGameID，本条建议必然归属新局
@@ -127,16 +128,3 @@ func (s *Server) handleLogFrame(c *Conn, m *Log) {
 		c.log.Debug("手机日志写入失败", "err", err)
 	}
 }
-
-// enginePump 消费引擎事件，按协议节奏下发：
-//   - 状态变化 → 立即广播 status（协议 §4.6）
-//   - 搜索中 depth 变化或 bestmove 变化 → 立即定向下发 suggestion 给局面归属连接（§4.5）
-//   - 搜索中其余 info → 500ms 节流广播 status（带实时指标）
-//   - bestmove 终态 → 定向终值 suggestion + 广播 status
-//
-// suggestion 仅当结果 FEN 与最近客户端 position 一致时下发（"最新覆盖"幂等，
-// 同时丢弃预热结果与被打断搜索的残留）；status 是引擎全局状态，保持广播。
-//
-// 并发约束：本函数是引擎事件唯一消费者，必须保持单 goroutine——事件须按
-// 引擎发出顺序应用，lastDepth/lastBest 门控与 status 广播的单调序都依赖
-// 这一顺序；并行消费会丢事件、乱序，并与门控状态竞争。

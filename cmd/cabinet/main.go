@@ -191,46 +191,6 @@ func run(configPath, resourceRoot string, noTray bool) error {
 				ScoreCP: rec.ScoreCP, ScoreMate: rec.ScoreMate,
 			})
 		})
-		// 算力参数落盘（2026-10-18）：悬浮窗/面板切换后记住选择，重启以落盘
-		// 值为准。⚠必须走快照 + UnresolvePaths：直接 Save 内存态会把
-		// ResolvePaths 固化的绝对路径写回 toml、破坏便携性（root.go 铁律）；
-		// 内存态同步更新使下次落盘基于新值。
-		// ⚠并发契约（2026-10-18 加固）：本回调可从手机 WSS 读 goroutine（每个
-		// 连接一个，支持多手机）与 fyne UI goroutine（面板 TunerSet）并发进入，
-		// 必须全程持锁——否则 cfg 字段写与 snapshot 全字段读构成数据竞争，
-		// 且两次并发 os.Create 截断同一 toml 会交错写坏文件（下次启动直接
-		// 起不来）。锁 + Config.Save 原子写（tmp+rename）双保险。
-		var tunePersistMu sync.Mutex
-		srv.SetTunePersist(func(kind string, v int) {
-			tunePersistMu.Lock()
-			defer tunePersistMu.Unlock()
-			snapshot := *cfg
-			switch kind {
-			case "depth":
-				snapshot.Engine.Depth = v
-				cfg.Engine.Depth = v
-			case "movetime":
-				snapshot.Engine.MoveTimeMS = v
-				cfg.Engine.MoveTimeMS = v
-			case "hash":
-				snapshot.Engine.HashMB = v
-				cfg.Engine.HashMB = v
-			case "threads":
-				snapshot.Engine.Threads = v
-				cfg.Engine.Threads = v
-			case "multipv":
-				snapshot.Engine.MultiPV = v
-				cfg.Engine.MultiPV = v
-			default:
-				return
-			}
-			snapshot.UnresolvePaths(resourceRoot)
-			if err := snapshot.Save(configPath); err != nil {
-				logger.Warn("算力参数落盘失败（重启后将回默认值）", "kind", kind, "value", v, "err", err)
-				return
-			}
-			logger.Info("算力参数已落盘（重启后保持）", "kind", kind, "value", v)
-		})
 		// 沉淀命中：桔库未查到的局面复用历史引擎终值（同局面秒回）
 		srv.SetSedimentLookup(func(fen string) (server.SuggestionRecord, bool) {
 			row, lerr := st.LookupByFEN(fen)
@@ -243,6 +203,55 @@ func run(configPath, resourceRoot string, noTray bool) error {
 			}, true
 		})
 	}
+
+	// 配置落盘互斥（唯一一把）：凡"改 cfg 字段 + 快照 Save(configPath)"的落盘
+	// 链必须全程持它——Config.Save 的临时文件名固定为 configPath+".tmp"，若
+	// 不同链各持一把锁，并发时两路会对同一个 .tmp 交错 Create/写/rename，toml
+	// 被写坏后下次启动 Load 失败服务起不来。现有两条链：算力调参（下方
+	// SetTunePersist 回调，手机 WSS 读 goroutine 与 fyne UI 并发进入）与控制台
+	// 三开关（云库/云库优先/不走任何库，fyne UI goroutine，见 console.Run 选项）。
+	// 锁 + Config.Save 原子写（tmp+rename）双保险。
+	var configPersistMu sync.Mutex
+	// 算力参数落盘（2026-10-18）：悬浮窗/面板切换后记住选择，重启以落盘
+	// 值为准。⚠必须走快照 + UnresolvePaths：直接 Save 内存态会把
+	// ResolvePaths 固化的绝对路径写回 toml、破坏便携性（root.go 铁律）；
+	// 内存态同步更新使下次落盘基于新值。回调不依赖沉淀库，注册在 if st != nil
+	// 之外——沉淀关闭（store.enable=false）时调参同样要能记住选择，否则
+	// 悬浮窗/面板调的参数重启即被 toml 旧值打回（tune.go"重启后以落盘值为准"）。
+	// ⚠并发契约：本回调可从手机 WSS 读 goroutine（每个连接一个，支持多手机）
+	// 与 fyne UI goroutine（面板 TunerSet）并发进入，必须全程持 configPersistMu
+	// ——否则 cfg 字段写与 snapshot 全字段读构成数据竞争，且与控制台三开关
+	// 的落盘链在同一个 .tmp 上交错写坏文件。
+	srv.SetTunePersist(func(kind string, v int) {
+		configPersistMu.Lock()
+		defer configPersistMu.Unlock()
+		snapshot := *cfg
+		switch kind {
+		case "depth":
+			snapshot.Engine.Depth = v
+			cfg.Engine.Depth = v
+		case "movetime":
+			snapshot.Engine.MoveTimeMS = v
+			cfg.Engine.MoveTimeMS = v
+		case "hash":
+			snapshot.Engine.HashMB = v
+			cfg.Engine.HashMB = v
+		case "threads":
+			snapshot.Engine.Threads = v
+			cfg.Engine.Threads = v
+		case "multipv":
+			snapshot.Engine.MultiPV = v
+			cfg.Engine.MultiPV = v
+		default:
+			return
+		}
+		snapshot.UnresolvePaths(resourceRoot)
+		if err := snapshot.Save(configPath); err != nil {
+			logger.Warn("算力参数落盘失败（重启后将回默认值）", "kind", kind, "value", v, "err", err)
+			return
+		}
+		logger.Info("算力参数已落盘（重启后保持）", "kind", kind, "value", v)
+	})
 
 	// 库目录管理器（初始加载 + 热加载）
 	libMgr, err := library.New(cfg.Library.BooksDir, logger, srv.SetBook)
@@ -278,9 +287,10 @@ func run(configPath, resourceRoot string, noTray bool) error {
 	fwPath := filepath.Join(resourceRoot, "data", "console-state.json")
 	fw := startFirewallWatch(cfg.Bind, fwPath, logger)
 
-	// 更新检查器（免 token 匿名查 GitHub releases；私有仓 404 静默属预期，
-	// 开源后自动生效）。启动自检默认关（console-state.json 持久化），开则
-	// 异步查一次——不轮询，下次启动再查；结果在控制台"检查更新"面板查看。
+	// 更新检查器（免 token 匿名查 GitHub releases；仓库已公开，直查生效——
+	// 共享代理出口下匿名配额可能间歇 403，失败静默可重试）。启动自检默认关
+	// （console-state.json 持久化），开则异步查一次——不轮询，下次启动再查；
+	// 结果在控制台"检查更新"面板查看。
 	upd := update.New("Silva6c/cabinet", server.Version, logger)
 	if cs, err := loadConsoleState(fwPath); err == nil && cs.UpdateAutoCheck {
 		go upd.Check(ctx)
@@ -389,9 +399,8 @@ func run(configPath, resourceRoot string, noTray bool) error {
 	}()
 
 	// 主控制台窗口：启动即显示；× 隐藏回托盘；退出只能走托盘菜单
-	// 云库开关落盘互斥（CloudBookSet 与并发刷新可能同时进；算力落盘的
-	// tunePersistMu 作用域不在此，独立一把）
-	var cloudPersistMu sync.Mutex
+	// 三个开关回调的落盘互斥共用上方 configPersistMu（与算力落盘同一把锁：
+	// Save 的 .tmp 文件名固定，各持一把锁并发时会交错写坏 toml）
 	console.Run(console.Options{
 		Version:         server.Version,
 		LogDir:          logDir,
@@ -460,21 +469,34 @@ func run(configPath, resourceRoot string, noTray bool) error {
 			}
 			return n
 		},
-		TrendSeries: func() console.TrendSnapshot {
-			game, pts := srv.TrendSnapshot()
+		TrendSeries: func(devKey string) console.TrendSnapshot {
+			// 空键 = 焦点设备（最新上报 position 的来源，单设备常态）；分组模型
+			// 见 server trend.go——每设备一条序列，互不混线
+			game, pts := srv.TrendSnapshotFor(devKey)
 			out := make([]console.TrendPoint, len(pts))
 			for i, p := range pts {
-				out[i] = console.TrendPoint{TsMs: p.TsMs, ScoreCP: p.ScoreCP, WinRate: p.WinRate}
+				out[i] = console.TrendPoint{
+					TsMs: p.TsMs, ScoreCP: p.ScoreCP, WinRate: p.WinRate,
+					MyRed: p.MyRed, MySideKnown: p.MySideKnown,
+				}
 			}
 			return console.TrendSnapshot{GameID: game, Points: out}
+		},
+		TrendDevices: func() []console.TrendDev {
+			infos := srv.TrendDevices() // 有曲线的设备组，最近活跃在前
+			out := make([]console.TrendDev, len(infos))
+			for i, d := range infos {
+				out[i] = console.TrendDev{Key: d.Key, Label: d.Label}
+			}
+			return out
 		},
 		CloudBookEndpoint: cfg.CloudBook.Endpoint,
 		CloudBookGet:      srv.CloudBookEnabled,
 		CloudBookSet: func(on bool) string {
 			// 立即生效（服务端原子位）+ 落盘 toml（快照 + UnresolvePaths，
 			// 与算力落盘同款便携性铁律）
-			cloudPersistMu.Lock()
-			defer cloudPersistMu.Unlock()
+			configPersistMu.Lock()
+			defer configPersistMu.Unlock()
 			srv.SetCloudBookEnable(on)
 			cfg.CloudBook.Enable = on
 			snapshot := *cfg
@@ -484,6 +506,41 @@ func run(configPath, resourceRoot string, noTray bool) error {
 				return fmt.Sprintf("已切换但落盘失败: %v", err)
 			}
 			logger.Info("云库开关已切换", "enable", on)
+			return ""
+		},
+		// 默认走云库（2026-10-30）：高级面板→开局库的勾选框；语义矩阵见
+		// cloudLookupFirst——开启后云库命中即终（不查本地不进引擎）
+		CloudFirstGet: srv.CloudFirstEnabled,
+		CloudFirstSet: func(on bool) string {
+			configPersistMu.Lock()
+			defer configPersistMu.Unlock()
+			srv.SetCloudFirst(on)
+			cfg.CloudBook.CloudFirst = on
+			snapshot := *cfg
+			snapshot.UnresolvePaths(resourceRoot)
+			if err := snapshot.Save(configPath); err != nil {
+				logger.Warn("云库优先开关落盘失败", "cloud_first", on, "err", err)
+				return fmt.Sprintf("已切换但落盘失败: %v", err)
+			}
+			logger.Info("云库优先开关已切换", "cloud_first", on)
+			return ""
+		},
+		// 不走任何库（2026-10-30）：高级面板→开局库的勾选框；开启后建议链跳过
+		// 桔库/沉淀/云库（含 cloud_first），每步引擎直搜——拦截位置与语义见
+		// handlePosition
+		SkipBooksGet: srv.SkipBooksEnabled,
+		SkipBooksSet: func(on bool) string {
+			configPersistMu.Lock()
+			defer configPersistMu.Unlock()
+			srv.SetSkipBooks(on)
+			cfg.Engine.SkipBooks = on
+			snapshot := *cfg
+			snapshot.UnresolvePaths(resourceRoot)
+			if err := snapshot.Save(configPath); err != nil {
+				logger.Warn("不走任何库开关落盘失败", "skip_books", on, "err", err)
+				return fmt.Sprintf("已切换但落盘失败: %v", err)
+			}
+			logger.Info("不走任何库开关已切换", "skip_books", on)
 			return ""
 		},
 		ClearSuggestions: func() error {
@@ -541,7 +598,7 @@ func run(configPath, resourceRoot string, noTray bool) error {
 		FirewallDismiss: func() {
 			fw.DismissFirewall(fwPath, logger)
 		},
-		// 检查更新五回调：快照只读内存（刷新循环禁 HTTP 铁律）；下载安装 =
+		// 检查更新六回调：快照只读内存（刷新循环禁 HTTP 铁律）；下载安装 =
 		// 用户确认（点击即授权），就绪后走 stop() 优雅关闭 → finishShutdown
 		// 换入接力重启。换入/回滚/残留清理细节见 internal/update 包。
 		UpdateSnapshot: upd.Snapshot,

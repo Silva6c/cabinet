@@ -107,6 +107,8 @@ func readFrame(ws *websocket.Conn) ([]byte, error) {
 	return data, err
 }
 
+// send 序列化并发送一帧，同时打印发送日志；序列化/发送任一失败直接 Fatal
+// （联调工具错即停，不做重试）。
 func send(ws *websocket.Conn, msg any) {
 	b, err := json.Marshal(msg)
 	if err != nil {

@@ -5,6 +5,7 @@
 <p align="center">
   <a href="https://github.com/Silva6c/cabinet/actions/workflows/go.yml"><img src="https://github.com/Silva6c/cabinet/actions/workflows/go.yml/badge.svg" alt="Go 门禁"></a>
   <a href="https://github.com/Silva6c/cabinet/actions/workflows/release-build.yml"><img src="https://github.com/Silva6c/cabinet/actions/workflows/release-build.yml/badge.svg" alt="构建与发布"></a>
+  <a href="https://github.com/Silva6c/cabinet/actions/workflows/codeql.yml"><img src="https://github.com/Silva6c/cabinet/actions/workflows/codeql.yml/badge.svg" alt="CodeQL"></a>
   <a href="https://github.com/Silva6c/cabinet/releases"><img src="https://img.shields.io/github/v/release/Silva6c/cabinet" alt="最新稳定版"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0-blue.svg" alt="许可证"></a>
   <img src="https://img.shields.io/badge/platform-Windows%20%2F%20Android-green.svg" alt="平台">
@@ -78,8 +79,9 @@ scripts\build-exe.bat
 ```bash
 cd phone
 # 依赖 Android SDK（local.properties 或 ANDROID_HOME）
-./gradlew :app:assembleArmv8DotprodRelease
-# 产物：phone/app/build/outputs/apk/Armv8Dotprod/release/
+./gradlew :app:archiveArmv8DotprodReleaseApk
+# 产物：项目根 apk/ 目录，交付命名 cabinet_<日期>_vc<提交数>_<abi>.apk
+# （arm64 真机 + x86_64 模拟器；也可只构建：./gradlew :app:assembleArmv8DotprodRelease）
 ```
 
 1. 安装 APK，打开后进入连接页
@@ -123,6 +125,8 @@ cd phone
 
 | 文档 | 内容 |
 |---|---|
+| [用户说明书](docs/用户说明书.md) | 每个功能的详细用法：控制台五面板、悬浮窗全部按钮、建议来源链 |
+| [小白更新手册](docs/小白更新手册.md) | 安装/升级/搬家/备份/排障全场景 |
 | [系统技术文档](docs/technical-overview.md) | 双端架构、模块详解、安全模型、部署运维 |
 | [协议 v1](docs/protocol-v1.md) | WSS 通信协议定稿（帧结构 / 握手 / 全部消息类型） |
 | [手机端 WDL 接入指南](docs/phone-wdl-guide.md) | 胜率和引擎指标字段的协议增量 |

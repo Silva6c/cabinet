@@ -41,6 +41,7 @@ import com.cabinet.assist.ui.OverlayTheme
 import com.cabinet.assist.ui.QiTone
 import com.cabinet.gamelogic.Piece
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.max
 import kotlin.math.min
 
@@ -111,11 +112,6 @@ class ScreenAssistService : Service() {
         const val ENGINE_ONNX = "onnx"
         const val ENGINE_YOLO = "yolo"
 
-        /**
-         * 档位循环（悬浮窗深度/Hash/变招路数三按钮共用）：当前值在档内→下一档
-         * （尾档循环回首档）；不在档内（旧存档迁移）→跳到第一个更大的档，全部
-         * 档都更小则回最低档。纯函数抽出便于单测。
-         */
         /** 时间芯片/状态文案：0 = "不限"（深度制），其余按秒 */
         internal fun moveTimeChipText(ms: Int): String =
             if (ms <= 0) "不限" else "${ms / 1000}秒"
@@ -124,6 +120,11 @@ class ScreenAssistService : Service() {
         internal fun thinkChipText(timeMode: Boolean, depth: Int, timeMs: Int): String =
             if (timeMode) "时间" + moveTimeChipText(timeMs) else "深度$depth"
 
+        /**
+         * 档位循环（悬浮窗深度/Hash/变招路数三按钮共用）：当前值在档内→下一档
+         * （尾档循环回首档）；不在档内（旧存档迁移）→跳到第一个更大的档，全部
+         * 档都更小则回最低档。纯函数抽出便于单测。
+         */
         internal fun nextStepValue(steps: IntArray, current: Int): Int {
             val idx = steps.indexOf(current)
             if (idx >= 0) return steps[(idx + 1) % steps.size]
@@ -368,6 +369,22 @@ class ScreenAssistService : Service() {
      *  （resetSuggestionState）、主线程读（renderOverlay）——@Volatile 防引用
      *  撕裂/可见性滞后（与相邻 lastSuggestionAt/lastSugDepth 等字段对齐） */
     @Volatile private var lastSuggestion: RemoteSuggestion? = null
+    /**
+     * 本局面内云库报过的着法 → 端点 host（局面级标注，与 lastSuggestion 同生命周期，
+     * resetSuggestionState 清空）。异步补充模式（"默认走云库"关）下 PC 对桔库/沉淀
+     * 双未命中的局面是"引擎照跑 + 云库异步命中补发一条 cloud 帧"两路并发——引擎
+     * depth 帧随即覆盖 lastSuggestion 与聚合器槽 1，cloud 帧的来源标注只存活几百
+     * 毫秒（2026-10-30 局2 实测：13 条 cloud 帧全被 engine 帧流淹没，用户全程看不到
+     * "云库"字样）。本表把"这手棋云端库推荐过"记为局面级事实：主选着法与云库一致
+     * 时建议文案补"· 云库"、详情窗补来源——着法一致归属无争议，命中信息不再被
+     * 引擎帧冲掉。已知边界：云库与引擎终态着法不一致时主选不标注（分歧场景该以
+     * 引擎深度分析为准），云库着法被同槽覆盖从候选消失，仅到达瞬态可见——协议级
+     * 区分（final/supplement 标记）待真实场景再立项。
+     * 登记口 put 前复验 fen（2026-10-30）：onSuggestion 的 fen 门放行后局面可能
+     * 切换（worker 换面+清场先完成），put 前再读一次 currentFen，防旧局面着法
+     * 登记进新局面的表、串台一整个局面周期（开局高频着法几乎必撞）。
+     * WSS 线程写（onSuggestion 登记）、主线程读（渲染/详情窗）——ConcurrentHashMap */
+    @Volatile private var cloudHitByMove: MutableMap<String, String> = ConcurrentHashMap()
     /** 变招循环选中候选下标：主线程读写（CYCLE_CANDIDATE/renderOverlay）、
      *  worker 写（resetSuggestionState 经 onBoardConfirmed），@Volatile 兜底 */
     @Volatile private var selectedCandidate = 0
@@ -429,15 +446,17 @@ class ScreenAssistService : Service() {
     @Volatile private var lastMetrics: EngMetrics? = null
     private var detailView: OverlayDetailView? = null
     private var detailParams: WindowManager.LayoutParams? = null
-    /** 详情窗显隐（主面板"详情"按钮切换；默认显示） */
-    @Volatile private var detailVisible = true
+    /** 详情窗显隐（主面板"详情"按钮切换；2026-10-29 用户定稿：默认隐藏，手动点开） */
+    @Volatile private var detailVisible = false
 
     /**
      * 开局不自动弹详情窗：服务启动后先只有主面板，首次棋盘确认（有可信局面）后
-     * 才由 renderOverlay 自动弹出——开局阶段识别尚未稳定，详情窗也没有内容可展示
-     * （红黑优/引擎指标全空，弹出来是个空壳）；且详情窗默认悬在棋盘上方，开局就弹
-     * 会让确认期与稳态走子都因遮挡而进入"隐藏抓帧"路径（闪烁源）。
-     * 用户手动开关（详情按钮）不受此限。
+     * 才由 renderOverlay 满足自动弹出门槛——开局阶段识别尚未稳定，详情窗也没有
+     * 内容可展示（红黑优/引擎指标全空，弹出来是个空壳）；且详情窗默认悬在棋盘
+     * 上方，开局就弹会让确认期与稳态走子都因遮挡触发坏帧保险丝（棋盘被详情窗
+     * 盖住 → 帧被判坏帧跳过，识别断流）。
+     * 用户手动开关（详情按钮）不受此限。默认 detailVisible=false 下该门槛仍会
+     * 置位，但 updateDetailWindow 的显隐门禁挡住窗口——保持隐藏直到手动点开。
      */
     @Volatile private var detailAutoShown = false
 
@@ -490,7 +509,8 @@ class ScreenAssistService : Service() {
         }
         // ⚠【现状标明 2026-10-01】YOLO 是独立回退引擎：默认 engineName=onnx 不触达
         // 此推理路径，仅主页手动切换或 ONNX 加载失败回退（switchEngine）时启用——
-        // 默认链路上 YOLO 被架空（研究报告：docs/yolo-识别管线研究报告.md）。
+        // 默认链路上 YOLO 被架空（研究报告见姊妹仓 xiangqi-recognition：
+        // docs/yolo-识别管线研究报告.md）。
         // 但本初始化无条件把 tflite 加载进内存：将来摘除 YOLO 需一并改这里。
         // 初始化耗时入日志（2026-10-03 对比实验）：tflite 解释器构建 + 模型 mmap 是
         // 冷启动成本的一部分，与 ONNX 的 "onnx models loaded in Xms" 同口径可比
@@ -599,7 +619,7 @@ class ScreenAssistService : Service() {
         mainHandler.removeCallbacks(elapsedTicker)
         mainHandler.postDelayed(elapsedTicker, 1000L)
         lastMetrics = null
-        detailVisible = true
+        detailVisible = false // 默认隐藏（2026-10-29 定稿）：详情窗靠"详情"芯片手动开
         detailAutoShown = false
         // 允许重发当前局面一次：重新识别后悬浮窗建议状态已重置，
         // 需让 PC 端补推当前局面的建议
@@ -609,7 +629,21 @@ class ScreenAssistService : Service() {
         val h = metrics.heightPixels
         val dpi = metrics.densityDpi
 
-        mediaProjection = projectionManager.getMediaProjection(resultCode, data)
+        // 授权令牌一次性消费（Android 14+ 起）：已消费的 resultData 二次使用抛
+        // SecurityException，个别 ROM/场景变体报 IllegalState/IllegalArgument
+        // ——未捕获会直接崩服务。失败收摊并提示重新授权（照录屏停止回调"先收摊
+        // 后提示"的既有次序），不留半初始化的抓帧链
+        mediaProjection = try {
+            projectionManager.getMediaProjection(resultCode, data)
+        } catch (e: Exception) {
+            RLog.w(TAG, "getMediaProjection failed", e)
+            null
+        }
+        if (mediaProjection == null) {
+            releaseCapture()
+            setStatus("录屏授权异常，请重新开始")
+            return
+        }
         // Android 14+ 硬要求：createVirtualDisplay 之前必须注册回调，
         // 以响应投影状态变化（用户从系统面板停止 / 授权被撤销）释放资源
         mediaProjection?.registerCallback(projectionCallback, workerHandler)
@@ -1042,8 +1076,9 @@ class ScreenAssistService : Service() {
     }
 
     /**
-     * 调试开关：当 /sdcard/assist_debug_save 存在时，把服务实际收到的帧原始字节存到
-     * /sdcard/assist_frame.raw（magic=ASFR, 大端 int w/h, 之后 RGB 三字节每像素）。
+     * 调试开关：当 /sdcard/assist_debug_save 触发文件存在时，把服务实际收到的帧
+     * 原始字节存到应用外部专属目录的 assist_frame.raw（getExternalFilesDir，无需
+     * 存储权限；magic=ASFR, 大端 int w/h, 之后 RGB 三字节每像素）。
      */
     private fun debugSaveFrameIfRequested(frame: Frame) {
         if (!com.cabinet.BuildConfig.DEBUG) return
@@ -1162,11 +1197,15 @@ class ScreenAssistService : Service() {
             ok = mapped.grid != null, transient = mapped.grid != null || sessionGrid != null)
         if (mapped.grid != null) consumeScreenChange()
         yoloMissStreak = 0
-        // 悬浮窗遮挡判断沿用网格语义：用 YOLO 棋盘框更新会话网格（同时作为裁剪推理提示）
-        if (mapped.grid != null) sessionGrid = mapped.grid
         val result = RecognitionResult(
             mapped.canonical, mapped.orientation,
             AssistBoard.validate(mapped.canonical), mapped.pieceCount)
+        // 悬浮窗遮挡判断沿用网格语义：用 YOLO 棋盘框更新会话网格（同时作为裁剪推理
+        // 提示）。非法结果（issues 非空）不可信，与 ONNX 路径对齐不更新会话网格——
+        // 见 handleFrameOnnx 注释：非法帧入网格曾让遮挡判断失准走快路径，识别持续
+        // 吃到悬浮窗入镜的残缺画面形成死循环；连续失败 ≥3 次置 null 回全屏重定位的
+        // 自愈兜底不受影响
+        if (mapped.grid != null && result.issues.isEmpty()) sessionGrid = mapped.grid
         // 与 rec(onnx) 字段对齐（fen + 整帧耗时）：两引擎性能对比实验（2026-10-03）
         // 依赖这两列——此前 YOLO 行只有检出数，识别出的局面与耗时全无记录，无法算准确率
         RLog.d(TAG, "rec(yolo): pieces=${mapped.pieceCount} orient=${mapped.orientation} " +
@@ -1363,6 +1402,13 @@ class ScreenAssistService : Service() {
      */
     private fun onBoardConfirmed(isNewGame: Boolean = false) {
         val confirmed = tracker.confirmed ?: return
+        // 12 帧自愈对账（见 BoardTracker.staleConfirmationDiscarded）：自愈丢弃
+        // 旧确认后重新确认出的局面可能与自愈前 FEN 相同——scheduleAnalysis 的
+        // lastSentFen 去重闸会把上行拦死（PC 不重推建议、悬浮窗建议区持续空白）。
+        // 此处清 lastSentFen，与 forceFullRelocate 同款"重读结果即使 FEN 相同也
+        // 要重发对账"语义。置位与消费都在 worker 线程（onFrame→afterRecognition
+        // →本函数），无并发窗口。
+        if (tracker.consumeStaleConfirmationDiscarded()) lastSentFen = null
         currentCanonical = confirmed.canonical
         currentPieces = flatten(confirmed.canonical)
         currentOrientation = confirmed.orientation
@@ -1418,6 +1464,7 @@ class ScreenAssistService : Service() {
         lastSuggestion = null
         selectedCandidate = 0
         suggestionAggregator.reset()
+        cloudHitByMove.clear()
         lastSuggestionAt = 0L
         lastSugDepth = 0
         searchSettled = false
@@ -1488,7 +1535,9 @@ class ScreenAssistService : Service() {
             // 与 pendingNewGameFlag 字段注释）
             val isNewGameFrame = pendingNewGameFlag
             pendingNewGameFlag = false
-            r.sendPosition(fen, force, isNewGameFrame)
+            // 我方执色随每帧上报（协议 §4.4 my_red）：PC 控制台走势据此按我方
+            // 视角画线——随动取值，换边（朝向翻转）后立刻生效
+            r.sendPosition(fen, force, isNewGameFrame, mySideIsRed())
             if (remoteConnected && tracker.redGo == mySideIsRed()) {
                 mainHandler.post { setStatus("电脑分析中…") }
             }
@@ -1574,6 +1623,10 @@ class ScreenAssistService : Service() {
         }
 
         override fun onSuggestion(sug: RemoteSuggestion) {
+            // 建议到达留痕（2026-10-30 排障补强）：云库/桔库/引擎三类来源、着法与
+            // 局面到帧即记——显示分支后续任何一环（防倒退/健康门/轮次门）拦下时，
+            // 本行日志与 PC 侧"云库命中"日志对帧即可二分"没收到帧"还是"收到没显示"。
+            RLog.i(TAG, "建议到达 source=${sug.source} best=${sug.bestMove} cached=${sug.cached} fen=${sug.fen ?: "null"}")
             // 迟到旧建议过滤（2026-10-02）：PC 回显建议所属局面，与本机当前局面
             // 不符说明是"最新覆盖"赛跑中的在途旧帧——丢弃，不渲染。旧建议对着新
             // 棋盘会误报"轮次可能识别有误"并压掉箭头（旧 PC 不带 fen 时为 null，
@@ -1585,8 +1638,17 @@ class ScreenAssistService : Service() {
             // 开局库建议不倒退覆盖引擎多线（2026-10-01 用户实测"电脑变招手机没有
             // 跟上"）：同一局面内 PC 因重发被桔库命中短路时，回的单条 book 建议会让
             // 聚合好的 MultiPV 各线候选从界面上消失。局面变化会走 resetSuggestionState
-            // 清场，这里的"已有引擎候选"必然属于当前局面——book 只在无引擎候选时显示
-            if (sug.fromBook && lastSuggestion != null && !lastSuggestion!!.fromBook &&
+            // 清场，这里的"已有引擎候选"必然属于当前局面——book 只在无引擎候选时显示。
+            // cloud 帧不放这里（2026-10-30 局4 实测教训）：cloud_first 模式下 PC 对
+            // 缓存未命中的新局面是"引擎立即开跑 + 云库异步命中后补发覆盖"两路并发，
+            // 补发的 cloud 帧（用户拍板的主来源）必须放行覆盖引擎——并入防倒退会把
+            // 每一条云库命中都拦死（"云库命中不提醒"根因）。异步补充模式下 cloud
+            // 迟到帧打掉引擎多线的理论风险，等真实场景再上协议级标记区分。
+            // lastSuggestion 本地捕获后判空：@Volatile 字段的检查与 !! 解引用之间
+            // 可被 worker 线程（确认链换面清场）并发置 null——外层 catch(Throwable)
+            // 虽兜住不崩溃，但整条建议静默丢失且污染排障留痕，消灭非空断言竞态
+            val last = lastSuggestion
+            if (sug.fromBook && last != null && !last.fromBook &&
                 suggestionAggregator.candidates.isNotEmpty()
             ) {
                 RLog.i(TAG, "忽略开局库建议（不倒退覆盖引擎多线候选）: ${sug.bestMove}")
@@ -1597,6 +1659,15 @@ class ScreenAssistService : Service() {
             if (remoteErrorText != null) {
                 remoteErrorText = null
                 setStatus("识别已恢复")
+            }
+            // 云库命中登记（异步补充模式标注链，见 cloudHitByMove 字段注）：过了
+            // fen 门的 cloud 帧才入表——迟到旧局面的 cloud 帧不记（局面已换，记了
+            // 也是脏标注）。host 直接取帧解析值（cloud 帧必带 cloud: 前缀）。
+            // put 前复验 fen：fen 门放行（读到旧 currentFen）与本行执行之间，worker
+            // 可能已完成换面+resetSuggestionState 清表——复验把登记串台窗口收窄到
+            // 纳秒级。fen==null 分支仅为兼容不带 fen 的旧 PC（现行 cloud 帧必带）
+            if (sug.fromCloud && (sug.fen == null || sug.fen == currentFen)) {
+                cloudHitByMove[sug.bestMove] = sug.cloudHost
             }
             lastSuggestion = sug
             // 多路候选聚合（见 SuggestionAggregator 注释）：按 bestMove 去重，
@@ -1774,7 +1845,8 @@ class ScreenAssistService : Service() {
         return panel
     }
 
-    /** 悬浮窗面板矩形与已定位棋盘矩形是否重叠（重叠时抓帧前才需短暂隐藏面板） */
+    /** 悬浮窗面板矩形与已定位棋盘矩形是否重叠（遮挡提示行与坏帧保险丝的判据，
+     *  见 boardOccluded 注释；FLAG_SECURE 剔除成立时遮挡不影响识别，无需隐藏抓帧） */
     private fun overlayIntersectsBoard(): Boolean =
         windowIntersectsBoard(overlayParams) { (overlayPanel?.width ?: 0) to (overlayPanel?.height ?: 0) }
 
@@ -1927,8 +1999,10 @@ class ScreenAssistService : Service() {
                     selectedCandidate = (selectedCandidate + 1) % cands.size
                     postRender()
                 } else {
+                    // 单候选的三种来源：云库/开局库命中天然单条（调路数无效），
+                    // 引擎单线才是"路数 ≥2 可解"——提示如实分述，避免误导调参
                     setStatus(
-                        if (remoteConnected) "当前只有单一建议\n电脑端『变招路数』需 ≥2"
+                        if (remoteConnected) "当前只有单一建议\n云库/开局库命中即单条\n引擎多线需电脑端『变招路数』≥2"
                         else "未连接电脑，暂无建议"
                     )
                 }
@@ -2295,13 +2369,14 @@ class ScreenAssistService : Service() {
         }
 
         // 建议区文案三分支（顺序即优先级，新建议形态往表里加分支）：
-        //   ①开局库命中（fromBook，含桔库多候选时间线）→ 绿 ✓ 确定性建议
+        //   ①确定性单条建议（fromBook 桔库 / fromCloud 云库，2026-10-30 并入——
+        //     云库命中即终无引擎收束帧，不识别会落②分支"（暂定）"白等 1.2s）→ 绿 ✓
         //   ②引擎建议（含沉淀缓存帧：sel.cached 显示"· 缓存"且到达即成熟）
         //   ③引擎未就绪（remoteConnected 但 pcEngineReady=false 的兜底文案）
         // 各分支共同守卫：recHealthy（识别不健康不显示，手动模式豁免）+
         // fromIsOurs（着法起点必须是我方子，幽灵 FEN 宁可不显示）。
         when {
-            myTurn && recHealthy && sug != null && sug.fromBook -> {
+            myTurn && recHealthy && sug != null && (sug.fromBook || sug.fromCloud) -> {
                 // 开局库命中（PC 端查库回传）：确定性建议，到达即定着绿 ✓（协议语义）。
                 // 桔库候选唤醒（2026-10-17）：PC 逐条按 multipv 槽位下发多候选，
                 // 聚合器照常落槽——渲染跟随"变招"循环选中项（lastSuggestion 是
@@ -2318,10 +2393,18 @@ class ScreenAssistService : Service() {
                     // 缓存标记独立于来源：沉淀记录的 source 可能是 "book:<名>"，
                     // 命中缓存时即使走开局库文案分支也要标出（PC 端同款约定）
                     val cacheTag = if (sel.cached) "（缓存）" else ""
-                    // 多候选时库名省略（详情窗有来源行），格式向引擎候选文案对齐
-                    candidateText = if (cands.size > 1) "候选 ${selectedCandidate + 1}/${cands.size} · $chs ✓$cacheTag"
-                                    else if (sel.bookName.isNotEmpty()) "开局库·${sel.bookName} $chs ✓$cacheTag"
-                                    else "开局库 $chs ✓$cacheTag"
+                    // 多候选时库名省略（详情窗有来源行），格式向引擎候选文案对齐；
+                    // 云库单条命中显示 host（去 www. 缩短），与桔库"开局库·名"同语言
+                    candidateText = when {
+                        cands.size > 1 -> "候选 ${selectedCandidate + 1}/${cands.size} · $chs ✓$cacheTag"
+                        sel.fromCloud -> "云库·${sel.cloudHost.removePrefix("www.").ifEmpty { "云端" }} $chs ✓$cacheTag"
+                        sel.bookName.isNotEmpty() -> "开局库·${sel.bookName} $chs ✓$cacheTag"
+                        // 兜底按建议帧真实来源给文案：异步补充模式下 cloud 帧覆盖
+                        // lastSuggestion 触发①但 sel 取到引擎候选时，"开局库"字样
+                        // 是误导——窄场景文案诚实即可，不做来源仲裁的过度设计
+                        sug.fromCloud -> "云端建议 $chs ✓$cacheTag"
+                        else -> "建议 $chs ✓$cacheTag"
+                    }
                     candidateTone = QiTone.GOOD
                 } else {
                     candidateText = "轮次可能识别有误\n走一步后自动纠正"
@@ -2348,6 +2431,11 @@ class ScreenAssistService : Service() {
                     var suffix = if (suggestMature) " ✓" else "（暂定）"
                     // 缓存标记：告诉用户这条建议是沉淀库秒回（历史终值），不是现算
                     if (sel.cached) suffix += " · 缓存"
+                    // 云库命中标注（异步补充模式）：主选着法是云端库也推荐的（同局面
+                    // cloud 帧报过同着法，cloudHitByMove 注）——引擎帧覆盖 cloud 帧
+                    // 后命中信息不丢；host 细节在详情窗。与 sel.cached 天然互斥：
+                    // 沉淀命中时 PC 不再走云库补充，二者不会同现
+                    if (cloudHitByMove.containsKey(sel.bestMove)) suffix += " · 云库"
                     if (cands.size > 1) {
                         candIndex = selectedCandidate + 1
                         candCount = cands.size
@@ -2402,8 +2490,8 @@ class ScreenAssistService : Service() {
 
     // ==================== 详情窗（窗口2） ====================
 
-    /** 深度档芯片值（"20"；未配置/未连接返回 null → 芯片显示占位） */
-    /** 思考芯片值文案（"深度20"/"时间3秒"——现行模式自明）；未连接返回 null */
+    /** 思考芯片值文案（"深度20"/"时间3秒"——现行模式自明）；remote 为空（未配置/
+     *  未启动录屏）返回 null → 芯片灰显占位 */
     private fun thinkLabel(): String? {
         if (remote == null) return null
         return if (config.engineMoveTimeMs > 0) {
@@ -2601,6 +2689,15 @@ class ScreenAssistService : Service() {
         val src = when {
             sug == null -> "来源 —"
             sug.fromBook -> "来源 开局库·${sug.bookName.ifEmpty { "桔库" }}"
+            // 云库建议无深度字段（协议缺省口径同桔库），不识别会显示"来源 引擎（深度0）"。
+            // 异步补充模式下展示中的帧多为引擎的（cloud 帧被引擎覆盖），着法命中
+            // cloudHitByMove 同样按云库报来源——host 从命中表取（引擎帧的
+            // cloudHost 属性解析自 source="engine"，非空不可直接兜底）
+            sug.fromCloud || cloudHitByMove.containsKey(sug.bestMove) -> {
+                val host = if (sug.fromCloud) sug.cloudHost
+                           else cloudHitByMove[sug.bestMove].orEmpty()
+                "来源 云库·${host.removePrefix("www.").ifEmpty { "云端" }}"
+            }
             else -> "来源 引擎（深度${sug.depth}）"
         }
         view.render(DetailModel(
@@ -2639,16 +2736,25 @@ class ScreenAssistService : Service() {
     /**
      * 清理顺序契约：① releaseCapture 最先（摘 frameTick/elapsedTicker、停投影、
      * 断 WSS、撤通知；CLOSE/投影 onStop/本函数三处调用，判空保证重复调用幂等）；
-     * ② 引擎 native 资源；③ 移两窗；④ 注销广播；⑤ workerThread.quitSafely()
-     * 收尾——允许在途 handleFrame 自然结束、丢弃未到期消息。remote?.stop() 与
-     * releaseCapture 内的停止重复是有意幂等（绑定续命下 onDestroy 可能不经
-     * CLOSE 单独发生）。
+     * ② 引擎 native 资源（YOLO close 经 worker 队列尾执行、排在在途帧之后，
+     * 见体内注释；ONNX release 自带 @Synchronized 不需此排程）；③ 移两窗；
+     * ④ 注销广播；⑤ workerThread.quitSafely() 收尾——允许在途 handleFrame
+     * 自然结束、丢弃未到期消息。remote?.stop() 与 releaseCapture 内的停止重复
+     * 是有意幂等（绑定续命下 onDestroy 可能不经 CLOSE 单独发生）。
      */
     override fun onDestroy() {
         RLog.i(TAG, "service destroyed")
         releaseCapture()
-        yoloDetector?.close()
-        yoloDetector = null
+        // YOLO 释放排在在途帧之后：releaseCapture 只保证不再产生新帧回调，已在途
+        // 的 handleFrame（yolo.detect 持 interpreter 推理中）会继续跑到自然结束
+        // ——主线程此刻直接 close 与之并发（bitmap.recycle/interpreter 状态竞争
+        // 可致 native 崩溃）。close 投到 workerHandler 队列尾（排在全部已入队帧
+        // 处理之后），下方 quitSafely 处理完队列内到期消息（含本条）才退出线程，
+        // close 必然晚于最后一帧；主线程不再直接触碰 yoloDetector
+        workerHandler.post {
+            yoloDetector?.close()
+            yoloDetector = null
+        }
         onnxEngine?.release()
         onnxEngine = null
         remote?.stop()

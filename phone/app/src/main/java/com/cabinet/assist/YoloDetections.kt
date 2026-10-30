@@ -10,7 +10,7 @@ import com.cabinet.gamelogic.Piece
  * 14 种棋子 + 1 个整体棋盘框（board）。
  */
 class YoloDetection(
-    /** 类别索引 0..14（见 LABELS） */
+    /** 类别索引 0..14（0..13 棋子、14=board；类别名与 Piece 的映射序见 PIECE_CODES 上方注释） */
     val labelId: Int,
     /** 置信度 0..1 */
     val score: Double,

@@ -19,7 +19,7 @@ func tailLines(path string, n int) []string {
 	}
 	defer func() { _ = f.Close() }()
 
-	const chunk = 16 << 10 // 每次最多回看 16KB，足够 15 行长日志
+	const chunk = 16 << 10 // 每次最多回看 16KB，足够 40 行长日志（日志面板取 logTailLines=40 行）
 	st, err := f.Stat()
 	if err != nil {
 		return nil

@@ -60,8 +60,9 @@ func acquireSingleton(silent bool, configPath string) bool {
 		return true // 全新互斥体：本实例持有锁，继续启动
 	}
 	// 更新重启接力：旧实例正在优雅退出（正常远快于 6s 服务 + 8s 引擎上限），
-	// 先短重试再放弃，避免新旧进程交接竞态弹"已在运行"误窗。仅在更新拉起的
-	// 进程内启用（CABINET_UPDATE_RELAUNCH=1）；正常双开行为完全不变。
+	// 先短重试再放弃（10 次 × 500ms ≈ 5s 窗口），避免新旧进程交接竞态弹
+	// "已在运行"误窗。仅在更新拉起的进程内启用（CABINET_UPDATE_RELAUNCH=1）；
+	// 正常双开行为完全不变。
 	if os.Getenv("CABINET_UPDATE_RELAUNCH") == "1" {
 		for i := 0; i < 10; i++ {
 			time.Sleep(500 * time.Millisecond)

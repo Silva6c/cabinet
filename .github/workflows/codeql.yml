@@ -1,0 +1,74 @@
+# CodeQL 代码扫描：Go 端（电脑）与 Android 端（Kotlin）各建一个分析作业，
+# 结果上报仓库 Security 页的 Code scanning，徽章见 README。
+#
+# 两条语言路径的构建模式不同，原因写在这里免得后来人"统一"掉：
+#   - Go 走 autobuild：CodeQL 自己执行 go build ./...；编译前必须先装 Fyne 的
+#     X11/GL 系统库（与 go.yml 同一份依赖清单，Linux 缺 glfw 头直接编译失败）。
+#   - Kotlin 走 manual：CodeQL 的 build-mode=none 对 Kotlin 源码**不分析**
+#     （只扫 Java，官方文档明示会出告警），所以必须真实跑一次 Gradle 编译。
+#     只编 debug 变体——最快，且不依赖 Release 的模型资产：模型只作为 runtime
+#     asset 打包，编译期不校验（release-build.yml 先下载模型是为出完整包，不是
+#     为编译）。license 预接受步骤沿用 release-build.yml：runner 预装 SDK 未必
+#     含 compileSdk 34，让 gradle 能自动补装。
+name: codeql
+
+on:
+  push:
+    branches: [master]
+  schedule:
+    - cron: "0 19 * * 0" # 每周一 03:00（北京时间；cron 是 UTC，周日 19:00）
+  workflow_dispatch: {} # 手动重扫入口
+
+permissions:
+  contents: read
+  security-events: write # 上传 SARIF 到 code scanning 必需
+
+jobs:
+  analyze:
+    name: 分析 ${{ matrix.language }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: go
+            build-mode: autobuild
+          - language: java-kotlin
+            build-mode: manual
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Fyne 系统依赖（Go 编译需要）
+        if: matrix.language == 'go'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-dev libxcursor-dev libxrandr-dev \
+            libxinerama-dev libxi-dev libxxf86vm-dev \
+            libwayland-dev libxkbcommon-dev
+
+      - uses: actions/setup-go@v5
+        if: matrix.language == 'go'
+        with:
+          go-version: "1.26"
+
+      - uses: actions/setup-java@v4
+        if: matrix.language == 'java-kotlin'
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+
+      - name: 编译 Android 端（供 CodeQL 提取 Kotlin 语义）
+        if: matrix.language == 'java-kotlin'
+        working-directory: phone
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null 2>&1 || true
+          bash gradlew :app:assembleArmv8DotprodDebug --no-daemon --console=plain
+
+      - uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:${{ matrix.language }}"

@@ -24,3 +24,6 @@
 
 附注：所有数据（配置/证书/日志/引擎/棋库）都在 appdata\ 文件夹内。
 卸载请连同 appdata\ 一起删除；日常备份也只需备份这个文件夹。
+
+每个功能的详细用法见项目仓库 docs\用户说明书.md
+（GitHub: github.com/Silva6c/cabinet）。

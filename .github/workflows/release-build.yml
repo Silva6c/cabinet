@@ -1,5 +1,6 @@
 # 稳定版自动构建：APK + 便携 zip。
-# —— 只有人工确认的稳定版本才 push/tag；tag stable-* 触发本构建并挂 Release。
+# —— 只有人工确认的正式版才 push/tag；tag v*（新制语义化版本，如 v1.0.0）
+#    或 stable-*（旧制日期标签，历史兼容）触发本构建并挂 Release。
 # 普通开发期的提交留在本地，不触发任何 CI（go.yml 的 push 触发随推送天然低频）。
 #
 # 版权物注入：*.onnx/*.tflite/皮卡鱼引擎包/桔库均不进 git（gitignore 版权红线），
@@ -9,7 +10,7 @@ name: release-build
 
 on:
   push:
-    tags: ["stable-*"]
+    tags: ["stable-*", "v*"]
   workflow_dispatch: {} # 手动补包/重跑：只出 artifact，不挂 Release
 
 permissions:
@@ -55,6 +56,14 @@ jobs:
           # ./gradlew 报 Permission denied（exit 126，2026-10-28 stable-20261028
           # 首跑实录）；git 索引执行位已补，此处 bash 双保险
           bash gradlew :app:assembleArmv8DotprodRelease --no-daemon --console=plain
+
+      - name: Android 单元测试（稳定版门禁兜底）
+        working-directory: phone
+        run: |
+          # go.yml 只随分支 push 触发，tag 推送不经过——2026-10-29 稳定版曾带
+          # Kotlin 编译错进 Release。复用上一构建步骤装好的 SDK 与已接受的
+          # license，测试失败即 job 失败，后续改名/上传/挂 Release 全部中止
+          bash gradlew :app:testArmv8DotprodDebugUnitTest --no-daemon --console=plain
 
       - name: 按交付惯例改名（ABI 分包：arm64 主交付 + x86_64 模拟器）
         run: |
@@ -103,6 +112,14 @@ jobs:
           New-Item -ItemType Directory -Force -Path library | Out-Null
           Expand-Archive -Path books*.zip -DestinationPath library
           Get-ChildItem Pikafish.2026-09-06, library/books | Select-Object -First 10
+
+      - name: Go 全量测试（稳定版门禁兜底）
+        shell: bash
+        run: |
+          # 同上：tag 推送不触发 go.yml，便携 zip 打包前先过一遍全量测试；
+          # windows runner 自带 gcc，CGO 编译无需额外系统库（Linux 的 X11 依赖
+          # 是 glfw 特有，Windows 不需要）
+          go test ./...
 
       - name: 打便携双轨包
         shell: bash

@@ -60,14 +60,19 @@ func demoOptions() Options {
 			}
 		},
 		CountToday: func() int { return 3 },
-		TrendSeries: func() TrendSnapshot {
-			// 演示序列：一波红方优势起伏（终态分 + 胜率），贴近真实对局形态
+		TrendSeries: func(devKey string) TrendSnapshot {
+			// 演示序列：一波红方优势起伏（终态分 + 胜率），贴近真实对局形态。
+			// 单设备演示：忽略 devKey（截图恒为焦点视图）；TrendDevices 不接线
+			// → 设备按钮排恒隐藏。
 			cps := []int{35, 80, 120, 60, -40, -120, 90, 210, 320, 280, 150, 90}
 			wrs := []int{53, 56, 58, 54, 46, 43, 56, 63, 69, 67, 60, 55}
 			pts := make([]TrendPoint, len(cps))
 			base := time.Now().Add(-12 * time.Minute).UnixMilli()
 			for i := range cps {
-				pts[i] = TrendPoint{TsMs: base + int64(i)*90000, ScoreCP: cps[i], WinRate: wrs[i]}
+				pts[i] = TrendPoint{
+					TsMs: base + int64(i)*90000, ScoreCP: cps[i], WinRate: wrs[i],
+					MyRed: true, MySideKnown: true, // 演示：我方执红（头部显示"我方胜率"）
+				}
 			}
 			return TrendSnapshot{GameID: "demo", Points: pts}
 		},

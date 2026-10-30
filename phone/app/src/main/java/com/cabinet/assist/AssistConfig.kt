@@ -69,7 +69,8 @@ class AssistConfig(context: Context) {
     /**
      * v39 走子连贯性开关（默认开）：确认时刻"单步走子匹配修正"——枚举旧局面全部
      * 伪合法走子，恰好差 1 格且唯一走子可解释则修正后确认（漏检主形态被规则修复）。
-     * 设计与保守守门见 docs/走子连贯性设计与App域解剖-20261017.md §一。
+     * 设计与保守守门见姊妹仓 xiangqi-recognition 的
+     * docs/走子连贯性设计与App域解剖-20261017.md §一。
      */
     var singleMoveRepair: Boolean
         get() = sp.getBoolean(KEY_SINGLE_MOVE_REPAIR, true)

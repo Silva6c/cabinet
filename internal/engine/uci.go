@@ -1,3 +1,6 @@
+// 本文件管 UCI 输出行的解析与分数视角换算，全部纯函数、无进程状态；
+// 进程生命周期/握手/搜索循环在 engine.go。
+
 package engine
 
 import (

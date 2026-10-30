@@ -178,4 +178,24 @@ class SuggestionAggregatorTest {
         agg.onSuggestion(sug("c3c4", depth = 12, multipv = 2))
         assertTrue(agg.arrivedAtOf("c3c4") >= t1)
     }
+
+    /** 云库来源（2026-10-30 PC 端新增 "cloud:<域名>"）的前缀判定与 host 剥离 */
+    @Test
+    fun `cloud来源识别与host剥离`() {
+        val c = sug("h2e2", source = "cloud:www.chessdb.cn", depth = 0, scoreCp = null)
+        assertTrue(c.fromCloud)
+        assertEquals("www.chessdb.cn", c.cloudHost)
+        // 与开局库/引擎来源互斥：book 前缀不误判 cloud，engine 不误判任一库类
+        assertTrue(!sug("h2e2", source = "book:桔库").fromCloud)
+        assertTrue(!sug("h2e2").fromCloud)
+        assertTrue(!c.fromBook)
+    }
+
+    /** 云库建议与桔库同款缺省形态：无序号按槽位 1 落槽（单候选） */
+    @Test
+    fun `cloud建议按槽位1落槽`() {
+        val agg = SuggestionAggregator()
+        agg.onSuggestion(sug("h2e2", source = "cloud:www.chessdb.cn", depth = 0, scoreCp = null))
+        assertEquals(listOf("h2e2"), agg.candidates.map { it.bestMove })
+    }
 }

@@ -77,12 +77,20 @@ type Server struct {
 	// ownerSession 当前局面的归属连接（最近一次有效 position 的会话 ID）：
 	// suggestion 只定向发给它（协议 §4.5 建议路由），多设备互不串台
 	ownerSession atomic.Value // string
+	// ownerDev 当前局面归属设备的走势键（devKeyOf，与 ownerSession 同点更新）：
+	// 走势序列按设备分组后的"焦点设备"= 默认视图；断开连接时**故意不清**——
+	// 同一设备重连（新会话）曲线要续上，焦点只随下一条 position 切换
+	ownerDev atomic.Value // string
 	// engMetrics 最近一次广播的引擎指标（控制台快照读同一份；收束时指标清零）
 	engMetrics atomic.Value // EngineStatus
 	// pendingSug 采纳比对锚点（最后一条已下发建议的下发快照）：写入侧为
-	// enginePump（引擎建议）与 readLoop（桔库/沉淀命中分支）两个 goroutine，
-	// 读侧 handlePosition——atomic.Value 存不可变 *pendingAdvice 快照，无锁
-	pendingSug atomic.Value // *pendingAdvice
+	// enginePump（引擎建议）、各连接 readLoop（桔库/沉淀命中）与云库 goroutine
+	//（cloudbook.go），读清侧 handlePosition（evaluateAdoption）——atomic.Value
+	// 存不可变 *pendingAdvice 快照。⚠锁契约：所有"load-改-store"与清锚必须持
+	// pendingSugMu——原子位只保证单次读写的原子性，护不住 read-modify-write
+	// 序列，无锁时并发写者互相整体覆盖（候选集丢条目、rank=1 快照互相抢）。
+	pendingSugMu sync.Mutex
+	pendingSug   atomic.Value // *pendingAdvice
 	// currentGameID 当前对局 ID（复盘闭环按局归组）：手机 NEW_GAME 首帧触发
 	// 重新生成；沉淀落库时随条带出。atomic 存 string
 	currentGameID atomic.Value // string
@@ -91,11 +99,12 @@ type Server struct {
 	onAdoption func(rec AdoptionRecord)
 	// onTunePersist 算力参数落盘回调（SetTunePersist 注册，nil = 不落盘）
 	onTunePersist func(kind string, v int)
-	// 走势序列（trend.go）：当前对局的引擎终态分，enginePump 追加 / readLoop
-	// （new_game）重置 / 控制台快照读——三路并发，trendMu 保护
-	trendMu   sync.Mutex
-	trendGame string
-	trendPts  []TrendPoint
+	// 走势序列（trend.go，2026-10-30 设备分组）：每设备一条终态分序列——键 =
+	// devKeyOf(c)（devid 优先、旧手机回退会话 ID），焦点设备由 ownerDev 指示。
+	// enginePump 追加（按归属设备）/ readLoop（new_game）组内重置 / 控制台快照
+	// 读——多路并发，trendMu 保护。分组模型与取舍见 trend.go 文件头。
+	trendMu     sync.Mutex
+	trendGroups map[string]*trendSeries
 	// 云库状态（cloudbook.go）：FEN 缓存（含未命中）+ 限流时间戳；
 	// cloudEnable 运行时开关（PC 面板切换，SetCloudBookEnable）——配置结构体
 	// 的 Enable 只作启动种子与落盘持久化，查询热路径只读本原子位（并发干净）
@@ -103,6 +112,15 @@ type Server struct {
 	cloudCache  map[string]cloudEntry
 	lastCloudMs atomic.Int64
 	cloudEnable atomic.Bool
+	// cloudFirst 默认走云库（2026-10-30"云库优先"开关）：开启后局面先查云库，
+	// 命中即终（不查本地不进引擎），未命中回落常规链——语义矩阵见
+	// cloudLookupFirst。种子同 cloudEnable，运行时以本原子位为准
+	cloudFirst atomic.Bool
+	// skipBooks 不走任何库（2026-10-30）：开启后建议链跳过全部库——桔库、
+	// 沉淀、云库（含 cloud_first）都不查，每步引擎直搜；只停"查"不停"记"
+	// （沉淀照常写入）。优先级高于 cloudFirst：handlePosition 在 cloudLookupFirst
+	// 之前拦截。种子注入 New，运行时以本原子位为准
+	skipBooks atomic.Bool
 	// 本轮搜索起始时刻（UnixNano，0 = 空闲）：时间制仪表"用时/上限"的数据源。
 	// enginePump 在最新局面的首条 info 时起表、任意 bestmove/状态变化时停表——
 	// 计在服务端而非引擎包，避免为展示指标动 EngineBridge 接口（测试桩全要跟着改）
@@ -190,6 +208,8 @@ func New(cfg *config.Config, cert tls.Certificate, logger *slog.Logger, eng Engi
 		idleTimeout: 45 * time.Second,
 	}
 	s.cloudEnable.Store(cfg.CloudBook.Enable) // 面板开关的启动种子（cfg 值仅此一次进入）
+	s.cloudFirst.Store(cfg.CloudBook.CloudFirst)
+	s.skipBooks.Store(cfg.Engine.SkipBooks)
 	return s
 }
 
@@ -264,6 +284,3 @@ func (s *Server) Run(ctx context.Context) error {
 		return fmt.Errorf("HTTP 服务异常退出: %w", err)
 	}
 }
-
-// upgrader 升级器。自签证书 + 应用层令牌鉴权下 Origin 校验对非浏览器端无意义，
-// 全部放行；M5 安全加固再评估。

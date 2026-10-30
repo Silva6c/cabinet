@@ -137,6 +137,10 @@ type Position struct {
 	// NewGame 新局标记（手机端 BoardTracker NEW_GAME 确认后的首帧置位，2026-10-17
 	// 复盘闭环）：PC 据此开启新 game_id，建议沉淀按局归组。可选字段旧端忽略。
 	NewGame bool `json:"new_game,omitempty"`
+	// MyRed 我方执红（2026-10-29 走势视角）：手机端"屏幕下方阵营=我方"判定结果，
+	// 每条 position 携带。指针是为了区分"旧手机未告知"（nil）与"明确执黑"（false）
+	// ——语义与 engine/suggestion 的红方视角无关，只给控制台走势面板做展示层换算。
+	MyRed *bool `json:"my_red,omitempty"`
 }
 
 // Score 红方统一视角的评分：CP 与 Mate 只出现其一（协议 §4.5）。
@@ -241,9 +245,9 @@ type Bye struct {
 
 // SetEngine 远程调节引擎算力帧（手机→PC，协议 §4.10）。
 // 全部字段可选（只改要改的字段），指针类型区分"未传"与零值——threads=0
-// 是合法值（自动档）。范围校验（depth 1–40、hash_mb 0/32–32768、
-// threads 0/1–64、multi_pv 1–5）在 server.handleSetEngine 做，任一字段
-// 越界整帧拒绝。旧端忽略新增字段（协议 §7，无需升版本）。
+// 是合法值（自动档）。范围校验（depth 1–40、movetime_ms 0/500–20000、
+// hash_mb 0/32–32768、threads 0/1–64、multi_pv 1–5）在 server.handleSetEngine
+// 做，任一字段越界整帧拒绝。旧端忽略新增字段（协议 §7，无需升版本）。
 type SetEngine struct {
 	frameBase
 	Depth      *int `json:"depth,omitempty"`
@@ -325,7 +329,13 @@ func ParseFrame(data []byte) (any, error) {
 		return nil, fmt.Errorf("%w: %q", ErrUnknownType, head.T)
 	}
 	m := newMsg()
-	return m, json.Unmarshal(raw, m)
+	if err := json.Unmarshal(raw, m); err != nil {
+		// 帧头合法但帧体损坏（非法 JSON 值/字段类型不匹配）时包一层
+		// ErrBadJSON：errorFrameFor 据此落协议 §5 的 bad_json 码，裸错误会
+		// 被误报成 internal
+		return nil, fmt.Errorf("%w: %v", ErrBadJSON, err)
+	}
+	return m, nil
 }
 
 // sendJSON 在写锁保护下发送一条消息帧（gorilla 连接不允许多 gorilla 并发写）。

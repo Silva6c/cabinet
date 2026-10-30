@@ -110,12 +110,13 @@ PC 端 `server` 字段恒为 `"cabinet"`；手机端 `client` 字段约定为 `"
 | `fen` | string | 是 | xqbase 风格 FEN（6 段），行棋方 `w`=红、`b`=黑。例：`rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1`。**FEN 与着法坐标沿用本仓 `gamelogic` Board/Move 的 UCCI 约定（源自 DroidFish/象棋迪克系谱，见 THIRD-PARTY-NOTICES）：列 `a`–`i` 为红方视角从左到右，行号 1–9 从红方底线数起（即 `Move.getUCCIString()` 的 `'a'+x, 9-y` 映射）；FEN 棋盘行序自上而下（黑方底线在前）** |
 | `red_go` | bool | 是 | 红方行棋为 `true`（与 `fen` 第 2 段一致，冗余字段便于对端直读） |
 | `history` | string[] | 否 | 本局至今的 UCCI 着法序列（4 字符坐标格式，如 `"h2e2"`），按时间序；**M0/M1 服务端只透传不校验**；M2 起由手机端对比前后确认局面自动生成；缺省 `[]` |
-| `force` | bool | 否 | 强制重新分析（手机端"更新"按钮置位）：`true` 时 PC **跳过桔库与沉淀缓存**直接进引擎重搜。缺省 `false` 走常规"桔库→沉淀→引擎"路径。场景：同一局面重发（如用户点"更新"）会被桔库命中短路回单条库建议，刚在电脑端调好的多路变招（MultiPV 各线）候选拿不回来；`force` 保证新算力参数立刻体现。旧 PC 端把 `force` 当未知字段忽略（§7），行为同缺省 |
+| `force` | bool | 否 | 强制重新分析（手机端"更新"按钮置位）：`true` 时 PC **跳过桔库、沉淀缓存与云库（含 cloud_first 优先路径）**直接进引擎重搜。缺省 `false` 走常规"桔库→沉淀→引擎"路径。场景：同一局面重发（如用户点"更新"）会被桔库命中短路回单条库建议，刚在电脑端调好的多路变招（MultiPV 各线）候选拿不回来；`force` 保证新算力参数立刻体现。旧 PC 端把 `force` 当未知字段忽略（§7），行为同缺省 |
 | `new_game` | bool | 否 | 新局标记（2026-10-17）：手机端识别到开局阵型确认（NEW_GAME，含 (9,7) 红马错位容错）后**的首条 position** 置位，仅出现一次。PC 端据此生成新 `game_id` 给建议沉淀打局归属标记（对局边界信号，供将来按局统计；PC 端"按局复盘"下拉已于 2026-10-18 移除，打标链保留）。缺省/旧 PC 忽略（§7），功能无损。**重发/补发不带此标记**（防拆局） |
+| `my_red` | bool | 否 | 我方执红（2026-10-29 走势视角）：手机端「屏幕下方阵营=我方」判定结果（识别朝向 STANDARD=红在下=我方执红，FLIPPED=我方执黑），每条 position 携带。PC 端仅用于**展示层**视角换算（控制台 04 走势面板按"我方视角"画：`ScoreCP`/`WinRate` 仍是红方视角，PC 按 `my_red=false` 取负/取补），不影响 suggestion 的红方视角语义（§4.5）。缺省（旧手机不传）= PC 无从得知执色，走势按红方视角展示；旧 PC 忽略此字段（§7） |
 
 ```json
-{"v":1,"t":"position","fen":"rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1","red_go":true,"history":[]}
-{"v":1,"t":"position","fen":"rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR b - - 0 1","red_go":false,"force":true}
+{"v":1,"t":"position","fen":"rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1","red_go":true,"history":[],"my_red":true}
+{"v":1,"t":"position","fen":"rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR b - - 0 1","red_go":false,"force":true,"my_red":true}
 ```
 
 幂等语义：服务器对每会话只保留**最新一条** position；重连后客户端必须重发最近 position；新 position 到达时进行中的查询被打断（打断细节 M1 引擎桥实现）。
@@ -125,7 +126,7 @@ PC 端 `server` 字段恒为 `"cabinet"`；手机端 `client` 字段约定为 `"
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
 | `v` / `t` | | 是 | `1` / `"suggestion"` |
-| `source` | string | 是 | `"book:<库名>"` 或 `"engine"` |
+| `source` | string | 是 | `"book:<库名>"`、`"engine"` 或 `"cloud:<端点域名>"`（云端开局库命中，2026-10-28 起，帧形态见下方"云库命中"段） |
 | `fen` | string | 否 | 本建议对应的局面 FEN（2026-10-02 起 PC 端填写）：手机端据此丢弃迟到旧建议——旧建议对着新棋盘渲染会误报"轮次可能识别有误"并压掉箭头 |
 | `bestmove` | string | 是 | UCCI 4 字符着法（如 `"h2e2"`）；无着可走时为 `"null"` |
 | `score` | object | 否 | **红方统一视角**：`{"cp":<int>}` 厘兵分，正=红方优；或 `{"mate":<int>}` N 步将杀，正=红方将杀黑方、负=黑方将杀红方。引擎原生的走子方视角分数由 **PC 端换算**后再下发，PC 沉淀时另存原生分。二者只出现其一 |
@@ -140,6 +141,8 @@ PC 端 `server` 字段恒为 `"cabinet"`；手机端 `client` 字段约定为 `"
 {"v":1,"t":"suggestion","source":"book:桔库09.09.2023精修库","bestmove":"b2e2"}
 ```
 
+**云库命中（2026-10-28 起）**：云端开局库（默认端点 chessdb.cn，PC 端配置项）命中时复用本帧下发，`source` 取 `"cloud:<端点域名>"`；与桔库命中同口径**不带 `score`/`pv`/`depth`**（chessdb 分数视角语义未考证，不猜），`multipv` 恒 1，`fen` 恒携带。两种模式：PC 端 `cloud_first` 开启时**命中即终**——不查本地库、不进引擎，本轮不再有引擎终值帧与搜索收束 status；关闭时为桔库/沉淀双未命中后的**异步补充**——与引擎搜索并发，命中帧可能被引擎后续帧按"最新覆盖"语义取代。
+
 **推送时机（定稿）**：引擎搜索期间，**每次 depth 提升、或 bestmove 发生变化即推送一条** `suggestion`（MultiPV>1 时各线独立推送，`multipv` 标明线序号；终值帧只含第一线，`multipv` 恒 1）；搜索结束（收到 bestmove）再推一条终值。库命中推一条；**桔库多候选局面逐候选推一条**（各带 `multipv` 序号，2026-10-17 起桔库候选唤醒）。同局面重复推送允许，客户端以最新一条为准。
 
 **路由（定稿）**：`suggestion` 与具体局面绑定，**仅下发给提交该局面的连接**（最近一次有效 `position` 的会话）；该连接已断开则丢弃，不广播。`status` 是引擎全局状态，保持广播给全部连接。多设备同时连接时各收各的建议，互不串台（引擎同一时刻只服务最近提交的局面，即"最新覆盖"）。
@@ -150,7 +153,7 @@ PC 端 `server` 字段恒为 `"cabinet"`；手机端 `client` 字段约定为 `"
 |---|---|---|---|
 | `v` / `t` | | 是 | `1` / `"status"` |
 | `engine` | object | 是 | `{"state":"…","depth":<int>,"nodes":<int>,"nps":<int>,"hashfull":<int>}`；`state` 同 §4.3；depth/nodes/nps/hashfull 引擎搜索中才有，hashfull 为千分比 0–1000 |
-| `rtt_ms` | int | 否 | 最近一次心跳往返毫秒数 |
+| `rtt_ms` | int | 否 | 最近一次心跳往返毫秒数（预留字段：结构体已定义，当前版本 PC 端从不下发） |
 
 ```json
 {"v":1,"t":"status","engine":{"state":"ready","depth":12,"nodes":123456,"nps":500000,"hashfull":30},"rtt_ms":12}
@@ -253,11 +256,12 @@ suggestion 帧（§4.5）同步新增可选字段 `wdl_w` / `wdl_d` / `wdl_l`：
 | `bad_json` | 帧不是合法 JSON | 否（记日志，继续） |
 | `bad_frame` | JSON 合法但结构不合格（缺 `t`、必填字段缺失/类型错） | 否 |
 | `bad_position` | 局面无法安全送引擎（走子方能一步吃到对方将/帅、缺将帅等）。错误帧带 `fen` 回显与 `turn_flip_legal` 标记（§4.8），手机端自动纠正/自愈 | 否（提示手机端重新识别） |
+| `no_moves` | 引擎判定本局面无着可走——真绝杀/困毙终局，或识别漏子拼出的"假无着"局面（残局漏识也能拼出无着盘面，文案不咬死绝杀，给用户核对棋盘的自查出口）。错误帧带 `fen` 回显；该局面不下发建议、不沉淀；手机端与 bad_position/bad_frame 共用自愈重探配额 | 否（提示核对棋盘） |
 | `unsupported_version` | `v` 缺失或 `≠1` | **是** |
 | `auth_required` | 未完成鉴权就发业务帧 / 握手超时 | 超时**是**，其余否 |
 | `auth_failed` | 令牌错误 | **是** |
 | `not_ready` | 服务未就绪（如引擎未起，M1 起用于 position 前置校验） | 否 |
-| `rate_limited` | 发送频率超限（M1 起实施） | 否 |
+| `rate_limited` | 发送频率超限（预留：当前版本未实现限流，服务端从不下发） | 否 |
 | `internal` | 服务器内部错误 | 否 |
 
 ## 6. 重连语义
@@ -272,7 +276,7 @@ suggestion 帧（§4.5）同步新增可选字段 `wdl_w` / `wdl_d` / `wdl_l`：
 - 未知 `t` 静默忽略（记 debug 日志）+ `caps` 协商 → 双方可独立升级。
 - 新增字段：旧端忽略未知字段（JSON 反序列化宽容语义），不报错。
 - 破坏性变更：升 `v` 为 2，旧端收到 `unsupported_version` 后提示升级。
-- **历次字段登记**（新字段均按本节语义加，不升版本）：2026-10-02 `suggestion.fen`（迟到旧建议过滤）；2026-10-03 `suggestion.wdl_w/wdl_d/wdl_l`（胜率和负概率）；**2026-10-17 `position.new_game`（新局标记→PC 生成对局 ID）+ `suggestion.cached`（沉淀命中标记）+ `suggestion.multipv` 语义扩展（桔库多候选也带序号，新增帧不改字段结构）**。PC 端 `internal/server/protocol_bench_test.go` 的逐字节 golden 锚锁死既有字段编码形态——加字段必须保持 omitempty 且不动既有字段顺序，否则锚变红即协议破坏。
+- **历次登记**（新字段/新错误码/既有字段值域扩展均按本节语义加，不升版本）：2026-10-02 `suggestion.fen`（迟到旧建议过滤）；2026-10-03 `suggestion.wdl_w/wdl_d/wdl_l`（胜率和负概率）；**2026-10-17 `position.new_game`（新局标记→PC 生成对局 ID）+ `suggestion.cached`（沉淀命中标记）+ `suggestion.multipv` 语义扩展（桔库多候选也带序号，新增帧不改字段结构）**；**2026-10-29 `position.my_red`（我方执红→控制台走势按我方视角展示，纯展示层）**；**2026-10-30 补登两笔存量实装**：错误码 `no_moves`（2026-10-24 实装：引擎判定无着可走时下发终局提示，手机端触发自愈重探——此前该情形整条链路静默无回复；历史已压平，实装日期以代码注释为准）、`suggestion.source` 新增值 `cloud:<端点域名>`（2026-10-28 实装、2026-10-30 定稿 cloud_first：云库命中复用 suggestion 帧，帧形态见 §4.5）。PC 端 `internal/server/protocol_bench_test.go` 的逐字节 golden 锚锁死既有字段编码形态——加字段必须保持 omitempty 且不动既有字段顺序，否则锚变红即协议破坏。
 
 ## 8. M0 联调
 

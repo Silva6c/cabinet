@@ -67,7 +67,8 @@ class YoloBoardDetector(context: Context, useNnapi: Boolean = false) {
     /**
      * 检测一帧并映射为 9×10 棋盘。无足够棋子/映射失败返回 null。
      *
-     * @param cropHint 裁剪区域（帧像素坐标 x0,y0,x1,y1）；null 表示整帧
+     * @param cropHint 裁剪区域（帧像素坐标 x0,y0,x1,y1）；null 表示整帧，
+     * 宽或高任一 <64px 的区域视为无效提示、同样按整帧处理
      */
     fun detect(frame: Frame, cropHint: DoubleArray? = null): DetectionBoardMapper.MappedBoard? {
         val cx0: Int; val cy0: Int; val cw: Int; val ch: Int

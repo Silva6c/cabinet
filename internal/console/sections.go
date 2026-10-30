@@ -1,6 +1,7 @@
 // sections.go 面板分区的构建与刷新（便当盒布局，棋韵 §5.3）：
-// 折叠态常显：01 引擎 tile / 02 开局库 tile / 03 连接 tile / 04 高级功能按钮排；
-// 高级面板（按钮排展开）：引擎调参/建议流/开局库详情/日志。
+// 折叠态常显：01 引擎 tile / 02 开局库 tile / 03 连接 tile / 04 走势 tile /
+// 05 高级功能按钮排；高级面板（按钮排展开）：引擎调参/建议流/开局库详情/
+// 日志/检查更新。
 package console
 
 import (
@@ -25,9 +26,13 @@ import (
 
 // ---------- 01 引擎 tile ----------
 
-// sectionEngine 引擎 tile（bento 左）：分区头 + 三格大数字（状态/深度/速率）
-// + 一行横向 kv（节点/哈希/配置，设计稿 §06）。大数字 sans Bold（含中文与
-// 正文同族，见 statBig 雷区注释）。
+// sectionEngine 引擎 tile（bento 左）：分区头 + 两行三格大数字（状态/深度/速率、
+// 节点/哈希/配置）+ 一行 kv（模式/今日建议）。大数字 sans Bold（含中文与正文
+// 同族，见 statBig 雷区注释）。
+//
+// 原"皮卡鱼 · UCI"caption 位曾于 2026-10-29 短暂挂过三枚状态 chip，2026-10-30
+// 用户定稿删除（信息与 01"状态"/02"收录局面"/03"N 台"大数字完全重复），恢复
+// caption 占位。
 func (c *Console) sectionEngine() fyne.CanvasObject {
 	mk := func(key string) fyne.CanvasObject {
 		o, v := kvCell(key)
@@ -46,10 +51,15 @@ func (c *Console) sectionEngine() fyne.CanvasObject {
 		mkMeter("深度 / 目标", qiForeground),
 		mkMeter("搜索速率", qiForeground))
 	row2 := container.NewHBox(mk("节点"), mk("哈希"), mk("配置"))
+	// row3（2026-10-30 补空）：模式（深度制/时间制·档位）与今日沉淀条数——
+	// 前者与"深度/目标"仪表互补（时间制下仪表不显示深度目标，这里给档位），
+	// 后者不用展开建议流面板也一眼可见（与面板 sugCount 同源 countToday）
+	row3 := container.NewHBox(mk("模式"), mk("今日建议"))
 	return bentoTile(container.NewVBox(
 		sectionHeader("01", "引擎", qiCaption("皮卡鱼 · UCI")),
 		row1,
 		row2,
+		row3,
 	))
 }
 
@@ -71,7 +81,8 @@ func (c *Console) tileBooks() fyne.CanvasObject {
 		bar,
 		container.NewHBox(qiCaption("今日命中率"), rate, layout.NewSpacer(), sub),
 	}
-	// 云库开关行（可选外部开局库：桔库/沉淀双未命中才查；nil 回调 = 行缺席）
+	// 云库开关行（可选外部开局库；nil 回调 = 行缺席）。说明小字随"默认走云库"
+	// 切换措辞（cloudLookupFirst 语义矩阵的 UI 面，静态文案会失真）
 	if c.opts.CloudBookGet != nil {
 		c.cloudChk = widget.NewCheck("云库查询", func(on bool) {
 			if c.cloudBusy.Load() || c.opts.CloudBookSet == nil {
@@ -85,11 +96,13 @@ func (c *Console) tileBooks() fyne.CanvasObject {
 		if u, err := url.Parse(endpoint); err == nil && u.Host != "" {
 			endpoint = u.Host
 		}
+		cloudHint, cloudHintSet := qiDynamic("桔库/沉淀未命中才查", qiSize(theme.SizeNameCaptionText), qiMuted, false, false)
+		c.cloudHintSet = cloudHintSet
 		rows = append(rows, container.NewHBox(
 			c.cloudChk,
 			qiCaption(endpoint),
 			layout.NewSpacer(),
-			qiCaption("桔库/沉淀未命中才查"),
+			cloudHint,
 		))
 	}
 	return bentoTile(container.NewVBox(rows...))
@@ -110,10 +123,8 @@ func (c *Console) updateBookTile(books []BookRow) {
 	}
 	if len(books) == 0 {
 		c.bookHeadSet("未发现 .obk")
-		c.chipBook.set("库 0", qiDisabled)
 	} else {
 		c.bookHeadSet(books[0].Name + " · 热加载")
-		c.chipBook.set(fmt.Sprintf("库 %s", fmtInt(int64(total))), qiJadeDot)
 	}
 	c.bookTotalSet(fmtInt(int64(total)))
 	c.bookSubSet("最近更新 " + fmtDay(newest))
@@ -139,6 +150,46 @@ func (c *Console) refreshCloudBook() {
 	c.cloudBusy.Store(true)
 	defer c.cloudBusy.Store(false)
 	c.cloudChk.SetChecked(on)
+}
+
+// refreshCloudFirst 回写"默认走云库"勾选态与 02 tile 云库说明措辞
+// （cloudFirstBusy 抑制 SetChecked 回环，与 refreshCloudBook 同款套路）。
+// 措辞随开关切换：cloudLookupFirst 语义矩阵的 UI 面——cloud_first 开启后
+// 云库命中即终，"未命中才查"的旧说法会失真。
+func (c *Console) refreshCloudFirst() {
+	if c.cloudHintSet != nil {
+		if c.opts.CloudFirstGet != nil && c.opts.CloudFirstGet() {
+			c.cloudHintSet("云库优先：命中即用，未命中才走本地")
+		} else {
+			c.cloudHintSet("桔库/沉淀未命中才查")
+		}
+	}
+	if c.cloudFirstChk == nil || c.opts.CloudFirstGet == nil {
+		return
+	}
+	on := c.opts.CloudFirstGet()
+	if c.cloudFirstChk.Checked == on {
+		return
+	}
+	c.cloudFirstBusy.Store(true)
+	defer c.cloudFirstBusy.Store(false)
+	c.cloudFirstChk.SetChecked(on)
+}
+
+// refreshSkipBooks 回写"不走任何库"勾选态（skipBooksBusy 抑制 SetChecked 回环，
+// 与 refreshCloudFirst 同款套路）。无联动文案：02 tile 云库说明不随本开关切换
+// （它描述的是云库自身维度；本开关的提示在勾选行 caption 与代码注释里）。
+func (c *Console) refreshSkipBooks() {
+	if c.skipBooksChk == nil || c.opts.SkipBooksGet == nil {
+		return
+	}
+	on := c.opts.SkipBooksGet()
+	if c.skipBooksChk.Checked == on {
+		return
+	}
+	c.skipBooksBusy.Store(true)
+	defer c.skipBooksBusy.Store(false)
+	c.skipBooksChk.SetChecked(on)
 }
 
 // todayBookRate 今日命中率：今天沉淀的建议里开局库来源占比（今天无样本返回 false）。
@@ -167,7 +218,10 @@ func (c *Console) todayBookRate() (float32, bool) {
 	return float32(book) / float32(all), true
 }
 
-// ---------- ② 引擎调参区 ----------
+// ---------- 引擎调参面板 ----------
+// （圈号分节 ② 连接 / ③ 建议流 / ④ 库区 / ⑤ 日志 / ⑥ 检查更新被
+// docs/protocol-v1.md、docs/technical-overview.md 引用，勿重排；
+// 本面板不占编号，避免与 ② 连接撞号）
 
 // 调参下拉选项（协议 §4.10 范围内的常用档；"自动"= 0）。
 var (
@@ -410,12 +464,12 @@ func (c *Console) sectionClients() fyne.CanvasObject {
 
 	// 数据行列表 + 底层空白捕获层：Stack 后参在上——点数据行由行收 tap，
 	// 点行间/列表下方空白穿透到底层 catcher（selectClient("") 清选中）。
-	// fixedTable 可调高滚动区：初值 34（一行），rebuildClientRows 按行数收放、
-	// 100px 封顶——设备再多也只在连接区内部滚动，不挤兑其他区块
+	// fixedTable 可调高滚动区：**恒定 100px**（2026-10-30 用户定稿：连接数变化
+	// 不得推移下方区块——1-2 台留白、3 台起盒内滚动，窗口高度全程稳定；原
+	// "行数少随内容"方案每加一台就把走势/05 面板顶下去一次）
 	c.clientRowsBox = container.New(&vbox{gap: 4})
 	catcher := newTapCatcher(func() { c.selectClient("") })
-	listArea, setH := c.fixedTable(c.clientRowsBox, 34)
-	c.clientListSetH = setH
+	listArea, _ := c.fixedTable(c.clientRowsBox, 100)
 	listArea = container.NewStack(catcher, listArea)
 
 	return bentoTile(container.NewVBox(
@@ -428,7 +482,8 @@ func (c *Console) sectionClients() fyne.CanvasObject {
 }
 
 // rebuildClientRows 按 clientRows 全量重建数据行列表（设备增减时调用）；
-// 空列表显示一行灰字空态而非空白。尾部按内容实际高度收放可视区（100px 封顶）。
+// 空列表显示一行灰字空态而非空白。可视区恒定 100px（sectionClients），设备
+// 增减只换列表内容、不改区块高度——下方 tile 零位移。
 func (c *Console) rebuildClientRows() {
 	c.clientRowsBox.RemoveAll()
 	if len(c.clientRows) == 0 {
@@ -441,15 +496,6 @@ func (c *Console) rebuildClientRows() {
 			r.set(row, row.FullID == c.selectedID)
 			c.clientRowsBox.Add(r)
 		}
-	}
-	// 高度随内容：MinSize 是 vbox 布局算出的精确值（空态=一行灰字，N 台=行高
-	// 累加），封顶 100——大约 3 行，再多出滚动条，区块外一切高度纹丝不动
-	if c.clientListSetH != nil {
-		h := c.clientRowsBox.MinSize().Height
-		if h > 100 {
-			h = 100
-		}
-		c.clientListSetH(h)
 	}
 }
 
@@ -550,7 +596,7 @@ func (c *Console) rowByID(id string) *ClientRow {
 
 // ---------- ③ 建议流 ----------
 
-// sectionSuggestions 建议流面板：时间/来源/局面/着法/分数/深度（第 0 行表头）。
+// sectionSuggestions 建议流面板：时间/来源/局面/着法/变招/分数/深度（第 0 行表头）。
 // 数据是历史沉淀（联调/对局积累），不是实时流——标题与说明行明示语境，
 // 避免未连接手机时误以为显示卡住。
 func (c *Console) sectionSuggestions() fyne.CanvasObject {
@@ -623,12 +669,14 @@ func (c *Console) sectionSuggestions() fyne.CanvasObject {
 		c.sugTable.SetColumnWidth(i, w)
 	}
 	c.sugTable.SetRowHeight(-1, 30)
-	sugArea, _ := c.fixedTable(c.sugTable, 240)
+	// 可视 120px（2026-10-30 用户定稿"盒砍一半"：表头 + 约 3 行，其余盒内滚动；
+	// 50 条数据全量可滚，盒只负责"小"）——说明行用 caption 小字，尾部 separator
+	// 删除（盒内已有滚动边界，分隔线是冗余装饰）
+	sugArea, _ := c.fixedTable(c.sugTable, 120)
 	return container.NewVBox(
 		sectionTitle("建议流（历史沉淀 · 最近 50 条）", c.sugCount, clearBtn),
-		widget.NewLabel("每次开局库命中 / 引擎出招沉淀一条；未连接手机时不会新增"),
+		qiCaption("每次开局库命中 / 引擎出招沉淀一条；未连接手机时不会新增"),
 		sugArea,
-		widget.NewSeparator(),
 	)
 }
 
@@ -683,23 +731,70 @@ func (c *Console) confirmClearSuggestions() {
 
 // ---------- ④ 库区 ----------
 
-// sectionBooks 启用库列表 + 热加载状态（文件修改时间）。
+// sectionBooks 启用库列表 + 热加载状态（文件修改时间）。列表可视高按库数收放
+// （复用连接区 fixedTable 动态 setter 模式）：单库一行小巧、多库封顶 300px 盒内
+// 滚动——小便当盒哲学：盒随内容、超高内滚，横向超宽的库文件名也由内滚兜住。
 func (c *Console) sectionBooks() fyne.CanvasObject {
 	c.bookLabel = &widget.Label{Text: "无（library/books/ 目录下未发现 .obk）"}
-	return container.NewVBox(
+	listArea, setH := c.fixedTable(c.bookLabel, 34)
+	c.bookListSetH = setH
+	rows := []fyne.CanvasObject{
 		sectionTitle("开局库"),
-		c.bookLabel,
+		listArea,
 		widget.NewSeparator(),
-	)
+	}
+	// "默认走云库"行（2026-10-30 用户定稿；CloudFirstGet==nil = 行缺席）：
+	// 云库命中即终（不查本地桔库/沉淀、不进引擎，与桔库命中"命中即 return"
+	// 同构），未命中回落常规链——语义矩阵见 server cloudLookupFirst。勾选状态
+	// 独立于云库总开关持久（可先勾后开云库），caption 提示依赖关系。
+	if c.opts.CloudFirstGet != nil {
+		c.cloudFirstChk = widget.NewCheck("默认走云库（优先于本地库与引擎）", func(on bool) {
+			if c.cloudFirstBusy.Load() || c.opts.CloudFirstSet == nil {
+				return
+			}
+			if msg := c.opts.CloudFirstSet(on); msg != "" {
+				dialog.NewError(errors.New(msg), c.win).Show()
+			}
+		})
+		rows = append(rows, container.NewHBox(
+			c.cloudFirstChk,
+			qiCaption("需先开启云库查询"),
+			layout.NewSpacer(),
+			qiCaption("云库未命中自动回落本地"),
+		))
+	}
+	// "不走任何库"行（2026-10-30 用户定稿；SkipBooksGet==nil = 行缺席）：建议链
+	// 跳过桔库/沉淀/云库，每步引擎直搜——纯引擎出招的持续策略。优先级高于
+	// "默认走云库"（server handlePosition 在 cloudLookupFirst 之前拦截），caption
+	// 如实写明；只停"查"不停"记"，建议流与沉淀复用数据源不受影响。
+	if c.opts.SkipBooksGet != nil {
+		c.skipBooksChk = widget.NewCheck("不走任何库（每步引擎直搜）", func(on bool) {
+			if c.skipBooksBusy.Load() || c.opts.SkipBooksSet == nil {
+				return
+			}
+			if msg := c.opts.SkipBooksSet(on); msg != "" {
+				dialog.NewError(errors.New(msg), c.win).Show()
+			}
+		})
+		rows = append(rows, container.NewHBox(
+			c.skipBooksChk,
+			qiCaption("开启后无视云库开关"),
+			layout.NewSpacer(),
+			qiCaption("建议照常沉淀记录"),
+		))
+	}
+	return container.NewVBox(rows...)
 }
 
 // ---------- ⑤ 日志尾部 ----------
 
-// logTailLines 日志面板取尾部行数（紧凑渲染单行单事件，取 25 行留滚动余量）。
-const logTailLines = 25
+// logTailLines 日志面板取尾部行数（紧凑渲染单行单事件，取 40 行留滚动余量；
+// 2026-10-30 面板盒压到 ~140px 后可视约 7 行，40 行缓存全部靠盒内滚动看）。
+const logTailLines = 40
 
 // sectionLog 最近日志尾部（紧凑渲染：时间 + 级别着色 + 垃圾行剔除）+
-// "打开日志目录"按钮；自动滚动到底部（最新）。
+// "打开日志目录"按钮；滚动跟随意图（贴底跟随、上翻不动，见 refresh）。
+// 可视高 140（2026-10-30 用户定稿"盒砍一半"：约 7 行，其余盒内滚动）。
 func (c *Console) sectionLog() fyne.CanvasObject {
 	c.logRich = widget.NewRichText()
 	c.logRich.Wrapping = fyne.TextWrapWord
@@ -708,7 +803,7 @@ func (c *Console) sectionLog() fyne.CanvasObject {
 	openBtn := newHiliteButton("打开日志目录", func() { openDir(c.opts.LogDir) })
 	return container.NewVBox(
 		sectionTitle("日志", openBtn),
-		container.New(&fixedHeight{h: 190}, scroll),
+		container.New(&fixedHeight{h: 140}, scroll),
 	)
 }
 
@@ -919,6 +1014,12 @@ func (c *Console) refresh() {
 		set("哈希", fmtHashUsed(eng.Hashfull, eng.HashMB))
 		// 配置行收敛为紧凑短式（bento 半列宽内不溢出；完整值在"引擎调参"面板）
 		set("配置", fmt.Sprintf("线程 %s · 变招 %d", fmtThreads(eng.Threads), eng.MultiPV))
+		// 模式行（2026-10-30 补空）：时间制给档位、深度制看"深度/目标"仪表
+		if eng.MoveTimeMS > 0 {
+			set("模式", "时间制 · "+tunerOptionText("movetime", eng.MoveTimeMS))
+		} else {
+			set("模式", "深度制")
+		}
 		c.clientRows = clients
 		// 选中会话已消失（自行断开/被踢）时复位选中态，避免"断开会话"指向空 ID
 		if c.selectedID != "" && c.rowByID(c.selectedID) == nil {
@@ -929,23 +1030,6 @@ func (c *Console) refresh() {
 		// （避免 1.5s 一次的视觉抖动）
 		c.syncClientRows()
 		c.connCountSet(fmt.Sprintf("%d 台", len(clients)))
-		// 头部状态 chip（与手机端同一套语言：玉=就绪 / 琥珀=等待 / 灰=空闲）
-		// 状态点：idle=灰空心○（设计稿 §4.6"离线＝空心"，用形状表达"不在场"）
-		if eng.State == "idle" {
-			c.chipEngine.setHollow("引擎 "+fmtState(eng.State), stateColor(eng.State))
-		} else {
-			c.chipEngine.set("引擎 "+fmtState(eng.State), stateColor(eng.State))
-		}
-		connColor := qiDisabled
-		connOnline := len(clients) > 0
-		if connOnline {
-			connColor = qiJadeDot
-		}
-		if connOnline {
-			c.chipConn.set(fmt.Sprintf("连接 %d", len(clients)), connColor)
-		} else {
-			c.chipConn.setHollow(fmt.Sprintf("连接 %d", len(clients)), connColor)
-		}
 	}
 	c.refreshFirewall()
 	c.refreshTuner()
@@ -964,19 +1048,58 @@ func (c *Console) refresh() {
 			c.bookLabel.SetText(strings.TrimRight(sb.String(), "\n"))
 		}
 		c.updateBookTile(books)
+		// 可视高随内容收放、300 封顶（多库盒内滚动）——与连接区同款模式
+		if c.bookListSetH != nil {
+			h := c.bookLabel.MinSize().Height
+			if h > 300 {
+				h = 300
+			}
+			c.bookListSetH(h)
+		}
 	}
 	c.refreshCloudBook()
+	c.refreshCloudFirst()
+	c.refreshSkipBooks()
 	if c.opts.Recent != nil {
-		c.sugRows = c.opts.Recent(50)
-		c.sugTable.Refresh()
-		c.sugCount.SetText(fmt.Sprintf("今日 %d 条", c.countToday()))
+		rows := c.opts.Recent(50)
+		// 签名短路：沉淀数据在绝大多数刷新周期无变化（1.5s 刷新节奏 vs 对局
+		// 节奏），内容键相同则跳过行数据重赋值与表格 Refresh（后者触发全部
+		// 可视 cell 重渲染）。签名 = 行数 + 首末行（时间,着法）：SQLite 侧
+		// 时间文本秒级精度，补着法消"同秒多条"碰撞；清空沉淀行数骤变必穿透。
+		// Recent 查询本身仍每轮执行（<1ms，取数才能判变没变；store 侧版本号
+		// 属跨层加 API，收益不成比例）。
+		sig := "0"
+		if n := len(rows); n > 0 {
+			sig = fmt.Sprintf("%d|%v|%s|%v|%s", n, rows[0].TS.UnixNano(), rows[0].BestMove,
+				rows[n-1].TS.UnixNano(), rows[n-1].BestMove)
+		}
+		if sig != c.sugSig {
+			c.sugSig = sig
+			c.sugRows = rows
+			c.sugTable.Refresh()
+		}
+		today := fmt.Sprintf("%d 条", c.countToday()) // 一次数出两处：面板 sugCount + 01 tile kv
+		c.sugCount.SetText("今日 " + today)
+		if f, ok := c.engCells["今日建议"]; ok {
+			f(today)
+		}
 	}
-	// 日志尾：紧凑渲染后滚动到底（最新日志可见）
-	c.refreshLog()
+	// 日志尾：紧凑渲染后按"跟随意图"滚动（2026-10-29 用户反馈"上划会原掉下来"
+	// 的修复）：重建前判视口是否贴底，贴底（或刚展开面板的强制贴底）才拉到
+	// 底部；用户上翻历史则保持偏移不动，滚回贴底即恢复自动跟随。阈值 24px
+	// 吸收 RichText 重建前后的行高微差。
+	wasAtBottom := false
 	if c.logScroll != nil {
 		contentH := c.logRich.MinSize().Height
 		viewH := c.logScroll.Size().Height
+		wasAtBottom = viewH > 0 && c.logScroll.Offset.Y >= contentH-viewH-24
+	}
+	c.refreshLog()
+	if c.logScroll != nil && (c.logFollow || wasAtBottom) {
+		contentH := c.logRich.MinSize().Height
+		viewH := c.logScroll.Size().Height
 		if contentH > viewH && viewH > 0 {
+			c.logFollow = false
 			c.logScroll.Offset = fyne.NewPos(0, contentH-viewH)
 			c.logScroll.Refresh()
 		}

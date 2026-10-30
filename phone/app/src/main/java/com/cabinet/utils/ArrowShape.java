@@ -11,10 +11,15 @@ import android.graphics.Path;
  * Created by zfdang on 2018-03-25
  */
 public class ArrowShape {
+    /** 箭尖半角：单位特殊，实际角度(度) = 值/2（内部按 angle/360·π 转弧度），勿按普通角度理解 */
     float angle;
+    /** 箭翼内角：单位同 angle 的双倍角度制（悬浮窗传 60/120 即实际 30°/60°） */
     float innerAngle;
+    /** 箭尖到翼折点的斜边长（决定箭头在行程中的占比） */
     float sideLength;
+    /** 箭头两翼间距（最宽处） */
     float headWidth;
+    /** 箭尾宽度（箭杆厚度） */
     float tailWidth;
 
     /** 变换矩阵复用（getTransformedPath 每次调用先 reset，见方法尾部注释） */
@@ -28,6 +33,11 @@ public class ArrowShape {
         this.tailWidth = tailWidth;
     }
 
+    /**
+     * 生成从 (x0,y0) 指向 (x1,y1) 的箭头路径。
+     * 先在局部坐标系构建形状（箭尾在原点、箭尖在 (起止点距离, 0)，指向 +x，
+     * 长度即起止点实际距离），再按起止方向 atan2 旋转并平移到 (x0,y0)。
+     */
     public void getTransformedPath(Path path, float x0, float y0, float x1, float y1) {
 
         double angle1 = this.angle / 360 * Math.PI;

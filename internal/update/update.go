@@ -4,15 +4,19 @@
 //   - 手动"检查更新"按钮（控制台高级面板）+ 启动自检默认关；
 //   - 异步、API 查询 3 秒超时、失败静默（只记日志，绝不弹窗打扰）；
 //   - 用户确认后才下载安装，绝不静默自动；
-//   - 版本比较用 tag 日期（stable-YYYYMMDD），不用 vc 提交数——提交数随
-//     历史重建会重置，前后不可比；
-//   - 免 token 匿名查公开 API；私有仓期间 404 属预期，静默失败；
+//   - 版本比较用版本日期，不用 vc 提交数——提交数随历史重建会重置，前后
+//     不可比；版本日期两种来源：旧制 stable-YYYYMMDD 直接取 tag 日期，
+//     新制 vX.Y.Z（2026-10-30 起正式版定调语义化版本）取 Release 发布
+//     时刻换算北京时间——tag 本身不含日期，发布日期总在构建之后，最多
+//     相差一天，比较语义与旧制一致；
+//   - 免 token 匿名查公开 API（仓库已公开，直查生效）；404（仓库不可见）、
+//     403（共享代理出口匿名限流）等失败均静默；
 //   - 代理失败直连兜底一次（代理节点抖动常见，直连可达时保成功率）；
 //     失败文案归类为短句上屏，完整错误链只进日志；
 //   - 手机端不做更新检查（APK 手动交付；api.github.com 过不了 GFW）。
 //
 // 绿色软件铁律：安装位置 = exe 自身目录；全部中间文件
-// （.part / .zip / .new / .old）固定名锚定该目录——启动清理、失败回滚、零残留，
+// （.part / .zip / .new / .old / 可写探针）固定名锚定该目录——启动清理、失败回滚、零残留，
 // 见 swap.go；不写注册表（仅读系统代理设置）、不留任何安装记录。
 package update
 
@@ -53,7 +57,7 @@ const (
 type Snapshot struct {
 	State      State
 	Message    string  // 中文状态/结果文案（始终非空）
-	LatestTag  string  // 最新稳定 tag（stable-YYYYMMDD；未知的检查前为空）
+	LatestTag  string  // 最新正式版 tag（vX.Y.Z；兼容旧制 stable-YYYYMMDD；检查前为空）
 	ReleaseURL string  // Release 页地址（"打开 Release 页"按钮用）
 	Progress   float64 // 下载进度 0–1（非下载态为 0）
 	CanInstall bool    // 当前是否允许"下载并安装"（有新版本且资产带官方校验值）
@@ -62,11 +66,12 @@ type Snapshot struct {
 // ghRelease / ghAsset 为 GitHub releases API 响应的裁剪结构（只取用到的字段，
 // 未知字段宽容忽略——协议 §7 同款语义）。
 type ghRelease struct {
-	TagName    string    `json:"tag_name"`
-	HTMLURL    string    `json:"html_url"`
-	Draft      bool      `json:"draft"`
-	Prerelease bool      `json:"prerelease"`
-	Assets     []ghAsset `json:"assets"`
+	TagName     string    `json:"tag_name"`
+	HTMLURL     string    `json:"html_url"`
+	Draft       bool      `json:"draft"`
+	Prerelease  bool      `json:"prerelease"`
+	PublishedAt time.Time `json:"published_at"` // vX.Y.Z 标签无日期，版本日期由此换算
+	Assets      []ghAsset `json:"assets"`
 }
 
 type ghAsset struct {
@@ -76,14 +81,39 @@ type ghAsset struct {
 	Size               int64  `json:"size"`
 }
 
-// errNoStable 发布列表里没有正式 stable-* tag（无 draft/prerelease 噪声干扰）。
-var errNoStable = errors.New("发布页暂无稳定版")
+// errNoStable 发布列表里没有可识别的正式版 tag（无 draft/prerelease 噪声干扰）。
+var errNoStable = errors.New("发布页暂无正式版")
 
-var stableTagRe = regexp.MustCompile(`^stable-(\d{8})$`)
-var buildVerRe = regexp.MustCompile(`^vc\d+-(\d{8})$`)
+var (
+	stableTagRe = regexp.MustCompile(`^stable-(\d{8})$`)              // 旧制日期标签（兼容历史 Release）
+	vTagRe      = regexp.MustCompile(`^v\d+\.\d+\.\d+$`)              // 新制语义化版本（v1.0.0 起）
+	updateZipRe = regexp.MustCompile(`^Cabinet-Update-(\d{8})\.zip$`) // 升级包资产名（日期=构建日）
+	buildVerRe  = regexp.MustCompile(`^vc\d+-(\d{8})$`)
+)
+
+// beijing 版本日期换算时区：构建日期（CI 的 TZ=Asia/Shanghai、本机 CST）与
+// Release 的 published_at（UTC）必须同口径换算，否则跨零点会差一天。
+var beijing = time.FixedZone("CST", 8*60*60)
+
+// releaseDate 返回 Release 的版本日期（YYYYMMDD），用于与本机构建日期比较：
+//   - 旧制 stable-YYYYMMDD：tag 自带日期，直接取用；
+//   - 新制 vX.Y.Z：tag 不含日期，取发布时刻换算北京时间（发布必在构建之后，
+//     最多相差一天，比较语义与旧制一致）。
+//
+// 认不出的 tag（含 assets 版权物 Release）返回空串，调用方跳过。
+func releaseDate(r *ghRelease) string {
+	if m := stableTagRe.FindStringSubmatch(r.TagName); m != nil {
+		return m[1]
+	}
+	if vTagRe.MatchString(r.TagName) && !r.PublishedAt.IsZero() {
+		return r.PublishedAt.In(beijing).Format("20060102")
+	}
+	return ""
+}
 
 // Checker 更新检查与安装编排：全部可变状态持锁，对外只暴露 Snapshot 只读拷贝
-// （控制台 1.5s 刷新循环轮询；HTTP 全部发生在 goroutine 内，见 FirewallStatus 同款禁令）。
+// （控制台 1.5s 刷新循环轮询；HTTP 全部发生在 goroutine 内，见 internal/console
+// 的 FirewallStatus 同款禁令）。
 type Checker struct {
 	mu          sync.Mutex
 	state       State
@@ -211,7 +241,14 @@ func (c *Checker) Check(ctx context.Context) {
 		c.message = "开发构建（无法确定构建日期），请到 Release 页对照"
 		return
 	}
-	tagDate := stableTagRe.FindStringSubmatch(rel.TagName)[1]
+	tagDate := releaseDate(rel)
+	if tagDate == "" {
+		// pickLatestStable 已按 releaseDate 过滤，走到这里属响应数据异常
+		c.state = StateFailed
+		c.message = "无法识别最新版本的发布日期"
+		c.logger.Info("无法识别版本日期", "tag", rel.TagName)
+		return
+	}
 	if local >= tagDate {
 		c.state = StateUpToDate
 		c.message = "已是最新（" + rel.TagName + "）"
@@ -220,14 +257,14 @@ func (c *Checker) Check(ctx context.Context) {
 	c.state = StateUpdateAvail
 	c.message = "发现新版本 " + rel.TagName
 	c.assetURL, c.assetDigest, c.assetSize = "", "", 0
-	if name, url, digest, size := pickUpdateAsset(rel, tagDate); name != "" {
+	if name, url, digest, size := pickUpdateAsset(rel); name != "" {
 		c.assetURL, c.assetDigest, c.assetSize = url, digest, size
 	} else {
 		c.message += "（无带校验值的升级包，请到 Release 页手动下载）"
 	}
 }
 
-// fetchReleases 拉取 releases 列表并选出最新 stable-*。不用 releases/latest
+// fetchReleases 拉取 releases 列表并选出最新正式版。不用 releases/latest
 // 端点：assets 版权物 Release 也是正式 Release，会污染 latest 语义——列表
 // 过滤 + 日期取最大，双保险。
 func (c *Checker) fetchReleases(ctx context.Context) (*ghRelease, error) {
@@ -247,7 +284,8 @@ func (c *Checker) fetchReleases(ctx context.Context) (*ghRelease, error) {
 	defer func() { _ = resp.Body.Close() }()
 	switch {
 	case resp.StatusCode == http.StatusNotFound:
-		// 私有仓匿名访问 404（开源前属预期）；开源后仓可见即正常
+		// 匿名 404 = 仓库对匿名请求不可见（未公开/已改名）；共享代理出口 IP 的
+		// 匿名限流 403 亦属已知真实场景（落下一分支）——两类失败均静默记日志
 		return nil, fmt.Errorf("发布列表不可见（仓库未公开或暂无 Release）")
 	case resp.StatusCode != http.StatusOK:
 		return nil, fmt.Errorf("GitHub API 返回 %d", resp.StatusCode)
@@ -308,40 +346,50 @@ func failureMessage(err error) string {
 	}
 }
 
-// pickLatestStable 从 release 列表过滤出最新稳定版：tag 名必须精确匹配
-// stable-YYYYMMDD，排除 draft 与 prerelease（assets 版权物 Release 应标
-// prerelease，此过滤是第二道保险）。8 位日期字符串字典序 = 时间序。
+// pickLatestStable 从 release 列表过滤出最新正式版：tag 必须是 vX.Y.Z（新制）
+// 或 stable-YYYYMMDD（旧制兼容），排除 draft 与 prerelease（assets 版权物
+// Release 标了 prerelease，此过滤是第二道保险）。排序键 = releaseDate
+// （8 位日期字典序 = 时间序）；同日并列取发布时刻更晚者，避免同日连发两版
+// 时顺序不定。
 func pickLatestStable(rels []ghRelease) *ghRelease {
 	var best *ghRelease
 	var bestDate string
+	var bestAt time.Time
 	for i := range rels {
 		r := &rels[i]
 		if r.Draft || r.Prerelease {
 			continue
 		}
-		m := stableTagRe.FindStringSubmatch(r.TagName)
-		if m == nil {
+		d := releaseDate(r)
+		if d == "" {
 			continue
 		}
-		if best == nil || m[1] > bestDate {
-			best, bestDate = r, m[1]
+		if best == nil || d > bestDate || (d == bestDate && r.PublishedAt.After(bestAt)) {
+			best, bestDate, bestAt = r, d, r.PublishedAt
 		}
 	}
 	return best
 }
 
-// pickUpdateAsset 在 release 里找升级包资产：Cabinet-Update-<tag日期>.zip
-// （portable-pack 产出，只含 cabinet.exe；TZ=Asia/Shanghai 保证与 tag 同日）。
+// pickUpdateAsset 在 release 里找升级包资产（portable-pack 产出的
+// Cabinet-Update-YYYYMMDD.zip，默认仅 cabinet.exe，-with-engine/-with-books
+// 可附引擎与桔库）。资产名里的日期是构建日期：旧制与 tag 日期同日，新制
+// vX.Y.Z 标签不含日期——故按类型匹配并取日期最大者，不再要求与 tag 同日。
 // digest 为空（GitHub 未提供官方校验值）时不予下载安装——绿色软件不装不可验
 // 的二进制。未命中返回零值。
-func pickUpdateAsset(rel *ghRelease, tagDate string) (name, url, digest string, size int64) {
-	want := "Cabinet-Update-" + tagDate + ".zip"
+func pickUpdateAsset(rel *ghRelease) (name, url, digest string, size int64) {
+	bestDate := ""
 	for _, a := range rel.Assets {
-		if a.Name == want && a.BrowserDownloadURL != "" {
-			return a.Name, a.BrowserDownloadURL, a.Digest, a.Size
+		m := updateZipRe.FindStringSubmatch(a.Name)
+		if m == nil || a.BrowserDownloadURL == "" {
+			continue
+		}
+		if m[1] > bestDate {
+			name, url, digest, size = a.Name, a.BrowserDownloadURL, a.Digest, a.Size
+			bestDate = m[1]
 		}
 	}
-	return "", "", "", 0
+	return name, url, digest, size
 }
 
 // parseBuildDate 从 ldflags 注入的版本串提取构建日期（vc<N>-<YYYYMMDD>）。

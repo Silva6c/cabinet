@@ -99,7 +99,9 @@ class RemoteAnalysisClient(
         /** 协议 v1 能力集与客户端标识（§3 逐字定死，勿改） */
         private const val PROTO_VERSION = 1
         private const val CLIENT_NAME = "cabinet-phone"
-        private const val CLIENT_VER = "0.1.0"
+
+        // 客户端版本不设常量：取 BuildConfig.VERSION_NAME（gradle 由 git 标签
+        // 推导），与 APK versionName、"关于"弹窗同一事实源
         private const val CAP_V1 = "v1"
         /** 客户端保活心跳间隔（协议建议 15–30s） */
         private const val PING_INTERVAL_MS = 20_000L
@@ -209,6 +211,8 @@ class RemoteAnalysisClient(
     @Volatile private var lastPositionFen: String? = null
     /** 最后一条 position 的 force 语义（重连/not_ready 恢复补发时保持） */
     @Volatile private var lastPositionForce = false
+    /** 最后一条 position 的我方执色（协议 §4.4 my_red；补发时保持，null=未上报） */
+    @Volatile private var lastPositionMyRed: Boolean? = null
     /** 收到 error{not_ready} 后置位；status{state:"ready"} 到达时重发一次并清零。
      *  注意 PC 的搜索收束帧同样带 state:"ready"（§4.6），不能据此重发（会循环搜索）。 */
     @Volatile private var awaitingReady = false
@@ -295,22 +299,35 @@ class RemoteAnalysisClient(
     /**
      * 上行局面（"最新覆盖"：任何时刻只有最新局面有意义）。未连接时仅记录，重连后自动补发。
      * force=true（"更新"按钮）：PC 跳过桔库/沉淀直接引擎重搜（协议 §4.4）——同局面
-     * 重发否则被桔库命中短路，多路变招候选拿不回来。重连补发不带 force（PC 重启后
-     * 正常查库）。补发时保持最后一条的 force 语义：force 的局面在 lastPositionForce 记忆
+     * 重发否则被桔库命中短路，多路变招候选拿不回来。补发（welcome 重连 / not_ready
+     * 恢复）保持最后一条的 force 语义（lastPositionForce）：用户点过"更新"后恰逢
+     * 断连，补发依旧绕开桔库缓存，强制重搜的意图不丢。
      *
      * newGame=true（复盘闭环 2026-10-17）：NEW_GAME 确认后的首条上行带 new_game
      * 标记——PC 端据此生成对局 ID、建议沉淀按局归组（协议 §4.4）。**只该在标记
      * 时刻置一次**：重发/补发（welcome 后、not_ready 恢复）不带标记，否则 PC 会
      * 把同一局拆成多局。旧 PC 忽略未知字段（协议 §7），PC 端不自行猜开局
      * （识别错位容忍语义只在手机端有），本标记是唯一的局边界上行信号。
+     *
+     * myRed（2026-10-29 走势视角）：我方是否执红（"屏幕下方阵营=我方"判定）。
+     * PC 只用它把控制台 04 走势换算成"我方视角"——我方执黑时曲线与胜率都要翻，
+     * 否则永远显示对手（红方）优势。纯展示层信息，不改建议的红方视角语义。
+     * 补发（welcome/not_ready）沿用 lastPositionMyRed。
      */
-    fun sendPosition(fen: String, force: Boolean = false, newGame: Boolean = false) {
+    fun sendPosition(
+        fen: String, force: Boolean = false, newGame: Boolean = false,
+        myRed: Boolean? = null,
+    ) {
         lastPositionFen = fen
         lastPositionForce = force
+        myRed?.let { lastPositionMyRed = it }
         // 转发完成时刻（真机基准：与 board confirmed、suggestion received 同在
         // logcat 时间轴上，端到端"走子→转发→建议"无需跨设备时钟比对）
         RLog.i(TAG, "position sent: $fen${if (force) " (force)" else ""}${if (newGame) " (new_game)" else ""}")
-        send(PositionFrame(fen = fen, redGo = fenRedGo(fen), history = emptyList(), force = force, newGame = newGame))
+        send(PositionFrame(
+            fen = fen, redGo = fenRedGo(fen), history = emptyList(),
+            force = force, newGame = newGame, myRed = myRed,
+        ))
     }
 
     /**
@@ -334,7 +351,7 @@ class RemoteAnalysisClient(
         }
         setState(ConnectionState.CONNECTING)
         val req = Request.Builder().url(serverUrl).build()
-        ws = client.newWebSocket(req, object : WebSocketListener() {
+        val newWs = client.newWebSocket(req, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 RLog.i(TAG, "ws open，等待 PC hello（协议 §3）")
             }
@@ -360,6 +377,13 @@ class RemoteAnalysisClient(
                 scheduleReconnect()
             }
         })
+        ws = newWs
+        // 二次校验防 stop 竞态：开头已过 started 检查，但 stop（主线程）与重连
+        // 定时器出队执行的 connect（net 线程）并发时，stop 可能恰在检查之后——
+        // removeCallbacksAndMessages 摘不到已在执行的 connect 本体，ws?.close 也
+        // 只关到旧连接，这里新建的 WebSocket 变无人管理的僵尸连接。复验 started，
+        // 已被 stop 即立即 cancel（stop 后实例弃用不再重连，见 stop KDoc）
+        if (!started) newWs.cancel()
     }
 
     private fun scheduleReconnect() {
@@ -415,7 +439,7 @@ class RemoteAnalysisClient(
             "hello" -> {
                 val hello = JSONObject().apply {
                     put("v", PROTO_VERSION); put("t", "hello")
-                    put("client", CLIENT_NAME); put("ver", CLIENT_VER)
+                    put("client", CLIENT_NAME); put("ver", com.cabinet.BuildConfig.VERSION_NAME)
                     put("caps", org.json.JSONArray().put(CAP_V1))
                     // 设备昵称功能（协议 §4.1）：自报 devid/name 供 PC 设备列表区分
                     // 多台手机；空值不携带（与旧端 hello 字节形态一致，§7 宽容语义）
@@ -444,7 +468,7 @@ class RemoteAnalysisClient(
                 // 心跳是自续链 Runnable：重连成功必须先摘旧链再挂，否则 ping 频率随重连次数成倍增长
                 netHandler.removeCallbacks(pingRunnable)
                 netHandler.post(pingRunnable)
-                lastPositionFen?.let { sendPosition(it, lastPositionForce) }
+                lastPositionFen?.let { sendPosition(it, lastPositionForce, myRed = lastPositionMyRed) }
             }
             "suggestion" -> {
                 // 建议回包时刻（真机基准脚本用它对齐"走子→建议刷新"的端到端时间差）
@@ -494,7 +518,7 @@ class RemoteAnalysisClient(
                 // §6 not_ready 恢复：仅"not_ready 之后的首个 ready"触发一次重发
                 if (eng?.optString("state") == "ready" && awaitingReady) {
                     awaitingReady = false
-                    lastPositionFen?.let { sendPosition(it, lastPositionForce) }
+                    lastPositionFen?.let { sendPosition(it, lastPositionForce, myRed = lastPositionMyRed) }
                 }
             }
             // §4.7：PC 心跳必须原样回 pong
@@ -549,6 +573,10 @@ class RemoteAnalysisClient(
                 // 新局标记仅 true 时出现（omitempty 语义，与 PC 端解码对齐；
                 // 旧 PC 忽略未知字段，协议 §7）
                 if (any.newGame) put("new_game", true)
+                // 我方执红（2026-10-29 走势视角）：false=执黑必须显式下发——
+                // JSON 布尔没有 omitempty 之外的语义，PC 端靠"字段在不在"区分
+                // "旧手机未告知"与"明确执黑"，不能只在 true 时传
+                any.myRed?.let { put("my_red", it) }
             }
         // 手机诊断日志上行（协议 §4.11）：lines 为端上预格式化行，PC 原样落盘
         is LogFrame -> JSONObject().put("v", PROTO_VERSION).put("t", "log")
@@ -567,6 +595,8 @@ class RemoteAnalysisClient(
         else -> throw IllegalArgumentException("未知帧类型")
     }
 
+    /** 从 FEN 行棋方段取 red_go 上行值：非 "b" 一律视为红先（容忍 w/r 两种写法），
+     *  段缺失（畸形 FEN）时默认红先。 */
     private fun fenRedGo(fen: String): Boolean =
         fen.split(" ").getOrNull(1)?.let { it != "b" } ?: true
 
@@ -577,7 +607,7 @@ class RemoteAnalysisClient(
 
 /** PC → 手机 suggestion（§4.5）。score 为红方视角（PC 已换算）：cp 正=红优，mate 正=红将杀。 */
 class RemoteSuggestion(
-    val source: String,          // "book:<库名>" 或 "engine"
+    val source: String,          // "book:<库名>" / "cloud:<域名>"（2026-10-30 起）或 "engine"
     val bestMove: String,        // UCCI 4 字符
     val scoreCp: Int?,
     val scoreMate: Int?,
@@ -598,6 +628,11 @@ class RemoteSuggestion(
 ) {
     val fromBook: Boolean get() = source.startsWith("book:")
     val bookName: String get() = if (fromBook) source.removePrefix("book:") else ""
+    /** 云库建议（2026-10-30 PC 端 cloud_first/云库查询新增来源）：与开局库命中同为
+     *  确定性单条（无分数/PV/深度，命中即终不再有引擎收束帧），到达即成熟——
+     *  不识别该前缀会落"引擎建议"分支显示"（暂定）"白等一个永远不来的收束帧 */
+    val fromCloud: Boolean get() = source.startsWith("cloud:")
+    val cloudHost: String get() = if (fromCloud) source.removePrefix("cloud:") else ""
 }
 
 // 协议帧（仅本端发送的类型）
@@ -610,7 +645,10 @@ private data class PositionFrame(
     val force: Boolean = false,
     /** 新局标记（2026-10-17 复盘闭环）：NEW_GAME 确认后的首帧置位——PC 据此
      *  开启新对局 ID，建议沉淀按局归组。旧 PC 忽略未知字段（协议 §7） */
-    val newGame: Boolean = false)
+    val newGame: Boolean = false,
+    /** 我方执红（2026-10-29 走势视角）：PC 据此把控制台走势换算成我方视角；
+     *  null = 不传（旧 PC 忽略未知字段，协议 §7） */
+    val myRed: Boolean? = null)
 private data class SetEngineFrame(
     val depth: Int?, val hashMB: Int?,
     val threads: Int? = null, val multiPV: Int? = null,

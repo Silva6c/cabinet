@@ -9,11 +9,13 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"cabinet/internal/book"
 	"cabinet/internal/config"
+	"cabinet/internal/engine"
 
 	// sqlite 驱动（造测试桔库用；book 包测试同款）
 	_ "modernc.org/sqlite"
@@ -44,12 +46,12 @@ func makeMultiCandBook(t *testing.T, path string, vkey int64) {
 	}
 	// vmove 位义（book.VmoveToUcci 冻结契约）：高 8 位=终点格子编码、低 8 位=起点，
 	// 输出 UCCI = 起点在前。格子编码 = c90 表 0x33+x+y*16（zobrist_table.go），
-	// 二路炮位（y=7）：h2=0x79、g2=0x78、e2=0x76、b2=0x71。
+	// 二路炮位（y=7）：h2=0xAA、g2=0xA9、e2=0xA7、b2=0xA4。
 	// 三条候选着法按 vscore 30/20/10 —— SQL 按 vscore desc 排序，
 	// Query 应按 h2e2/h2g2/b2e2 顺序返回（着法无需在盘面上真实可走：
 	// Query 只按 vkey 查表，本测试验证的是多候选帧的下发链路）。
 	// 格子编码 y 是 FEN 行号（0=黑底线），UCCI rank = 9-y——二路炮（rank 2）
-	// 在 FEN 行 7：h2=0x33+7+7*16=0xBA、g2=0xB9、e2=0xA7、b2=0xA4。
+	// 在 FEN 行 7：h2=0x33+7+7*16=0xAA、g2=0xA9、e2=0xA7、b2=0xA4。
 	rows := []struct {
 		ucci     string
 		from, to int
@@ -105,7 +107,7 @@ func startTestServerWithS(t *testing.T) (string, func(), *Server) {
 // 用开局局面（合法可过 handlePosition 入口校验；光帅照面局面会被拒）。
 func TestServer_BookMultiCandidates(t *testing.T) {
 	fen := "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1"
-	vkey, _, err := book.FENHash(fen)
+	vkey, _, err := book.FENHashValidated(fen)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,5 +160,77 @@ func TestServer_BookMultiCandidates(t *testing.T) {
 		if got.Cached {
 			t.Fatalf("桔库命中不是缓存，cached 应为 false: %+v", got)
 		}
+	}
+}
+
+// TestServer_SkipBooks 不走任何库（2026-10-30）：开关开启后建议链跳过全部库
+// ——开局局面明明在桔库里，也必须走引擎直搜（fake 桥重放建议，source=engine、
+// 引擎确实收到请求）；关闭后同局面重发，回归桔库直答（回归锚）。语义与拦截
+// 位置见 handlePosition；沉淀写入行为与开关无关，不在本测覆盖。
+func TestServer_SkipBooks(t *testing.T) {
+	fb := newFakeBridge(engine.StateReady)
+	engineRequests := 0
+	fb.onRequest = func(fb *fakeBridge, fen string) {
+		engineRequests++
+		replayNormalSearch(fb, fen)
+	}
+	fen := "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1"
+	vkey, _, err := book.FENHashValidated(fen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bookPath := filepath.Join(t.TempDir(), "skip-book.obk")
+	makeMultiCandBook(t, bookPath, vkey)
+	store, err := book.OpenStore(slog.New(slog.NewTextHandler(os.Stderr, nil)), bookPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	url, cleanup, srv := startTestServerWithBridgeS(t, fb)
+	defer cleanup()
+	srv.SetBook(store)
+	srv.SetSkipBooks(true) // 开关开启：桔库/沉淀/云库全跳过
+
+	ws := dialWS(t, url)
+	defer ws.Close()
+	handshakeClient(t, ws)
+
+	_ = ws.WriteJSON(Position{frameBase: frame(TypePosition), Fen: fen, RedGo: true})
+
+	// 开启态：第一个建议必须是引擎直搜（source=engine），book 来源帧绝不允许先到
+	_ = ws.SetReadDeadline(time.Now().Add(3 * time.Second))
+	defer ws.SetReadDeadline(time.Time{})
+	for {
+		m := recvLoop(t, ws, &[]string{})
+		sug, ok := m.(*Suggestion)
+		if !ok {
+			continue
+		}
+		if sug.Source != "engine" {
+			t.Fatalf("不走任何库开启时建议来源=%q, want engine（库应全部跳过）", sug.Source)
+		}
+		break
+	}
+	if engineRequests == 0 {
+		t.Fatal("不走任何库开启时引擎应收到搜索请求")
+	}
+
+	// 回归锚：关闭开关后同局面重发（无同 FEN 短路，重新走完整链），桔库直答
+	srv.SetSkipBooks(false)
+	_ = ws.WriteJSON(Position{frameBase: frame(TypePosition), Fen: fen, RedGo: true})
+	for {
+		m := recvLoop(t, ws, &[]string{})
+		sug, ok := m.(*Suggestion)
+		if !ok {
+			continue
+		}
+		if sug.Source == "engine" {
+			continue // 关闭前在途的引擎建议（若有）不是本断言目标
+		}
+		if !strings.HasPrefix(sug.Source, "book:") {
+			t.Fatalf("开关关闭后建议来源=%q, want book: 前缀（回归桔库直答）", sug.Source)
+		}
+		break
 	}
 }

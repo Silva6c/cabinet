@@ -41,10 +41,10 @@ class OverlayModel(
     /** 候选/预案行：候选 1/3 · 马三进二 ✓；null 隐藏 */
     val candidateText: String? = null,
     val candidateTone: QiTone = QiTone.NONE,
-    /** 候选点阵（1 基序号与总数；总数 ≤ 1 不显示），折进候选行尾部 */
+    /** 候选点阵（1 基序号与总数；总数在 2..9 才渲染，单候选或超上限不显示），折进候选行尾部 */
     val candidateIndex: Int = 0,
     val candidateCount: Int = 0,
-    /** canonical 布局 90 子（红恒在 y=9），null 表示尚无局面 */
+    /** canonical 布局 90 格（按 piece[y][x] 行优先摊平；红恒在 y=9），null 表示尚无局面 */
     val pieces: IntArray? = null,
     /** 推荐走法起止（canonical 内部坐标 x,y） */
     val arrowFrom: Pair<Int, Int>? = null,

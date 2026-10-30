@@ -2,9 +2,9 @@
 
 // 引擎子进程窗口控制（Windows）：pikafish.exe 是 console 程序，
 // windowsgui 父进程启动它时会为其新建控制台窗口（用户看到黑框闪现）。
-// 用 CREATE_NO_WINDOW 让子进程不创建任何窗口；0x08000000 = CREATE_NO_WINDOW，
-// 不能用 0x00000004（CREATE_NO_WINDOW 之外的 DETACHED_PROCESS 语义，
-// 会破坏 stdio 管道）。
+// 用 CREATE_NO_WINDOW 让子进程不创建任何窗口，0x08000000 即其官方值；
+// 不要拿其他"无窗"标志顶替——DETACHED_PROCESS 是 0x00000008 而非 0x4
+//（0x4 实为 CREATE_SUSPENDED），且其无控制台语义有破坏 stdio 管道的风险。
 
 package engine
 

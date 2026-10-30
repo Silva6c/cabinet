@@ -12,6 +12,8 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// upgrader WebSocket 升级器。自签证书 + 应用层令牌鉴权下 Origin 校验对非浏览器
+// 端无意义，全部放行；M5 安全加固再评估。
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  4096,
 	WriteBufferSize: 4096,
@@ -57,6 +59,9 @@ func (s *Server) serveWS(w http.ResponseWriter, r *http.Request) {
 		if id, _ := s.ownerSession.Load().(string); id == c.ID {
 			s.ownerSession.Store("")
 		}
+		// ownerDev（走势焦点设备键）**故意不清**：它与连接无关（设备键 devKeyOf），
+		// 同一设备重连是新会话但同设备——焦点保留则曲线默认视图无缝续看；焦点
+		// 只随下一条 position 切换（trend.go 分组模型）。走势组本身也不删。
 	}()
 	defer func() { _ = c.Close() }()
 
@@ -178,7 +183,9 @@ func (s *Server) handshake(c *Conn, ws *websocket.Conn) bool {
 	}
 }
 
-// readLoop 会话主循环：ping→pong、position→status（M0 echo 基准）、bye→bye。
+// readLoop 会话主循环：按帧类型分发（ping→pong、pong→记 RTT、position→
+// handlePosition、set_engine/log→各自 handler、bye→bye 优雅断开）；引擎未启用
+// 时 position 在 handler 内退化为 M0 echo status。
 // 死链检测：每帧后重置空闲读超时，连续 idleTimeout 未收到任何帧即断开（协议 §4.7）。
 func (s *Server) readLoop(c *Conn, ws *websocket.Conn) {
 	_ = ws.SetReadDeadline(time.Now().Add(s.idleTimeout))
@@ -231,7 +238,3 @@ func (s *Server) readLoop(c *Conn, ws *websocket.Conn) {
 		}
 	}
 }
-
-// bookNames 当前已启用开局库名列表（welcome.books 回填用）：无库/未加载返回
-// 空切片（非 nil，JSON 序列化仍为 []）。此前恒硬编码空数组——库里 266 万条
-// 记录 welcome 却报空，客户端无从展示库状态（第二轮审查 P1-3）。

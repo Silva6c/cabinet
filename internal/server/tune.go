@@ -6,6 +6,10 @@ import (
 	"fmt"
 )
 
+// handleSetEngine 远程调节引擎算力（协议 §4.10）：逐字段校验，任一越界整帧拒绝。
+// 逐字段 applyTune 应用后统一以最近局面重搜；每个成功应用的字段同样触发
+// onTunePersist 落盘（与 TuneEngine 面板链路同权）——手机悬浮窗"深度/哈希/
+// 路数"按钮调的参数重启后以落盘值为准。
 func (s *Server) handleSetEngine(c *Conn, m *SetEngine) {
 	type kv struct {
 		kind string
@@ -190,5 +194,3 @@ func (s *Server) reSearchLatest() {
 	}
 	s.eng.Request(want)
 }
-
-// recordSuggestion 沉淀回调（nil 安全）。

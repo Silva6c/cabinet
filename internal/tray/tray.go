@@ -1,6 +1,6 @@
-// Package tray 是 Windows 托盘（报告 §4 的 tray 模块）：
-// 图标 + 动态状态行 + 打开日志目录 + 退出。fyne.io/systray 需要在
-// 主 goroutine 跑消息循环，main 里服务本体放后台 goroutine。
+// Package tray 是 Windows 托盘：图标 + 动态状态行 + 打开日志目录 + 退出。
+// fyne.io/systray 的消息循环须独占一个 OS 线程——main 让 fyne 主控制台占
+// 主 goroutine，本包 Run 放在锁 OS 线程的独立 goroutine 里跑（见 Run 注释）。
 package tray
 
 import (
@@ -35,7 +35,8 @@ func LoadIcon(dir string) []byte {
 
 // Quit 幂等退出托盘消息循环（让 tray.Run 返回）。
 // 消息循环未启动（-no-tray）时是无害空操作。
-// 两条退出路径都收敛到这里：托盘菜单退出 / 服务异常退出。
+// 服务异常退出路径经此收敛；托盘菜单退出在消息循环内直接调 systray.Quit
+// （循环必已启动），不经本函数。
 func Quit() {
 	if started.Load() {
 		systray.Quit()

@@ -80,10 +80,34 @@ func TestParseBuildDate(t *testing.T) {
 	}
 }
 
-// TestPickLatestStable draft/prerelease/非 stable tag 全过滤，乱序取日期最大。
+// TestReleaseDate 版本日期两种来源：旧制取 tag 日期，新制取发布日期换算北京时间。
+func TestReleaseDate(t *testing.T) {
+	cases := []struct {
+		rel  ghRelease
+		want string
+	}{
+		{ghRelease{TagName: "stable-20261028"}, "20261028"},
+		// UTC 01:00 发布 = 北京 09:00，同日
+		{ghRelease{TagName: "v1.0.0", PublishedAt: time.Date(2026, 10, 30, 1, 0, 0, 0, time.UTC)}, "20261030"},
+		// UTC 17:00 发布 = 北京次日 01:00，必须按北京时区换算
+		{ghRelease{TagName: "v1.0.1", PublishedAt: time.Date(2026, 10, 30, 17, 0, 0, 0, time.UTC)}, "20261031"},
+		{ghRelease{TagName: "v1.0.0"}, ""},     // 缺 published_at
+		{ghRelease{TagName: "assets"}, ""},     // 版权物 Release 不参与
+		{ghRelease{TagName: "v1.0"}, ""},       // 非三段式不算正式版
+		{ghRelease{TagName: "v1.0.0-rc1"}, ""}, // 预发布形态不算
+	}
+	for _, c := range cases {
+		if got := releaseDate(&c.rel); got != c.want {
+			t.Errorf("releaseDate(%q) = %q, want %q", c.rel.TagName, got, c.want)
+		}
+	}
+}
+
+// TestPickLatestStable draft/prerelease/非正式版 tag 全过滤，乱序取日期最大；
+// 新制 vX.Y.Z 与旧制 stable-YYYYMMDD 混排时按版本日期统一比较。
 func TestPickLatestStable(t *testing.T) {
 	rels := []ghRelease{
-		{TagName: "assets"},                            // 非 stable tag
+		{TagName: "assets"},                            // 非正式版 tag
 		{TagName: "stable-20261001", Draft: true},      // draft
 		{TagName: "stable-20261015", Prerelease: true}, // prerelease
 		{TagName: "stable-20261020"},
@@ -100,27 +124,50 @@ func TestPickLatestStable(t *testing.T) {
 	if got := pickLatestStable(onlyPre); got == nil || got.TagName != "stable-20261020" {
 		t.Fatalf("prerelease 应被排除, got %+v", got)
 	}
+	// v 标签按发布日期胜过更早的日期标签（迁移期两制并存）
+	withV := []ghRelease{
+		{TagName: "stable-20261028", PublishedAt: time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)},
+		{TagName: "v1.0.0", PublishedAt: time.Date(2026, 10, 30, 1, 0, 0, 0, time.UTC)},
+	}
+	if got := pickLatestStable(withV); got == nil || got.TagName != "v1.0.0" {
+		t.Fatalf("v 标签应胜出, got %+v", got)
+	}
+	// 同日并列取发布时刻更晚者
+	sameDay := []ghRelease{
+		{TagName: "stable-20261030", PublishedAt: time.Date(2026, 10, 30, 1, 0, 0, 0, time.UTC)},
+		{TagName: "v1.0.0", PublishedAt: time.Date(2026, 10, 30, 9, 0, 0, 0, time.UTC)},
+	}
+	if got := pickLatestStable(sameDay); got == nil || got.TagName != "v1.0.0" {
+		t.Fatalf("同日应取发布更晚者, got %+v", got)
+	}
+	if pickLatestStable([]ghRelease{{TagName: "v2.0.0"}}) != nil {
+		t.Fatal("v 标签缺 published_at 应跳过")
+	}
 }
 
-// TestPickUpdateAsset 资产按 tag 同日期精确匹配；升级包与便携包不混。
+// TestPickUpdateAsset 按"升级包类型 + 日期最大"匹配：v 标签不含日期，资产名
+// 日期是构建日，不能再要求与 tag 同日；便携包/APK 不混入。
 func TestPickUpdateAsset(t *testing.T) {
 	rel := &ghRelease{
-		TagName: "stable-20261101",
+		TagName: "v1.0.0",
 		Assets: []ghAsset{
-			{Name: "Cabinet-Portable-20261101-Full.zip", BrowserDownloadURL: "http://x/full.zip", Digest: "sha256:aa"},
-			{Name: "Cabinet-Update-20261101.zip", BrowserDownloadURL: "http://x/upd.zip", Digest: "sha256:bb", Size: 100},
+			{Name: "Cabinet-Portable-20261030-Full.zip", BrowserDownloadURL: "http://x/full.zip", Digest: "sha256:aa"},
+			{Name: "Cabinet-Update-20261028.zip", BrowserDownloadURL: "http://x/old.zip", Digest: "sha256:cc"},
+			{Name: "Cabinet-Update-20261030.zip", BrowserDownloadURL: "http://x/upd.zip", Digest: "sha256:bb", Size: 100},
+			{Name: "cabinet_20261030_vc4_arm64.apk", BrowserDownloadURL: "http://x/a.apk", Digest: "sha256:dd"},
 		},
 	}
-	name, url, digest, size := pickUpdateAsset(rel, "20261101")
-	if name != "Cabinet-Update-20261101.zip" || url != "http://x/upd.zip" || digest != "sha256:bb" || size != 100 {
+	name, url, digest, size := pickUpdateAsset(rel)
+	if name != "Cabinet-Update-20261030.zip" || url != "http://x/upd.zip" || digest != "sha256:bb" || size != 100 {
 		t.Fatalf("pickUpdateAsset = %q %q %q %d", name, url, digest, size)
 	}
-	if name, _, _, _ := pickUpdateAsset(rel, "20261001"); name != "" {
-		t.Fatalf("日期不匹配应返回空, got %q", name)
+	if name, _, _, _ := pickUpdateAsset(&ghRelease{TagName: "v1.0.0"}); name != "" {
+		t.Fatalf("无升级包应返回空, got %q", name)
 	}
 }
 
-// TestCheck_Flow 检查链路四态：有新版 / 已最新 / 404（私有仓现状）/ 无稳定版。
+// TestCheck_Flow 检查链路五分支：有新版 / 已最新 / 404 静默失败 / 无稳定版 /
+// 开发构建无法比对。
 func TestCheck_Flow(t *testing.T) {
 	zipBytes := makeTestZip(t, []byte("MZfake-exe"))
 	digest := "sha256:" + hex.EncodeToString(func() []byte { sum := sha256.Sum256(zipBytes); return sum[:] }())

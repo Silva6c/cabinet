@@ -1,3 +1,6 @@
+// 本文件是桔库的门面层：.obk 打开（SQLite 只读）、单库查询与多库优先级。
+// Zobrist 查询键与 vmove 解码契约在 zobrist.go，FEN 解析在 fen.go。
+
 package book
 
 import (
@@ -11,7 +14,8 @@ import (
 
 // MoveRec 库内一条候选着法（对齐 上游 BookData 字段）。
 type MoveRec struct {
-	// Move UCCI 着法（终点在前，如 "h2e2"；vmove 解码）
+	// Move UCCI 着法（起点在前，如 "h2e2"；由 VmoveToUcci 解码 vmove 所得，
+	// 可直接按标准 UCCI 消费——协议 suggestion 帧与 moveCN 中文翻译同此口径）
 	Move string
 	// Score 库评分（vscore）
 	Score int
@@ -212,16 +216,6 @@ func (s *Store) Query(hash int64) (QueryResult, string, error) {
 		}
 	}
 	return QueryResult{}, "", nil
-}
-
-// FENHash 便捷入口：FEN → 查询键（不校验合法性——Zobrist 哈希向量测试的
-// 用例刻意包含两将照面等非法局面，与 Java 端逐字比对，不能走 Validated 版）。
-func FENHash(fen string) (int64, bool, error) {
-	b, redGo, err := ParseFEN(fen)
-	if err != nil {
-		return 0, false, err
-	}
-	return GetZobrist(b, redGo), redGo, nil
 }
 
 // FENHashValidated FEN → 查询键，附带合法性校验（入引擎前用）：

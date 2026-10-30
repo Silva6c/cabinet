@@ -88,7 +88,8 @@ func TestFpShort(t *testing.T) {
 	}
 }
 
-// TestFenBrief "最后 position"列内容：FEN 摘要 / 时间回退 / 双空占位。
+// TestFenBrief "最后 position"列内容：FEN 摘要 / 时间回退 / 双空返回空串
+// （UI 层 orDash 再补占位）。
 func TestFenBrief(t *testing.T) {
 	tm := time.Date(2026, 10, 2, 20, 33, 6, 0, time.Local)
 	if got := fenBrief("rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1", tm); got != "rnbakabnr/9/1c5c…" {

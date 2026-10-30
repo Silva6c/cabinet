@@ -1,3 +1,8 @@
+// 本文件是 position 链路送引擎前的局面安全闸门（校验细则与实测史见
+// PositionLegal）。自带轻量盘面解析（parseBoard），不复用 book.ParseFEN——
+// 此处只需字符格与王位/区域校验，无需棋子编号与行棋方段补齐，两条解析链
+// 口径独立、勿合并。
+
 package engine
 
 import "strings"

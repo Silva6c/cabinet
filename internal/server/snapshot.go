@@ -6,7 +6,8 @@ import (
 
 // EngineSnap 引擎实时指标快照（控制台引擎区显示）。
 // Depth/Nodes/NPS/Hashfull 为最近一次广播的搜索指标（收束后清零）；
-// HashMB/Threads/MultiPV/TargetDepth 为配置值（0 = 引擎自定，显示层兜底）。
+// HashMB/Threads/MultiPV/TargetDepth 为当前生效算力值（引擎桥支持调节时直读
+// 引擎，否则回退配置；0 = 引擎自定，显示层兜底）。
 type EngineSnap struct {
 	State       string
 	Depth       int

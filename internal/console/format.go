@@ -137,7 +137,8 @@ func fmtRTT(ms int64) string {
 	return fmt.Sprintf("%d ms", ms)
 }
 
-// fmtScore 分数（红方视角）：杀棋 "M3"/"-M2"；空传 "—"/"+2.60"/"-1.10"。
+// fmtScore 分数（红方视角）：杀棋 "M3"/"-M2"；厘兵 "+2.60"/"-1.10"；
+// 两指针均未上报返回 "—"。
 func fmtScore(cp, mate *int) string {
 	if mate != nil {
 		if *mate > 0 {

@@ -47,7 +47,8 @@ import java.io.File
 
 /**
  * 连线功能主界面：免责声明 → 连接参数（手填或应用内扫码）→ 授权（悬浮窗/通知/录屏）→ 启动识别服务。
- * 棋盘识别全自动（YOLO 检测，免校准）。说明性小字统一收进"关于"对话框。
+ * 棋盘识别全自动（免校准；ONNX 角点式与 YOLO 检测式双引擎可选，默认 ONNX）。
+ * 说明性小字统一收进"关于"对话框。
  */
 class AssistActivity : AppCompatActivity() {
 
@@ -357,7 +358,8 @@ class AssistActivity : AppCompatActivity() {
      * 正确。此前这些参数要等三步授权全做完才知道对不对（客户端只在录屏启动时
      * 创建），配对失败的用户会把三步授权全白做一遍。收到 welcome 即判成功并
      * 显示 PC 引擎状态；验证完立即 stop，与运行中识别服务的连接完全独立。
-     * 三种终态：welcome（成功）/ onConnectError（原因中文可读）/ 10s 超时。
+     * 四种终态：welcome（成功）/ onConnectError（原因中文可读）/ onError
+     * （电脑端返回错误）/ 10s 超时。
      */
     private fun testConnection() {
         if (testClient != null) return // 防重入：测试中再点无效

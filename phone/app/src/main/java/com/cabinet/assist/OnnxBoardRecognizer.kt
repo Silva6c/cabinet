@@ -102,9 +102,11 @@ class OnnxBoardRecognizer(
     }
 
     /**
-     * 单帧识别结果（screenRaw 约定与 DetectionBoardMapper 一致：[gy][gx]，gy=0 屏幕顶部）。
-     * orientation 恒为真实屏幕朝向（几何+内容联合判定，见 screenOrientation）；
-     * canonical 恒为规范布局（红在 y=9），二者即使 warp 被旋转也各自正确。
+     * 单帧识别结果。screenRaw 为 warp 空间布局 [gy][gx]：warp 正立时 gy=0 即屏幕
+     * 顶部，warp 被旋转时随 warp 转动、不必然对应屏幕朝向（YOLO 管线的 raw 才恒
+     * 为真屏幕空间）。orientation 恒为真实屏幕朝向（几何+内容联合判定，见
+     * screenOrientation）；canonical 恒为规范布局（红在 y=9），二者即使 warp 被
+     * 旋转也各自正确。
      */
     class OnnxResult(
         val screenRaw: Array<IntArray>,

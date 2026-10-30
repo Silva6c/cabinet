@@ -107,17 +107,30 @@ type TuneState struct {
 	Ready      bool // 引擎是否就绪（未就绪时调参控件禁用）
 }
 
-// TrendPoint 走势单点（红方视角；server.TrendPoint 的控制台侧拷贝）。
+// TrendPoint 走势单点（server.TrendPoint 的控制台侧拷贝；分数/胜率恒为红方视角，
+// 我方执色随点携带，绘制与文案在 trend.go 换算成"我方视角"）。
 type TrendPoint struct {
 	TsMs    int64 // 建议下发时刻（毫秒）
 	ScoreCP int   // 红方视角厘兵（将杀压 ±1500）
 	WinRate int   // 红方胜率百分比（引擎 WDL 缺省为 -1）
+	// MyRed/MySideKnown 该点对应时的我方执色（position.my_red）；Known=false 为
+	// 旧手机未上报，按红方视角展示（与引入字段前行为一致）
+	MyRed       bool
+	MySideKnown bool
 }
 
 // TrendSnapshot 当前对局走势序列拷贝。
 type TrendSnapshot struct {
 	GameID string
 	Points []TrendPoint
+}
+
+// TrendDev 走势设备切换列表的一项（2026-10-30 走势按设备分组）：Key 回传
+// TrendSeries 取该设备曲线；Label 为按钮文本（昵称·devid 短码，见 server 端
+// trendLabel）。
+type TrendDev struct {
+	Key   string
+	Label string
 }
 
 // Options 控制台配置与数据源（均为只读回调，刷新时调用）。
@@ -148,9 +161,14 @@ type Options struct {
 	TunerSet func(kind string, v int) string
 	// TunerClearHash 清空置换表（返回错误消息，空串 = 已受理）
 	TunerClearHash func() string
-	// TrendSeries 当前对局走势序列（走势面板数据源；nil = 面板缺席）。
-	// 服务端内存序列（trend.go），每局从 NEW_GAME 起笔、随建议终态生长。
-	TrendSeries func() TrendSnapshot
+	// TrendSeries 指定设备的走势序列（走势面板数据源；nil = 面板缺席）。
+	// devKey 空串 = 引擎焦点设备（最新上报 position 的来源）。服务端内存序列
+	// 按设备分组（trend.go），每组每局从 NEW_GAME 起笔、随建议终态生长。
+	TrendSeries func(devKey string) TrendSnapshot
+	// TrendDevices 有曲线的**在线**设备组列表（走势面板设备按钮排数据源；nil =
+	// 不提供切换、面板恒为焦点设备视图）。断联设备即从列表消失（按钮隐藏入口，
+	// 组数据保留、重连即回）；最近活跃在前。
+	TrendDevices func() []TrendDev
 	// ── 云库开关（开局库 tile 内的勾选框；CloudBookGet==nil = 整行缺席）──
 	// CloudBookEndpoint 展示用端点域名（静态文本；运行时不改端点，只切开关）
 	CloudBookEndpoint string
@@ -159,9 +177,23 @@ type Options struct {
 	// CloudBookSet 切换开关：实现侧立即生效（服务端原子位）并落盘 toml，
 	// 返回错误消息（空串 = 成功）
 	CloudBookSet func(on bool) string
+	// ── 默认走云库（高级面板→开局库的勾选框，2026-10-30；CloudFirstGet==nil = 行缺席）──
+	// 开启后云库命中即终（不查本地桔库/沉淀、不进引擎），未命中回落常规链；
+	// 语义矩阵见 server cloudLookupFirst
+	CloudFirstGet func() bool
+	// CloudFirstSet 切换"默认走云库"：立即生效 + 落盘 toml，返回错误消息（空 = 成功）
+	CloudFirstSet func(on bool) string
+	// ── 不走任何库（高级面板→开局库的勾选框，2026-10-30；SkipBooksGet==nil = 行缺席）──
+	// 开启后建议链跳过桔库/沉淀/云库（含 cloud_first），每步引擎直搜——优先级
+	// 高于 cloud_first，拦截位置与语义见 server handlePosition
+	SkipBooksGet func() bool
+	// SkipBooksSet 切换"不走任何库"：立即生效 + 落盘 toml，返回错误消息（空 = 成功）
+	SkipBooksSet func(on bool) string
 	// FirewallStatus 防火墙告警查询：非空 = 横幅告警文案（TCP 端口被防火墙
 	// 静默拦截）；空串 = 不告警。nil = 功能不可用（横幅不出现）。
-	// 刷新循环 1.5s 调一次——实现侧必须读内存缓存，禁止每次拉 netsh 子进程。
+	// 刷新循环 1.5s 调一次——铁律是刷新路径上绝不拉 netsh 子进程（检测只在
+	// 启动与放行后各做一次）；规则态读内存，"不再提示"读小状态文件属可承受
+	// （实现见 cmd/cabinet/firewall.go）。
 	FirewallStatus func() string
 	// FirewallAllow 一键放行（UAC 提权加防火墙规则），返回错误消息（空 = 已受理；
 	// 放行结果异步，状态经后续刷新周期体现）
@@ -203,24 +235,32 @@ type Console struct {
 	engSufCells map[string]func(string)
 	// 连接区（v4 矮便当盒 2026-10-20：表头恒显+横排六列卡片行；widget.Table
 	// 与两版卡片形态均退役——点行/点空白取消选中的交互保留）
-	clientRowsBox  *fyne.Container // 数据行列表容器（rebuildClientRows/syncClientRows 维护）
-	clientListSetH func(float32)   // 行列表可视区调高（行数少随内容、100px 封顶内部滚动）
-	clientRows     []ClientRow
-	connCountSet   func(string)  // "N 台"（canvas.Text setter）
-	fpChip         *fpChip       // 证书指纹分组短式（只读核对；完整值生成二维码用）
-	kickBtn        *hiliteButton // 断开选中会话（选中行后可用；glow 外发光主按钮）
-	selectedID     string        // 当前选中行的完整会话 ID
+	clientRowsBox *fyne.Container // 数据行列表容器（rebuildClientRows/syncClientRows 维护）
+	clientRows    []ClientRow
+	connCountSet  func(string)  // "N 台"（canvas.Text setter）
+	fpChip        *fpChip       // 证书指纹分组短式（只读核对；完整值生成二维码用）
+	kickBtn       *hiliteButton // 断开选中会话（选中行后可用；glow 外发光主按钮）
+	selectedID    string        // 当前选中行的完整会话 ID
 	// 建议流
 	sugTable *widget.Table
 	sugRows  []SugRow
+	sugSig   string // 建议流内容签名（行数+首末行时间/着法）——不变则跳过表格重建
 	sugCount *widget.Label
 	// 库区 / 日志区
-	bookLabel *widget.Label
-	logRich   *widget.RichText // 日志尾部（紧凑渲染：时间+级别着色，见 refreshLog）
-	logScroll *container.Scroll
+	bookLabel    *widget.Label
+	bookListSetH func(float32)    // 库列表可视区调高（行数少随内容、300px 封顶内部滚动）
+	logRich      *widget.RichText // 日志尾部（紧凑渲染：时间+级别着色，见 refreshLog）
+	logScroll    *container.Scroll
 	// 云库开关行（tileBooks 内；CloudBookGet==nil 时不创建）
 	cloudChk  *widget.Check
 	cloudBusy atomic.Bool // 刷新回写 SetChecked 时抑制 OnChanged 回环（fyne SetChecked 会回调）
+	// 云库说明小字（tileBooks caption）：随 cloud_first 切换措辞（cloudLookupFirst
+	// 语义矩阵的 UI 面）——静态文案会在开关切换后失真
+	cloudHintSet   func(string)
+	cloudFirstChk  *widget.Check // "默认走云库"（高级面板→开局库；CloudFirstGet==nil 时不创建）
+	cloudFirstBusy atomic.Bool   // 同款回环抑制
+	skipBooksChk   *widget.Check // "不走任何库"（高级面板→开局库；SkipBooksGet==nil 时不创建）
+	skipBooksBusy  atomic.Bool   // 同款回环抑制
 
 	// 仪表标签动态化（时间制时"深度 / 目标"→"用时 / 上限"）
 	engLabelCells map[string]func(string)
@@ -237,11 +277,6 @@ type Console struct {
 	advCurrent  string                       // 当前展开的面板名（空 = 收起）
 	contentRoot fyne.CanvasObject            // 根内容 vbox（buildContent 建好即存；
 	// foldedHeight 靠它实测内容最小高——窗口高自适应内容的依据）
-
-	// 头部状态 chip（引擎/库/连接，与手机端同一套状态语言）
-	chipEngine *statusChip
-	chipBook   *statusChip
-	chipConn   *statusChip
 
 	// 防火墙告警横幅（头部与 bento 之间；仅告警时显示，见 firewallBanner）
 	firewallBox  *fyne.Container
@@ -271,19 +306,34 @@ type Console struct {
 	trendCurve   *trendCurve  // 折线带（自绘 canvas.Line）
 	trendWin     *canvas.Text // 头部当前胜率/状态小字
 	trendWinSet  func(string) // 胜率文案 setter（重复值不重绘）
-	trendLastKey string       // 上次重建键（gameID|点数），变了才重建折线
+	trendLastKey string       // 上次重建键（设备键|gameID|点数|末点分|执色），变了才重建曲线
+	logFollow    bool         // 日志面板"强制贴底一次"（展开面板时置位，refresh 消费）
+
+	// 走势设备切换（2026-10-30 分组立项）：多设备时 04 头部出现横向设备按钮排，
+	// 单设备零增重。trendDevKey 空 = 跟随焦点设备（此时无高亮差异，单设备常态）。
+	trendDevKey     string                    // 选中设备键（空 = 焦点设备）
+	trendDevBtnsBox *fyne.Container           // 按钮排容器（sectionTrend 建，组>1 才显示）
+	trendDevBtns    map[string]*widget.Button // 设备键 → 按钮（点击/高亮同步用）
+	trendDevBtnsKey string                    // 按钮排内容键（组列表变化才重建，防 1.5s 抖动）
 }
 
-// 窗口默认尺寸（2026-10-18 实测重校"调到刚好"）：
+// 窗口默认尺寸（2026-10-18 实测重校"调到刚好"；2026-10-29 顶栏并入引擎 tile
+// 后兜底高随内容下调）：
 //   - 宽 960 固定：建议流 7 列合计 920（90+130+190+100+250+90+70）+ 左右呼吸
 //     边距与竖向滚动条占位（旧值 900 连最右"深度"列都在可视区外）
 //   - 高不再用固定值：foldedHeight 按根内容实测最小高自适应（旧固定 570 比内容
 //     高 ~65px，底部留出一条空白"下巴"——用户实测反馈后改掉）
 var (
-	winSizeFolded = fyne.NewSize(960, 570) // 高仅作 contentRoot 未就绪时的兜底
+	winSizeFolded = fyne.NewSize(960, 530) // 高仅作 contentRoot 未就绪时的兜底
 	// rootGap 根布局纵向间距（buildContent 的 vbox 与 cols2 共用视觉语言；
 	// expandedHeight/foldedHeight 计算时引用同一常量，防两处魔数静默失配）
 	rootGap float32 = 12
+	// advMaxExpand 展开态窗口高度上限（2026-10-30 重定语义：屏幕安全值而非内容
+	// 钳制）。高级面板盒随内容自适应、超高内容盒内滚动（建议流 ~345 / 日志 ~350 /
+	// 其余 100-200），展开总高 = 折叠内容 + 盒 ≈ 730-990，1080p 工作区完整显示
+	// **便当盒永不被裁**；1040 仅供极端内容兜底，矮屏（768 高笔记本）由根 scroll
+	// 兜底滚动。
+	advMaxExpand = float32(1040)
 )
 
 // foldedHeight 折叠态窗口高 = 根内容实测最小高 + 一个 rootGap 呼吸。内容增高
@@ -382,8 +432,10 @@ func (c *Console) refreshLoop() {
 }
 
 // build 组装各分区（便当盒布局，棋韵 §5.3）：
-// 头部（图标/标题/三枚状态 chip）→ 两列 bento（01 引擎 tile / 02 开局库 tile）
-// → 03 连接 tile（全宽）→ 04 高级功能按钮排 → 展开面板。整体放进滚动容器。
+// 两列 bento（01 引擎 tile——含三枚状态 chip / 02 开局库 tile）→ 03 连接 tile
+// （全宽）→ 04 走势 tile（全宽）→ 05 高级功能按钮排 → 展开面板。
+// 整体放进滚动容器。（2026-10-29 用户定稿：原顶栏 logo+标题删除、三态 chip
+// 并入 01 引擎 tile 头部——顶栏整行省出，系统窗口标题仍带"内阁 cabinet vc…"）
 func (c *Console) build() {
 	c.win.SetContent(c.buildContent())
 }
@@ -395,7 +447,6 @@ func (c *Console) buildContent() fyne.CanvasObject {
 	c.advPanels = map[string]fyne.CanvasObject{}
 	c.advStack = container.NewStack()
 	root := container.New(&vbox{gap: rootGap},
-		c.headerBar(),
 		c.firewallBanner(),
 		container.New(&cols2{gap: rootGap}, c.sectionEngine(), c.tileBooks()),
 		c.sectionClients(),
@@ -474,29 +525,6 @@ func (c *Console) onFirewallDismiss() {
 	c.firewallBox.Hide()
 }
 
-// headerBar 顶部头：图标（炭面圆角小方衬托，裸图无落点）＋ 微标/标题 ＋ 右侧
-// 三枚状态 chip ＋ 底部 1dp 细线（设计稿 §5.1 头部细线，折叠/展开恒显的骨架线）
-func (c *Console) headerBar() fyne.CanvasObject {
-	icon := canvas.NewImageFromResource(c.opts.Icon)
-	icon.FillMode = canvas.ImageFillContain
-	iconBg := canvas.NewRectangle(qiSurface)
-	iconBg.CornerRadius = 8
-	micro := qiText("内阁 · CABINET", qiSize(theme.SizeNameCaptionText), qiMuted, false, false)
-	title := qiText("内阁 · 控制台", 22, qiForeground, false, true)
-	left := container.NewHBox(
-		container.NewStack(iconBg, container.New(padAll(4), container.New(sizedBox{w: 26, h: 26}, icon))),
-		container.NewVBox(micro, title),
-	)
-	c.chipEngine = newStatusChip()
-	c.chipBook = newStatusChip()
-	c.chipConn = newStatusChip()
-	right := container.NewHBox(
-		centerV(c.chipEngine.object()), centerV(c.chipBook.object()), centerV(c.chipConn.object()),
-	)
-	// 底部细线：fixedHeight 锁 1dp（Rectangle MinSize 为 0，需容器给高度）
-	return container.NewBorder(nil, container.New(&fixedHeight{h: 1}, canvas.NewRectangle(qiLine1)), left, right)
-}
-
 // toggleAdvanced 复用预建面板对象：RemoveAll 后重新 Add 同一 CanvasObject，
 // 在 fyne 单父约束下合法；面板内部状态（表格选中、日志滚动位置）因此跨
 // 开关保留。勿改成每次 toggle 重建——丢状态，且按钮高亮/nil 过滤需重做
@@ -523,7 +551,12 @@ func (c *Console) toggleAdvanced(name string) {
 	}
 	if c.advCurrent != "" {
 		c.animateWinSize(c.expandedHeight())
-		c.refresh() // 新面板立即填充（含日志滚底），不等下一个刷新周期
+		if c.advCurrent == "log" {
+			// 展开日志面板强制贴底一次：wasAtBottom 判定依赖"当前已贴底"状态，
+			// 刚展开时视口/偏移尚未就绪，不置位会停在顶部
+			c.logFollow = true
+		}
+		c.refresh() // 新面板立即填充（日志面板含滚底），不等下一个刷新周期
 	} else {
 		c.animateWinSize(fyne.NewSize(winSizeFolded.Width, c.foldedHeight()))
 	}
@@ -552,16 +585,20 @@ func (c *Console) animateWinSize(to fyne.Size) {
 	c.sizeAnim.Start()
 }
 
-// expandedHeight 展开态窗口 = 根内容实测最小高 + 一个 rootGap 呼吸。
+// expandedHeight 展开态窗口 = 根内容实测最小高 + 一个 rootGap 呼吸，钳
+// advMaxExpand 上限（2026-10-29 用户定稿：弹出信息有限，矮屏不再被系统钳窗
+// 裁内容；超限部分根 scroll 兜底滚动）。
 // ⚠展开面板挂进 advStack 后 contentRoot 的 MinSize 已自然包含面板高度
 // （2026-10-18 修复：此前用动态 foldedHeight 当基准再加一遍面板——而 folded
 // 在 Add 后同样已含面板，面板被算两次，窗口多出一大截空白下巴）。
-// 内容或面板增高时窗口自动跟上，"展开被裁一块要手动拉"的复发路径就此断掉。
 // 高度向上取整：窗口必须是整数像素，否则截图/渲染边界出现 1px 漂移。
 func (c *Console) expandedHeight() fyne.Size {
 	h := winSizeFolded.Height
 	if c.contentRoot != nil {
 		h = float32(math.Ceil(float64(c.contentRoot.MinSize().Height))) + rootGap
+	}
+	if h > advMaxExpand {
+		h = advMaxExpand
 	}
 	return fyne.NewSize(winSizeFolded.Width, h)
 }

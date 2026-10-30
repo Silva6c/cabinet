@@ -43,6 +43,11 @@ type Config struct {
 type CloudBookConfig struct {
 	// Enable 云库查询开关（默认关：开启即同意把对局局面 FEN 发往端点）
 	Enable bool `toml:"enable"`
+	// CloudFirst 默认走云库（2026-10-30 用户定稿：默认关）。开启后（仍需
+	// Enable=true）每条局面先查云库——命中即下发 cloud 建议并终（不查本地
+	// 桔库/沉淀、不进引擎，与桔库命中"命中即 return"同构）；未命中/失败自动
+	// 回落常规链。隐私口径与 Enable 一致：开启后局面 FEN 必然发往端点。
+	CloudFirst bool `toml:"cloud_first"`
 	// Endpoint 查询端点（action=queryall&board=<FEN> 形状，chessdb.cn 兼容）
 	Endpoint string `toml:"endpoint"`
 	// APIKey 自带 API 的密钥（chessdb 免费端点留空）
@@ -101,6 +106,11 @@ type EngineConfig struct {
 	// MoveTimeMS 时间制搜索上限（毫秒）；0 = 按深度（默认）。>0（500–20000）
 	// 时每步 go movetime——快棋/跟盘节奏下深度制会拖慢出建议，时间制恒定耗时
 	MoveTimeMS int `toml:"movetime_ms"`
+	// SkipBooks 不走任何库（2026-10-30 用户定稿：默认关）。开启后建议链跳过
+	// 全部库——桔库、沉淀、云库（含 cloud_first）都不查，每步引擎直搜；
+	// 只停"查"不停"记"（引擎建议照常沉淀入库，建议流不断供）。PC 高级面板
+	// →开局库可热切并落盘回写本文件。优先级高于 cloud_first。
+	SkipBooks bool `toml:"skip_books"`
 }
 
 // DefaultEngine 默认引擎配置（路径相对项目根运行目录）。

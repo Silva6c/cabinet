@@ -1,6 +1,6 @@
-// Package library 是库目录管理器（报告 §4 的 library 模块）：
-// 监听 library/books/ 目录，自动解压 .obk.zip、在库文件增删/更新时
-// 热重建 book.Store 并回调（server 无缝切换，不重启服务）。
+// Package library 是库目录管理器：监听配置的库目录（books_dir，默认
+// library/books），自动解压 .obk.zip、在库文件增删/更新时热重建
+// book.Store 并回调（server 无缝切换，不重启服务）。
 package library
 
 import (
@@ -123,7 +123,6 @@ func (m *Manager) Run(ctx context.Context) error {
 	// 它，静默达标即视为一轮变更结束。短了会把一轮变更拆成多次 reload（每次
 	// 全量重开库），长了热加载滞后可感。解压写 .obk 的二级事件会再排一轮防抖，
 	// 下一轮经 unzipIfNeeded 判"已最新"空转收敛，不担心无限循环。
-	// 防抖：编辑器/解压工具常触发连续事件，静默 800ms 后重载一次
 	var (
 		debounce *time.Timer
 		mu       sync.Mutex
@@ -179,7 +178,8 @@ func (m *Manager) reload(reason string) error {
 	if err != nil {
 		return err
 	}
-	// 屏蔽 zip 解压中间产物之外的临时文件
+	// 防御性后缀收口：Glob 模式已限定 *.obk，此处按后缀（大小写不敏感）再筛
+	// 一道，防模式语义变化混入临时/杂项文件——真正的入库集合以它为准。
 	var clean []string
 	for _, p := range paths {
 		if !strings.HasSuffix(strings.ToLower(p), ".obk") {

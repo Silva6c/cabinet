@@ -141,6 +141,20 @@ func (h *Hub) Count() int {
 	return len(h.conns)
 }
 
+// OnlineDeviceKeys 当前在线连接的走势设备键集合（devKeyOf 形态："d:"+devid /
+// "s:"+会话 ID）。走势面板的设备按钮只显示在线设备——断联即隐藏入口
+// （2026-10-30 用户定稿）；组数据本身保留在内存可回看，重连后按钮与曲线
+// 一起回来（trend.go 组生命周期）。
+func (h *Hub) OnlineDeviceKeys() map[string]bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	keys := make(map[string]bool, len(h.conns))
+	for c := range h.conns {
+		keys[devKeyOf(c)] = true
+	}
+	return keys
+}
+
 // Snapshots 全部连接的展示快照（按连接时间升序；控制台连接区用）。
 func (h *Hub) Snapshots() []ClientSnap {
 	h.mu.Lock()

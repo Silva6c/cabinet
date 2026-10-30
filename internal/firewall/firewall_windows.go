@@ -13,8 +13,10 @@
 // （config 默认 Bind、scripts/allow-9527.bat、qr 回退端口、本包规则名推导）
 // ——本包不硬编码端口，一律由调用方从 cfg.Bind 推导传入。
 //
-// 【windows-only】本包只有 _windows 实现（netsh/ShellExecuteW 均系统专属），
-// 与 cmd/cabinet/singleton_windows.go 同惯例不设跨平台 stub；测试文件同理。
+// 【平台三件套】本包 = firewall_plan.go（跨平台纯逻辑，Plan/规则名推导）+
+// 本文件（Windows 实现，netsh/ShellExecuteW 均系统专属）+ firewall_other.go
+// （!windows 存根，让 cmd/cabinet 跨平台编译通过）；firewall_test.go 只测
+// 纯逻辑部分，任意平台可跑。
 package firewall
 
 import (

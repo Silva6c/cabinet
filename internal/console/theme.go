@@ -25,10 +25,13 @@ var (
 	qiMuted      = color.NRGBA{R: 0x9A, G: 0x9E, B: 0xA6, A: 0xFF} // 次级文字
 
 	// 状态语义色（与手机端同一套语言：玉=就绪 / 琥珀=等待 / 警示=错误）
-	qiAmber   = color.NRGBA{R: 0xFF, G: 0xC1, B: 0x07, A: 0xFF} // 琥珀（候选/等待）
-	qiJade    = color.NRGBA{R: 0x81, G: 0xC7, B: 0x84, A: 0xFF} // 玉字（就绪文字）
-	qiJadeDot = color.NRGBA{R: 0x4C, G: 0xAF, B: 0x50, A: 0xFF} // 玉点
-	qiDanger  = color.NRGBA{R: 0xFF, G: 0x52, B: 0x52, A: 0xFF} // 警示红
+	qiAmber  = color.NRGBA{R: 0xFF, G: 0xC1, B: 0x07, A: 0xFF} // 琥珀（候选/等待）
+	qiJade   = color.NRGBA{R: 0x81, G: 0xC7, B: 0x84, A: 0xFF} // 玉字（就绪文字）
+	qiDanger = color.NRGBA{R: 0xFF, G: 0x52, B: 0x52, A: 0xFF} // 警示红
+
+	// 走势曲线劣势段（2026-10-29 天天象棋风定稿：优=朱砂/劣=靛青双色面积图；
+	// 仅图形用不承载文字，对比度按图形可见性选档）
+	qiIndigo = color.NRGBA{R: 0x64, G: 0x9E, B: 0xD2, A: 0xFF} // 靛青
 
 	// 描边两档（分层用，不用阴影；与手机端 qi_line1/2 同值）：
 	// line1 进度条轨道 / line2 卡片与按钮边界。

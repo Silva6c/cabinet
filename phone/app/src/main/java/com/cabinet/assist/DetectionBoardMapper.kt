@@ -118,7 +118,7 @@ object DetectionBoardMapper {
      * 令 warp 把棋盘采成旋转 180° 的俯视图；此时 detectOrientation（双王行位）
      * 只反映 warp 内部朝向，不反映屏幕朝向。本函数与内容判定联合：红方在 raw
      * 的行由 contentOrient 推出（STANDARD=第 9 行 / FLIPPED=第 0 行），该行映射
-     * warp 底边（corners[2..3]）或顶边（corners[0..1]），再回原图比 y——
+     * warp 底边（角点 2/3：左下+右下）或顶边（角点 0/1：左上+右上），再回原图比 y——
      * 无论 warp 是否旋转、无论 pose 用何种角点语义，结果恒为真实屏幕朝向。
      * 逐帧无状态（下一帧是什么就识别什么）；假设棋盘竖放（高>宽，横屏不支持）。
      */

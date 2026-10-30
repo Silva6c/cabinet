@@ -105,8 +105,9 @@ func (c *Checker) downloadInstallTo(ctx context.Context, dir, exeName string) {
 
 // doDownload 流式下载资产到 dest：先写 .part（半截文件绝不冒充成品），完成后
 // 原子改名。进度按 Content-Length（缺省回退资产 size 字段）回写状态机。
-// 读空闲超时：每次 Read 前重置定时器，30s 无数据 → 置 idleExpired 标志并
-// cancel——大文件慢速经代理属正常，不能用总超时一刀切。
+// 读空闲超时：定时器自请求发出即起算（等响应头也计入空闲窗口），此后每次
+// Read 前重置；30s 无数据 → 置 idleExpired 标志并 cancel——大文件慢速经代理
+// 属正常，不能用总超时一刀切。
 func (c *Checker) doDownload(ctx context.Context, cancel context.CancelFunc, assetURL, dest string, sizeHint int64) error {
 	partPath := dest + ".part"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, assetURL, nil)
@@ -184,7 +185,8 @@ func (c *Checker) takeIdleExpired() bool {
 }
 
 // verifyFileSHA256 对照官方 digest（"sha256:<hex>"）校验文件完整性。
-// 无 digest 的资产在 pickUpdateAsset 阶段已被排除，走到这里 digest 必有。
+// 无 digest 的资产已被 CanInstall 门禁排除（canInstallLocked 要求 digest 非空；
+// pickUpdateAsset 本身不筛 digest），走到这里 digest 必非空。
 func verifyFileSHA256(path, digest string) error {
 	const prefix = "sha256:"
 	if !strings.HasPrefix(digest, prefix) {
@@ -207,7 +209,8 @@ func verifyFileSHA256(path, digest string) error {
 
 // extractExe 从升级 zip 解出 cabinet.exe 写成 <exeName>.new（目标文件名固定，
 // 不按 zip 内路径落盘——zip slip 无落脚点）。校验非空 + MZ 头（PE 标识）。
-// zip 内按 basename 匹配（portable-pack 打包可能是根路径也可能带目录前缀）。
+// zip 内按 basename 匹配（现行 portable-pack 产物在 zip 根；带目录前缀的条目
+// 同样兼容）。
 func extractExe(zipPath, dir, exeName string) error {
 	r, err := zip.OpenReader(zipPath)
 	if err != nil {

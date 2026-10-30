@@ -158,20 +158,17 @@ func (g *cols2) MinSize(objs []fyne.CanvasObject) fyne.Size {
 	return fyne.NewSize(2*220+g.gap, h)
 }
 
-// centerV 纵向居中包装（Border 的左右槽位会把对象拉满高度；状态 chip 需要保持胶囊高度）
-func centerV(obj fyne.CanvasObject) fyne.CanvasObject {
-	return container.NewVBox(layout.NewSpacer(), obj, layout.NewSpacer())
-}
-
 // ---------- 组合件 ----------
 
-// bentoTile 便当盒 tile：圆角炭面 + 1dp 描边 + 内边距（描边分层代替阴影）
+// bentoTile 便当盒 tile：圆角炭面 + 1dp 描边 + 内边距（描边分层代替阴影）。
+// 内边距 8（2026-10-30 用户定稿 12→8：设计哲学清爽简洁，减边框占地让信息
+// 更多；圆角 12 与主题 SizeNameCardRadius 同步，theme.go 两处勿失配）。
 func bentoTile(content fyne.CanvasObject) fyne.CanvasObject {
 	rect := canvas.NewRectangle(qiSurface)
 	rect.CornerRadius = 12
 	rect.StrokeColor = qiLine2
 	rect.StrokeWidth = 1
-	return container.NewStack(rect, container.New(padAll(12), content))
+	return container.NewStack(rect, container.New(padAll(8), content))
 }
 
 // wrapBento 高级面板统一包便当盒卡片——展开态与折叠态 tile 同语言
@@ -196,60 +193,6 @@ func sectionHeader(num, title string, extra ...fyne.CanvasObject) fyne.CanvasObj
 		}
 	}
 	return row
-}
-
-// statusChip 状态点 + 文案胶囊（点色随状态更新；头部与 tile 共用一套语言）。
-//
-// 【雷区】不把 *fyne.Container 嵌进自定义类型：实测嵌入后 fyne 的绘制遍历
-// 不会走进内层容器——同一棵控件树包一层壳就整体不显示（MinSize 正常、像素为零）。
-// 这里改为持有 box 字段，由 object() 暴露给容器。
-type statusChip struct {
-	box fyne.CanvasObject
-	dot *canvas.Circle
-	lbl *canvas.Text
-}
-
-// object 供容器摆放的组合对象（每个 chip 独占一份实例）
-func (c *statusChip) object() fyne.CanvasObject { return c.box }
-
-func newStatusChip() *statusChip {
-	dot := canvas.NewCircle(qiDisabled)
-	lbl := qiText("—", qiSize(theme.SizeNameCaptionText), qiForeground, false, false)
-	rect := canvas.NewRectangle(color.Transparent)
-	rect.CornerRadius = 10
-	rect.StrokeColor = qiLine2
-	rect.StrokeWidth = 1
-	content := container.New(
-		&pad{top: 3, right: 10, bottom: 3, left: 8},
-		container.NewHBox(container.New(sizedBox{w: 7, h: 7}, dot), lbl),
-	)
-	return &statusChip{box: container.NewStack(rect, content), dot: dot, lbl: lbl}
-}
-
-// set 更新状态 chip：文案 + 点色（玉=就绪 / 琥珀=等待 / 灰=空闲 / 警示=错误）。
-// 实心态；从空心态切回时清描边。
-func (c *statusChip) set(text string, col color.Color) {
-	c.dot.StrokeColor = color.Transparent
-	c.dot.StrokeWidth = 0
-	c.dot.FillColor = col
-	c.dot.Refresh()
-	if c.lbl.Text != text {
-		c.lbl.Text = text
-		c.lbl.Refresh()
-	}
-}
-
-// setHollow 空心态（设计稿 §4.6"离线/未启动＝灰空心○"）：透明填充 + 1.5dp
-// 描边环——空闲与就绪仅剩色相之差时，用形状把"不在场"表达出来。
-func (c *statusChip) setHollow(text string, col color.Color) {
-	c.dot.FillColor = color.Transparent
-	c.dot.StrokeColor = col
-	c.dot.StrokeWidth = 1.5
-	c.dot.Refresh()
-	if c.lbl.Text != text {
-		c.lbl.Text = text
-		c.lbl.Refresh()
-	}
 }
 
 // statBig 大数字（22pt sans Bold）＋ 可选后缀小字 ＋ 小标签。
@@ -317,7 +260,8 @@ func (c *fpChip) set(text string) {
 	c.txt.Refresh()
 }
 
-// hbar 细进度条（高 6）：fyne 的 ProgressBar 默认太厚，与 tile 的密度不符。// 轨道 + 按比例宽度的填充；返回 setter（0–1）。
+// hbar 细进度条（高 6）：fyne 的 ProgressBar 默认太厚，与 tile 的密度不符。
+// 轨道 + 按比例宽度的填充。
 type hbar struct {
 	frac        float32
 	track, fill *canvas.Rectangle
@@ -359,20 +303,6 @@ func newHBar() (fyne.CanvasObject, func(float32)) {
 	return box, set
 }
 
-// stateColor 引擎/连接状态 → 状态点色（与手机端同一套语义）
-func stateColor(state string) color.Color {
-	switch state {
-	case "ready", "searching":
-		return qiJadeDot
-	case "loading", "offline":
-		return qiAmber
-	case "error":
-		return qiDanger
-	default:
-		return qiDisabled
-	}
-}
-
 // ---------- 连接区横排行（表格式便当盒，2026-10-20 v3） ----------
 
 // clientColW 连接区横排列宽（尾列"最后 position"锁 260——fen 摘要 16 字符
@@ -385,7 +315,8 @@ func stateColor(state string) color.Color {
 var clientColW = []float32{110, 120, 130, 70, 70, 60, 260}
 
 // clientHeaderRow 表头行（公用设施，用户要求"会话/客户端等排在最上面，和之前
-// 类似"）：七列标题横排、恒显不随数据行滚动。固定列宽经 sizedBox，尾列弹性。
+// 类似"）：七列标题横排、恒显不随数据行滚动。七列全部 sizedBox 锁宽（含尾列，
+// 与数据行共用 clientColW——锁宽缘由见其注释）。
 func clientHeaderRow() fyne.CanvasObject {
 	titles := []string{"会话", "设备", "客户端", "版本", "RTT", "路径", "最后 position"}
 	box := container.NewHBox()
@@ -417,7 +348,7 @@ type clientRow struct {
 	// 本组件是真 widget（BaseWidget + CreateRenderer 返回该树），可以安全持有。
 	contentBox *fyne.Container   // renderer 根（Stack：卡片底 + 横排单元格）
 	content    *canvas.Rectangle // 卡片底（qiSurface；选中态换描边色/粗细）
-	labels     []*widget.Label   // 六列值（顺序同表头；Truncation 截断保列对齐）
+	labels     []*widget.Label   // 七列值（顺序同表头；Truncation 截断保列对齐）
 }
 
 // widthBox 只锁宽度的布局（高度取孩子自然高）：连接区数据列对齐用——单元格
@@ -518,8 +449,8 @@ func (r *clientRow) set(row ClientRow, selected bool) {
 	}
 
 	// 设备（列 1，2026-10-28 昵称功能）：昵称·devid前4；旧手机端未上报昵称时
-	// 退 "—"（会话列已有短 ID 可辨）。devid 后缀恒带，两台同型号默认名撞名
-	// 时也能分清
+	// 退 "—"（会话列已有短 ID 可辨）。有昵称则恒带 devid 后缀，两台同型号
+	// 默认名撞名时也能分清
 	dev := row.Name
 	if dev != "" && len(row.Devid) >= 4 {
 		dev += "·" + row.Devid[:4]

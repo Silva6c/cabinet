@@ -6,6 +6,18 @@ import (
 	"time"
 )
 
+// enginePump 消费引擎事件，按协议节奏下发：
+//   - 状态变化 → 立即广播 status（协议 §4.6）
+//   - 搜索中 depth 变化或 bestmove 变化 → 立即定向下发 suggestion 给局面归属连接（§4.5）
+//   - 搜索中其余 info → 500ms 节流广播 status（带实时指标）
+//   - bestmove 终态 → 定向终值 suggestion + 广播 status
+//
+// suggestion 仅当结果 FEN 与最近客户端 position 一致时下发（"最新覆盖"幂等，
+// 同时丢弃预热结果与被打断搜索的残留）；status 是引擎全局状态，保持广播。
+//
+// 并发约束：本函数是引擎事件唯一消费者，必须保持单 goroutine——事件须按
+// 引擎发出顺序应用，lastDepth/lastBest 门控与 status 广播的单调序都依赖
+// 这一顺序；并行消费会丢事件、乱序，并与门控状态竞争。
 func (s *Server) enginePump(ctx context.Context) {
 	var (
 		lastDepth    = -1
@@ -34,7 +46,11 @@ func (s *Server) enginePump(ctx context.Context) {
 				// "最新覆盖"（协议 §4.5）：中间 info 只属于它那次搜索的请求局面。
 				// 与最新请求不符（预热、崩溃重启后的兜底搜索、已被覆盖的旧请求）
 				// 一律不广播不缓存——否则会冒充最新局面的建议误导手机端。
-				if want, _ := s.lastFen.Load().(string); want == "" || ev.Fen != want {
+				// want 在门控处单次读取后向下传：buildSuggestion 内不再二次
+				// Load——两次读取之间 handlePosition 可能 Store 新 fen，旧搜索
+				// 的着法会配上新局面 FEN 下发（手机端迟到过滤随之失效）。
+				want, _ := s.lastFen.Load().(string)
+				if want == "" || ev.Fen != want {
 					continue
 				}
 				info := ev.Info
@@ -54,7 +70,7 @@ func (s *Server) enginePump(ctx context.Context) {
 				if depthChanged || bestChanged {
 					// 协议 §4.5：depth 提升或 bestmove 变化即推（定向给局面归属连接）
 					lastDepth, lastBest = info.Depth, best
-					if sug, ok := s.buildSuggestion(info); ok {
+					if sug, ok := s.buildSuggestion(info, want); ok {
 						s.sendSuggestionToOwner(sug)
 					}
 					// depth 变化同时放宽 status 节流（§4.6：depth 变化也推 status）
@@ -104,9 +120,14 @@ func (s *Server) enginePump(ctx context.Context) {
 						ScoreCP: sug.ScoreCP(), ScoreMate: sug.ScoreMate(),
 						PV: sug.PV, Depth: sug.Depth,
 					})
-					// 走势序列：每局面一个终态点（redWdlPercent 已换算红方视角）
-					if pt, ok := trendPointFromSug(sug.ScoreCP(), sug.ScoreMate(), sug.WdlW); ok {
-						s.trendAppend(pt)
+					// 走势序列：每局面一个终态点，按设备分组追加——归属 = 最新
+					// position 来源设备（ownerDev，与建议下发同源）；组内同局面
+					// 重搜（切参数/补发）替换末点不追加。空键防御性不落点：上方
+					// lastFen 门控已保证走到这里必有归属（trend.go 文件头）。
+					if key, _ := s.ownerDev.Load().(string); key != "" {
+						if pt, ok := trendPointFromSug(r.Fen, sug.ScoreCP(), sug.ScoreMate(), sug.WdlW); ok {
+							s.trendAppend(key, pt)
+						}
 					}
 				} else if r.BestMove == "null" {
 					// "null" = 引擎无合法着法（2026-10-24 实锤）：真皮卡鱼对绝杀/
@@ -131,9 +152,11 @@ func (s *Server) enginePump(ctx context.Context) {
 // buildSuggestion 由搜索中 info 构造 suggestion。分数换算唯一入口是
 // engine.ToRedScore（走子方视角→红方，含 mate 符号取负，见 engine/uci.go）：
 // 下发侧换算一次后，沉淀写入与沉淀复用（handlePosition 步骤 2）都是红方
-// 视角，全链路禁止二次取负。info 事件不带 FEN，下发前用 lastFen 校验。
-func (s *Server) buildSuggestion(info *engine.Info) (Suggestion, bool) {
-	want, _ := s.lastFen.Load().(string)
+// 视角，全链路禁止二次取负。info 事件不带 FEN，want 由 enginePump 门控处
+// 单次读取 lastFen 后传入（单一事实源）——本函数内不再二次 Load，防门控与
+// 构造之间 lastFen 被新 position 覆盖导致旧着法配新局面；空 want 防御仅兜
+// 未来新增调用方（现有门控已保证非空）。
+func (s *Server) buildSuggestion(info *engine.Info, want string) (Suggestion, bool) {
 	if want == "" {
 		return Suggestion{}, false // 无客户端请求过：预热等结果不广播
 	}
@@ -262,5 +285,3 @@ func bestOfLine(info *engine.Info) string {
 	}
 	return ""
 }
-
-// errorFrameFor 将解码错误映射为协议错误帧（协议 §5 错误码）。

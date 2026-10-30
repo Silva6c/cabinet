@@ -106,8 +106,8 @@ public class Piece {
     }
 
     /**
-     * Return true if p is a white piece, false otherwise.
-     * Note that if p is EMPTY, an unspecified value is returned.
+     * 红方棋子判定（值域 1..7）。EMPTY(0) 与越界值（如越界取子返回的 -1）
+     * 一律返回 false——区间判断的确定结果，并非"未指定"。
      */
     public static boolean isRed(int pType) { return pType <= WBING && pType >= WSHUAI; }
     public static boolean isBlack(int pType) {

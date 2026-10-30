@@ -19,8 +19,9 @@ import com.cabinet.utils.ArrowShape
 import kotlin.math.min
 
 /**
- * 悬浮窗里的迷你棋盘：与主界面完全一致的"微缩原版棋盘"
- * （同一张 chessboard.png 底图 + 同一套棋子位图），并把最佳走法画成箭头。
+ * 悬浮窗里的迷你棋盘：上游原版棋盘的"微缩版"（chessboard.png 底图 + 同套棋子
+ * 位图，几何常量沿袭上游 chinese-chess-android 的 ChessView.java，本仓无该文件），
+ * 并把最佳走法画成箭头。
  *
  * 朝向"随动"：[flipped] 为 true（被识别的 App 屏幕上红方在上）时，
  * 迷你棋盘同样红在上、黑在下，与真实屏幕一致；底部永远是被识别屏幕的下方一侧。
@@ -30,7 +31,7 @@ class OverlayChessView @JvmOverloads constructor(
     attrs: AttributeSet? = null,
 ) : View(context, attrs) {
 
-    /** 90 个棋子（内部约定 piece[y][x]，EMPTY=0，canonical：红恒在 y=9），null 表示尚无局面 */
+    /** 90 格棋盘状态（按 piece[y][x] 行优先摊平，EMPTY=0，canonical：红恒在 y=9），null 表示尚无局面 */
     var pieces: IntArray? = null
         set(value) { field = value; invalidate() }
 
@@ -79,7 +80,8 @@ class OverlayChessView @JvmOverloads constructor(
         ).map { BitmapFactory.decodeResource(resources, it) }.toTypedArray()
     }
 
-    // ==== 与 ChessView.java 一致的棋盘几何（1240x1340 基准坐标系）====
+    // ==== 棋盘几何（1240x1340 基准坐标系，沿袭上游 chinese-chess-android 的
+    //      ChessView.java——本仓无该文件，几何常量照抄保证与底图资源对位）====
     private val boardW = 1240f
     private val boardH = 1340f
     private val pieceSize = 110f

@@ -1,5 +1,10 @@
 // 内阁手机端 app 模块：瘦客户端（录屏识别 + WSS 远程分析 + 双悬浮窗）。
 // 本地引擎/开局库已移除（分析全部由电脑端"内阁"完成，见 RemoteAnalysisClient）。
+// import 须在 plugins 块之前（Kotlin 脚本规则）；java.time 全限定写法会被
+// Gradle 的 java 扩展名遮蔽（Unresolved reference），必须显式 import。
+import java.time.LocalDate
+import java.time.format.DateTimeFormatter
+
 plugins {
     // 版本集中在 phone/gradle/libs.versions.toml（version catalog）。
     // ktlint 插件暂缓接入：ktlint 12.1.0 内嵌解析器与本库源码/Gradle KTS 兼容
@@ -16,6 +21,18 @@ val gitCommitCount: Int = runCatching {
     }.standardOutput.asText.get().trim().toInt()
 }.getOrDefault(1)
 
+// versionName = 最近可达 v 标签（新制语义化版本，2026-10-30 起正式版标签为
+// vX.Y.Z）的 git describe 结果，去掉前导 v：release 提交上是 "1.0.0"，标签之后
+// 的开发提交是 "1.0.0-3-gabc1234"（一眼看出是开发构建）。不手写常量——版本号
+// 只由 git 标签派生，避免发布版与包内版本各写各的（2026-10-30 用户点出
+// versionName 仍是 0.1.0 与 v1.0.0 发布不一致的教训）。无 git/无标签回退占位串。
+val gitVersionName: String = runCatching {
+    providers.exec {
+        commandLine("git", "describe", "--tags", "--match", "v*")
+        workingDir = rootDir
+    }.standardOutput.asText.get().trim().removePrefix("v")
+}.getOrDefault("0.1.0-dev")
+
 android {
     namespace = "com.cabinet"
     compileSdk = 34
@@ -25,7 +42,7 @@ android {
         minSdk = 26
         targetSdk = 34
         versionCode = gitCommitCount
-        versionName = "0.1.0"
+        versionName = gitVersionName
     }
 
     // 交付变体通道：对齐主工程 Cabinet 交付惯例（assembleArmv8DotprodRelease）。
@@ -90,4 +107,24 @@ dependencies {
     implementation(libs.onnxruntime.android)
     // 单元测试（模板匹配等纯 JVM 逻辑）
     testImplementation(libs.junit)
+}
+
+// APK 归档：构建产物按交付命名惯例（cabinet_<日期>_vc<提交数>_<abi>.apk）复制到
+// 项目根 apk/ 目录（全局 gitignore，不入 git）——APK 交付的唯一固定落点，免得在
+// build/outputs 深坑与各处散落文件里翻找。用 rename 把 gradle 默认输出名
+// 换成惯例名；日期取本机当天（CI 侧 TZ 已统一北京时区，见 release-build.yml）。
+// 用法：./gradlew :app:archiveArmv8DotprodReleaseApk（自动先构建再归档）。
+val apkArchiveDate: String =
+    LocalDate.now().format(DateTimeFormatter.ofPattern("yyyyMMdd"))
+tasks.register<Copy>("archiveArmv8DotprodReleaseApk") {
+    dependsOn("assembleArmv8DotprodRelease")
+    from("build/outputs/apk/Armv8Dotprod/release")
+    include("*-release.apk")
+    into(rootDir.parentFile.resolve("apk"))
+    rename { fileName ->
+        Regex("""app-Armv8Dotprod-(arm64-v8a|x86_64)-release\.apk""").find(fileName)?.let { m ->
+            val abi = if (m.groupValues[1] == "arm64-v8a") "arm64" else "x86_64"
+            "cabinet_${apkArchiveDate}_vc${gitCommitCount}_${abi}.apk"
+        } ?: fileName
+    }
 }

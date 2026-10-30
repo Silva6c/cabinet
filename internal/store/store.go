@@ -1,6 +1,6 @@
-// Package store 是对局与建议的 SQLite 沉淀（报告 §4 的 store 模块）。
-// M1c 范围：建议记录（引擎终值 + 桔库命中）异步批量落库；
-// 完整对局聚合（按对局 ID 归并）后续里程碑扩展。
+// Package store 是对局与建议的 SQLite 沉淀：建议记录（引擎终值 + 桔库命中）
+// 异步批量落库；按对局 ID 归组与采纳事件统计已随复盘闭环落地（2026-10-17，
+// 口径见 SuggestionRec.GameID 与 AdoptionRec 注释）。
 package store
 
 import (
@@ -146,8 +146,9 @@ func Open(path string, logger *slog.Logger) (*Store, error) {
 			logger.Info("沉淀库迁移：suggestions 补建 game_id 列")
 		}
 	}
-	// game_id 索引：列已保证存在（新库 schema 自带、旧库上方 ALTER 补齐），
-	// 按局折叠 group by game_id 的查询索引（Games/RecentByGame）
+	// game_id 索引：列已保证存在（新库 schema 自带、旧库上方 ALTER 补齐）。
+	// game_id 是复盘按局归组的分组键，本索引服务按局维度的沉淀查询；当前
+	// 读取侧（控制台走势）在内存按局归组，不经此索引。
 	if _, err := db.Exec("CREATE INDEX IF NOT EXISTS idx_suggestions_game ON suggestions(game_id)"); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("game_id 索引创建失败: %w", err)
