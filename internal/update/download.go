@@ -78,7 +78,12 @@ func (c *Checker) downloadInstallTo(ctx context.Context, dir, exeName string) {
 	defer c.mu.Unlock()
 	c.cancel = nil
 	switch {
-	case idle:
+	case idle && err != nil:
+		// 空闲超时只在下载确已失败时分类：doDownload 最后一次 Read 成功到
+		// 返回之间定时器可能恰好触发（cancel 与数据交付的真实竞态窗）——
+		// 此前 err==nil 的成功路径也会被误判超时、删掉已解压就位的 .new
+		//（2026-11-02 审查修正）。真超时时 err 必为 cancel 包装，先行拦下
+		// 也保证不被下面的 context.Canceled 分支错分成"用户取消"
 		_ = os.Remove(filepath.Join(dir, updateZipPart))
 		_ = os.Remove(filepath.Join(dir, exeName+exeNewSuffix))
 		c.state = StateFailed

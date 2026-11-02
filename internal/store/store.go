@@ -56,6 +56,11 @@ type Store struct {
 	ach chan AdoptionRec
 	log *slog.Logger
 	wg  sync.WaitGroup
+	// lookupStmt 沉淀命中查询的常驻预编译（Open 时 Prepare）：modernc 驱动无
+	// 跨调用语句缓存，db.QueryRow 每次都完整 prepare/finalize——本查询在每条
+	// 桔库未命中的 position 上执行（与 book.Store.stmt 同款口径，见 book.go）。
+	// database/sql 的 Stmt 并发安全，多设备并行查询共用。
+	lookupStmt *sql.Stmt
 	// chMu 保护 closed 标志与两条 channel 的 close 动作：向已关闭 channel
 	// 发送会 panic，单靠 select default 防不了关闭态——迟到的 Save（引擎
 	// 异步回调）与 Close 的竞态由此闭环。⚠channel 本身**永不置 nil**：
@@ -159,6 +164,13 @@ func Open(path string, logger *slog.Logger) (*Store, error) {
 		ach: make(chan AdoptionRec, 1024),
 		log: logger,
 	}
+	// 沉淀命中查询预编译：SQL 与建表列序强相关，prepare 失败即中止启动
+	//（同"迁移失败比静默坏数据好"口径——能跑的库这里必能 prepare）
+	if s.lookupStmt, err = db.Prepare(
+		"select ts,source,fen,best_move,score_cp,score_mate,pv,depth from suggestions where fen = ? order by id desc limit 1"); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("预编译沉淀命中查询失败: %w", err)
+	}
 	s.wg.Add(1)
 	go s.writeLoop()
 	if logger != nil {
@@ -240,6 +252,10 @@ func (s *Store) PruneBefore(cutoff time.Time) (int64, error) {
 		if m, _ := res2.RowsAffected(); m > 0 {
 			n += m
 		}
+	} else if s.log != nil {
+		// 第一张表失败会上抛，这张不能静默：adoptions 只增不改，裁剪长期
+		// 失效=表无界增长（90 天窗口失效无人察觉）
+		s.log.Warn("采纳事件裁剪失败", "err", err2)
 	}
 	return n, nil
 }
@@ -262,6 +278,7 @@ func (s *Store) Close() error {
 	}
 	s.chMu.Unlock()
 	s.wg.Wait()
+	_ = s.lookupStmt.Close()
 	return s.db.Close()
 }
 

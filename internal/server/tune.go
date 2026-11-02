@@ -79,7 +79,8 @@ func (s *Server) handleSetEngine(c *Conn, m *SetEngine) {
 
 // TuneEngine 桌面面板调节引擎算力：与协议 §4.10 完全同一条路（校验→应用→
 // 以最近局面重搜），参数改动即时生效且手机端感知一致。
-// kind 取 "depth" / "hash" / "threads" / "multipv"；返回错误消息（空串 = 成功）。
+// kind 取 "depth" / "hash" / "threads" / "multipv" / "smart"（智能思考开关，
+// 2026-11-02 仅 PC 面板；手机端协议无此字段不会下发）；返回错误消息（空串 = 成功）。
 func (s *Server) TuneEngine(kind string, v int) error {
 	if msg := s.validateTune(kind, v); msg != "" {
 		return errors.New(msg)
@@ -131,6 +132,10 @@ func (s *Server) validateTune(kind string, v int) string {
 		if v < 1 || v > 5 {
 			return fmt.Sprintf("multi_pv=%d 超出范围（1–5）", v)
 		}
+	case "smart":
+		if v != 0 && v != 1 {
+			return fmt.Sprintf("smart=%d 非法（仅 0/1）", v)
+		}
 	default:
 		return "未知的调节字段 " + kind
 	}
@@ -158,6 +163,8 @@ func (s *Server) applyTune(kind string, v int) bool {
 		tuner.SetThreads(v)
 	case "multipv":
 		tuner.SetMultiPV(v)
+	case "smart":
+		tuner.SetSmart(v != 0)
 	}
 	return tuneCurrent(tuner, kind) != before
 }
@@ -175,6 +182,11 @@ func tuneCurrent(tuner EngineTuner, kind string) int {
 		return tuner.Threads()
 	case "multipv":
 		return tuner.MultiPV()
+	case "smart":
+		if tuner.Smart() {
+			return 1
+		}
+		return 0
 	}
 	return 0
 }

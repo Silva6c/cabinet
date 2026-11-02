@@ -72,6 +72,12 @@ const startBoardSeg = "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKAB
 //   - DiffSingleMove 失败：悔棋/手动编辑/多步跳变——清锚
 //
 // 有效形态产出 primary/candidate/miss 事件，无论结果锚点即清（一条建议只判一次）。
+//
+// ⚠已知瑕疵（2026-11-02 审查登记，暂不修）：pendingSug/lastFen 是全局单值，
+// 多设备并行各下一盘棋时锚点会串台——B 的下一局面按 A 的建议锚比对，多数以
+// DiffSingleMove 失败清锚收场（丢采纳统计），同形巧合时产出归属错误的事件。
+// 两台设备看同一盘棋（现产品主场景）行为正确。修复 = 锚点按 devKeyOf 分组
+// （照抄 trendGroups 模式），与"SQLite 沉淀加设备列"同族，届时一并立项。
 func (s *Server) evaluateAdoption(newFen string) {
 	// 读锚与清锚（clear 也是一次写入）与 sendSuggestionToOwner 的锚点维护段
 	// 同持 pendingSugMu：无锁时"读-判-清"会与迟到的建议写入交错——锚点被清
@@ -256,6 +262,10 @@ func (s *Server) handlePosition(c *Conn, m *Position) {
 	s.lastFen.Store(m.Fen)
 	// per-Conn 副本：控制台"最后 position"列按连接显示各自最近局面
 	c.lastFen.Store(m.Fen)
+	// 局面代次（2026-11-01 显示错位根修）：每接受一条局面递增，云库/残局异步
+	// 回调下发前校验（stillCurrent）——同 FEN force 重发（换库后重分析等）时，
+	// 旧局面在途的云帧被代次拦下，不再追认覆盖已定着的库建议
+	gen := s.posGen.Add(1)
 
 	// force=true（手机端"更新"）跳过桔库/沉淀直接进引擎：用户显式要求重新分析，
 	// 尤其刚调过 MultiPV 等算力参数时，库命中短路会让新参数拿不到多线候选
@@ -284,16 +294,16 @@ func (s *Server) handlePosition(c *Conn, m *Position) {
 	// 即终（不查本地不进引擎，省算力正是收益；需要引擎深度分析用 force 或关掉
 	// 开关），未命中/限流回落常规链，异步未定论由 fallback 接手。语义矩阵见
 	// cloudLookupFirst；force 已在上方 return（显式重新分析恒达引擎）。
-	if s.cloudLookupFirst(m.Fen, func() { s.regularSuggestionPath(c, m, hash) }) {
+	if s.cloudLookupFirst(m.Fen, gen, func() { s.regularSuggestionPath(c, m, hash, gen) }) {
 		return
 	}
-	s.regularSuggestionPath(c, m, hash)
+	s.regularSuggestionPath(c, m, hash, gen)
 }
 
-// regularSuggestionPath 常规建议链（桔库 → 沉淀 → 云库补充 → 引擎），handlePosition
-// 的默认路径；云库优先模式的回落路径也走这里（异步回调，局面仍最新时）。内容与
-// 抽取前逐字一致（2026-10-30 仅搬移），横向契约见文件头。
-func (s *Server) regularSuggestionPath(c *Conn, m *Position, hash int64) {
+// regularSuggestionPath 常规建议链（桔库 → 沉淀 → 云库/残局补充 → 引擎），
+// handlePosition 的默认路径；云库优先模式的回落路径也走这里（异步回调，局面
+// 仍最新时）。gen 为局面代次（stillCurrent 用），见 handlePosition。
+func (s *Server) regularSuggestionPath(c *Conn, m *Position, hash int64, gen uint64) {
 	// 1. 桔库优先：命中即下发确定性建议（协议 §4.5 允许 score/pv/depth 缺省——
 	//    库命中=绿箭头直显，无需分数；vscore 的视角语义未考证，不猜）。
 	//    hash 已在入口算好（FENHashValidated 与 FENHash 同一输入同一键）
@@ -319,7 +329,7 @@ func (s *Server) regularSuggestionPath(c *Conn, m *Position, hash int64) {
 			s.recordSuggestion(SuggestionRecord{
 				Source: "book:" + bookName, FEN: m.Fen, BestMove: res.BestMove,
 			})
-			c.log.Info("桔库命中", "book", bookName, "best", res.BestMove, "candidates", len(res.Moves))
+			c.log.Info("开局库命中", "book", bookName, "best", res.BestMove, "candidates", len(res.Moves))
 			return
 		}
 	}
@@ -359,7 +369,12 @@ func (s *Server) regularSuggestionPath(c *Conn, m *Position, hash int64) {
 	// 3. 云库（可选，默认关）：桔库/沉淀双未命中后的外部补充——异步不阻塞
 	//    引擎搜索，命中帧随后被引擎建议以最新覆盖语义收束（cloud_first 开启时
 	//    本步多为缓存未命中的 no-op：云库已在 regularSuggestionPath 之前查过）
-	s.cloudLookupAsync(m.Fen)
+	s.cloudLookupAsync(m.Fen, gen)
+
+	// 3.5 残局库（可选，默认关，2026-11-01）：独立于云库开关的穷举绝对正解
+	//    补充——独立请求/独立限流/独立缓存，命中以 endgame:<域名> 前缀下发；
+	//    展示语义（不覆盖定着、双箭头第二意见）在手机端
+	s.endgameLookupAsync(m.Fen, gen)
 
 	s.enginePath(c, m)
 }

@@ -13,6 +13,9 @@
 //	Cabinet-Update-YYYYMMDD.zip          升级增量包：默认仅 cabinet.exe，
 //	  -with-engine 附引擎+NNUE，-with-books 附桔库（保持 appdata\library\ 内部路径）。
 //
+//	⚠开局库只收桔库（2026-11-02 用户明令）：library/books/ 里用户自备的其他
+//	库（狂刀库等）一律不入任何分发包——bookFiles() 是唯一入库口。
+//
 // 红线：Pikafish.2026-09-06\ 与 library\books\ 源文件只读复制——打包时
 // "改名 pikafish.exe"是复制产出，绝不修改/重命名源文件本体。
 // 所有路径按项目根相对定位（bat 壳已 cd 到根；手动运行也请从根执行）。
@@ -99,12 +102,12 @@ func run(lite, withEngine, withBooks bool) error {
 			return fmt.Errorf("缺少源文件 %s: %w", p, err)
 		}
 	}
-	books, err := bookFiles() // *.obk 通配，文件名含中文（桔库），不逐个点名
+	books, err := bookFiles() // 只收桔库（2026-11-02 用户明令：其他自备库不入包）
 	if err != nil {
 		return err
 	}
 	if !lite && len(books) == 0 {
-		return errors.New("缺少桔库文件 library/books/*.obk（若确要无库打包请加 -lite）")
+		return errors.New("缺少桔库文件 library/books/桔库*.obk（若确要无库打包请加 -lite；其他自备库不入包）")
 	}
 
 	// ── 第 1 步：构建 cabinet.exe（与 scripts/build-exe.bat 同逻辑：CGO+MinGW+windowsgui）──
@@ -301,8 +304,13 @@ func copyPikafishLicenses(stg string) error {
 	return nil
 }
 
-// bookFiles 收集 library/books 下全部 *.obk（cmd 的 *.obk 通配不匹配 *.obk.zip，
-// 此处保持同口径：只带 .obk 结尾的开局库）。
+// bookFiles 收集 library/books 下的桔库（文件名含"桔库"的 *.obk）。
+//
+// ⚠2026-11-02 用户明令：**只许打包桔库，其他任何自备库（狂刀库/华弈/三戒等）
+// 一律不入包**——部署目录 library/books/ 是运行时热加载目录，用户会自备各种
+// 库放进去（字典序还影响优先级），打包若全量通配会把几百 MB 的第三方库带进
+// 分发包（2026-11-02 实录：Full 包被狂刀库撑到 327MB）。桔库与 bookPaths
+// 向量测试同口径匹配。
 func bookFiles() ([]string, error) {
 	entries, err := os.ReadDir(filepath.Join("library", "books"))
 	if errors.Is(err, fs.ErrNotExist) {
@@ -313,7 +321,9 @@ func bookFiles() ([]string, error) {
 	}
 	var out []string
 	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".obk") {
+		// cmd 的 *.obk 通配不匹配 *.obk.zip，此处保持同口径：只带 .obk 结尾
+		// 且文件名含"桔库"的库；其他自备库明确排除，不进任何分发包
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".obk") && strings.Contains(e.Name(), "桔库") {
 			out = append(out, filepath.Join("library", "books", e.Name()))
 		}
 	}

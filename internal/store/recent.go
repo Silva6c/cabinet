@@ -23,9 +23,9 @@ type SuggestionRow struct {
 
 // LookupByFEN 精确匹配 FEN 取最近一条沉淀建议（沉淀命中用：同局面复用历史
 // 引擎终值，省一次数秒级重搜）。未命中返回 (nil, nil)；查询错误才返回 err。
+// 走 Open 时预编译的常驻语句（热路径：每条桔库未命中的 position 都执行）。
 func (s *Store) LookupByFEN(fen string) (*SuggestionRow, error) {
-	row := s.db.QueryRow(
-		"select ts,source,fen,best_move,score_cp,score_mate,pv,depth from suggestions where fen = ? order by id desc limit 1", fen)
+	row := s.lookupStmt.QueryRow(fen)
 	var (
 		r        SuggestionRow
 		ts       string

@@ -6,6 +6,7 @@ package library
 import (
 	"archive/zip"
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -29,6 +30,11 @@ type Manager struct {
 	store *book.Store
 	// onChange 库集合重建完成后的回调（server.SetBook；nil 忽略）
 	onChange func(*book.Store)
+	// order 用户自定义优先级（库名列表，首位最先查）；disabled 禁用库名集合。
+	// 来源 = 配置 library.order/library.disabled，SetOrdering 热更新；
+	// reload 与 Books() 读它们须持 mu（fsnotify goroutine 与控制台回调并发）。
+	order    []string
+	disabled map[string]bool
 
 	// watchReady Run 建立 fsnotify 监听后关闭的一次性信号。inotify/热加载
 	// 语义：Add 之前落在目录里的文件不会产生事件（Linux inotify 不回放），
@@ -39,16 +45,87 @@ type Manager struct {
 	readyOnce  sync.Once
 }
 
-// New 创建管理器并立即做一次初始加载。
-func New(dir string, logger *slog.Logger, onChange func(*book.Store)) (*Manager, error) {
-	m := &Manager{dir: dir, log: logger, onChange: onChange, watchReady: make(chan struct{})}
+// New 创建管理器并立即做一次初始加载。order/disabled 为初始优先级与禁用
+// 名单（语义同 SetOrdering；调用方传配置初值）。
+func New(dir string, order, disabled []string, logger *slog.Logger, onChange func(*book.Store)) (*Manager, error) {
+	m := &Manager{
+		dir:        dir,
+		log:        logger,
+		onChange:   onChange,
+		watchReady: make(chan struct{}),
+		disabled:   map[string]bool{},
+	}
+	m.setOrderingLocked(order, disabled)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
-	if err := m.reload("初始加载"); err != nil {
+	if err := m.reloadEx("初始加载", nil); err != nil {
 		return m, err
 	}
 	return m, nil
+}
+
+// SetOrdering 热更新库优先级与禁用名单并触发重载。order 为库名（文件名去
+// .obk，与 BookInfo.Name 同口径）按优先级排列；disabled 为禁用库名。目录里
+// 有但不在 order 中的库按文件名字典序追加尾部（新放入的库自动可用、排在
+// 已有顺序之后）。控制台调整后由 main 回调调用（改配置 + 落盘在 main 侧）。
+func (m *Manager) SetOrdering(order, disabled []string) error {
+	m.mu.Lock()
+	m.setOrderingLocked(order, disabled)
+	m.mu.Unlock()
+	return m.reloadEx("优先级/启停更新", nil)
+}
+
+// setOrderingLocked 写入排序状态（调用方须持 m.mu）。
+func (m *Manager) setOrderingLocked(order, disabled []string) {
+	m.order = append([]string(nil), order...)
+	m.disabled = make(map[string]bool, len(disabled))
+	for _, n := range disabled {
+		m.disabled[n] = true
+	}
+}
+
+// bookNameOf 库名 = 文件名去 .obk 后缀。后缀剥离必须大小写不敏感：Windows
+// 文件系统不区分大小写，X.OBK 是合法库文件，TrimSuffix(".obk") 会剥不掉
+// （落成 "X.OBK" 名字，配置 order/禁用/删除全部错位）——全仓库名口径统一走此函数。
+func bookNameOf(p string) string {
+	base := filepath.Base(p)
+	return strings.TrimSuffix(base, filepath.Ext(base))
+}
+
+// sortBookPaths 把库路径按用户优先级排序：order 中出现的按其位次在前，
+// 未出现的按文件名字典序追加尾部。只排序不剔除——禁用过滤由调用方做
+// （reload 剔除禁用不加载；Books() 保留禁用仅展示）。order 匹配用库名
+// （文件名去 .obk 后缀，与 BookInfo.Name 同口径）。
+func sortBookPaths(paths []string, order []string) []string {
+	rank := make(map[string]int, len(order))
+	for i, n := range order {
+		rank[n] = i
+	}
+	type item struct {
+		path string
+		rank int // order 位次；未列入 = len(order)（尾部区），区内按名字排序
+	}
+	items := make([]item, 0, len(paths))
+	for _, p := range paths {
+		name := bookNameOf(p)
+		r, ok := rank[name]
+		if !ok {
+			r = len(order)
+		}
+		items = append(items, item{path: p, rank: r})
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].rank != items[j].rank {
+			return items[i].rank < items[j].rank
+		}
+		return items[i].path < items[j].path
+	})
+	out := make([]string, 0, len(items))
+	for _, it := range items {
+		out = append(out, it.path)
+	}
+	return out
 }
 
 // Store 当前库集合（热替换下始终可用）。
@@ -63,6 +140,10 @@ type BookInfo struct {
 	Name    string    // 库名（文件名去 .obk）
 	Entries int       // 库内总行数
 	ModTime time.Time // 库文件修改时间（热加载状态参照）
+	// Enabled 是否参与查询（用户禁用 = 只展示不加载，Entries 恒 0）
+	Enabled bool
+	// Status 非空 = 打开失败原因（坏库警示：该库不进查询链，控制台显示）
+	Status string
 }
 
 // Close 关闭当前库集合并置空（进程收尾用）。Store() 此后返回 nil——
@@ -77,29 +158,51 @@ func (m *Manager) Close() {
 	}
 }
 
-// Books 当前目录内全部 .obk 的展示快照（按文件名排序）。
-// 条数来自当前 Store（打开时缓存的 count）；文件修改时间现场 Stat，反映热加载参照。
+// Books 当前目录内全部 .obk 的展示快照（按用户优先级排序 = 查询顺序，
+// 未列入 order 的按文件名字典序排尾部；禁用库照常列出标记 Enabled=false）。
+// 条数来自当前 Store（打开时缓存的 count，禁用/坏库无条数显示 0）；文件
+// 修改时间现场 Stat，反映热加载参照；Status 来自 Store.Errors()。
 func (m *Manager) Books() []BookInfo {
+	m.mu.Lock()
+	order := m.order
+	disabled := m.disabled
+	m.mu.Unlock()
+
 	entries := map[string]int{}
+	failed := map[string]string{}
 	if st := m.Store(); st != nil {
 		for _, s := range st.Stats() {
 			entries[s.Name] = s.Entries
 		}
+		for _, e := range st.Errors() {
+			failed[e.Name] = e.Err
+		}
 	}
-	paths, err := filepath.Glob(filepath.Join(m.dir, "*.obk"))
+	// 目录枚举 + EqualFold 过滤（Glob 模式大小写敏感，X.OBK 会被静默漏掉）
+	ents, err := os.ReadDir(m.dir)
 	if err != nil {
 		return nil
 	}
+	var paths []string
+	for _, ent := range ents {
+		if !ent.IsDir() && strings.EqualFold(filepath.Ext(ent.Name()), ".obk") {
+			paths = append(paths, filepath.Join(m.dir, ent.Name()))
+		}
+	}
 	out := make([]BookInfo, 0, len(paths))
-	for _, p := range paths {
-		name := strings.TrimSuffix(filepath.Base(p), ".obk")
-		info := BookInfo{Name: name, Entries: entries[name]}
+	for _, p := range sortBookPaths(paths, order) {
+		name := bookNameOf(p)
+		info := BookInfo{
+			Name:    name,
+			Entries: entries[name],
+			Enabled: !disabled[name],
+			Status:  failed[name],
+		}
 		if fi, err := os.Stat(p); err == nil {
 			info.ModTime = fi.ModTime()
 		}
 		out = append(out, info)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
 }
 
@@ -134,7 +237,7 @@ func (m *Manager) Run(ctx context.Context) error {
 			debounce.Stop()
 		}
 		debounce = time.AfterFunc(800*time.Millisecond, func() {
-			if err := m.reload("目录变更"); err != nil && m.log != nil {
+			if err := m.reloadEx("目录变更", nil); err != nil && m.log != nil {
 				m.log.Warn("库重载失败", "err", err)
 			}
 		})
@@ -143,6 +246,15 @@ func (m *Manager) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
+			// 停掉在途防抖：放任触发会在 Close 置 store=nil 后重新打开全部库
+			//（新 Store 无人关闭=句柄泄漏）并在服务收尾后再回调 onChange——
+			// "Close 后 Store() 返回 nil"契约由此破坏
+			mu.Lock()
+			if debounce != nil {
+				debounce.Stop()
+				debounce = nil
+			}
+			mu.Unlock()
 			return nil
 		case ev, ok := <-w.Events:
 			if !ok {
@@ -165,29 +277,43 @@ func (m *Manager) Run(ctx context.Context) error {
 	}
 }
 
-// reload 重建库集合：解压 zip → 关旧 → 开新 → 回调。
-func (m *Manager) reload(reason string) error {
+// reloadEx 重建库集合：解压 zip → 关旧 → 开新 → 回调；exclude 中的库名（文件
+// 名去 .obk）即使文件在目录里也不进本轮 Store（RemoveBook 删除前卸载专用：
+// Windows 上被打开的 SQLite 文件删不掉，须先关连接再删文件）。
+func (m *Manager) reloadEx(reason string, exclude map[string]bool) error {
 	if err := m.unzipAll(); err != nil && m.log != nil {
 		m.log.Warn("zip 批量解压部分失败", "err", err)
 	}
 
-	// 多库优先级在此悄悄成形：books_dir 是"一个目录"而非列表，Glob 按文件名
-	// 字典序返回、直接决定 book.Store 的查询顺序（首库命中即短路）。想调库
-	// 优先级只能改文件名——这是配置面语义，不要在代码里加权重或二次排序。
-	paths, err := filepath.Glob(filepath.Join(m.dir, "*.obk"))
+	// 目录枚举 + 后缀过滤（EqualFold）：filepath.Glob 的模式匹配全平台大小写
+	// 敏感，"*.obk" 会静默漏掉手工放入的 X.OBK（Windows 文件系统本身不区分
+	// 大小写，用户视角就是"库里看不到"）——入库集合以 EqualFold 过滤为准
+	ents, err := os.ReadDir(m.dir)
 	if err != nil {
 		return err
 	}
-	// 防御性后缀收口：Glob 模式已限定 *.obk，此处按后缀（大小写不敏感）再筛
-	// 一道，防模式语义变化混入临时/杂项文件——真正的入库集合以它为准。
 	var clean []string
-	for _, p := range paths {
-		if !strings.HasSuffix(strings.ToLower(p), ".obk") {
+	for _, ent := range ents {
+		if ent.IsDir() || !strings.EqualFold(filepath.Ext(ent.Name()), ".obk") {
 			continue
 		}
-		clean = append(clean, p)
+		clean = append(clean, filepath.Join(m.dir, ent.Name()))
 	}
-	store, err := book.OpenStore(m.log, clean...)
+	// 多库优先级（2026-11-01 用户定稿：控制台可调）：用户 order 位次在前、
+	// 未列入的字典序排尾部，禁用库剔除不加载（ Books() 仍展示）。原"纯字典序
+	// 即优先级"的约定自此升级——文件名字典序只决定尾部区次序。
+	m.mu.Lock()
+	ordered := sortBookPaths(clean, m.order)
+	enabled := make([]string, 0, len(ordered))
+	for _, p := range ordered {
+		name := bookNameOf(p)
+		if m.disabled[name] || exclude[name] {
+			continue
+		}
+		enabled = append(enabled, p)
+	}
+	m.mu.Unlock()
+	store, err := book.OpenStore(m.log, enabled...)
 	if err != nil {
 		return err
 	}
@@ -208,6 +334,51 @@ func (m *Manager) reload(reason string) error {
 	}
 	if m.log != nil {
 		m.log.Info("库集合已重载", "reason", reason, "books", store.Len())
+	}
+	return nil
+}
+
+// RemoveBook 删除库（2026-11-02 控制台"删除"按钮）：先卸载（重建 Store 时
+// 排除该库、关其连接——Windows 上被打开的 SQLite 文件删不掉），再删库文件与
+// 全部同名附属（-wal/-shm 与同名 .obk.zip——zip 必须一并删，否则下轮 reload
+// 的 unzipAll 会重新解压出库文件"复活"）。删除失败立即恢复重载（文件还在就
+// 照常加载，不把"删了一半"留成常态）。成功后不再补 reload：卸载轮的 Store
+// 已等价于删除后的目录集合，UI 与查询即刻一致，zip 收尾由 fsnotify 的防抖
+// reload 自然收敛。name 必须是裸库名（文件名去 .obk），带路径分隔符或 ..
+// 一律拒绝（防穿越，与 unzip 同语言）。
+func (m *Manager) RemoveBook(name string) error {
+	if name == "" || strings.ContainsAny(name, `/\`) ||
+		strings.Contains(name, "..") {
+		return fmt.Errorf("非法库名: %q", name)
+	}
+	// 纵深复核：拼出的每个删除目标都必须真落在库目录内（未来 name 语义或
+	// 目录约定变化时，这道闸仍然挡在文件系统前面）
+	for _, suf := range []string{".obk", ".obk-wal", ".obk-shm", ".obk.zip"} {
+		rel, err := filepath.Rel(m.dir, filepath.Join(m.dir, name+suf))
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+			return fmt.Errorf("删除目标越出库目录: %q", name)
+		}
+	}
+
+	// 先卸载：旧 Store 关闭后文件句柄释放，删除才可能成功（Windows 文件锁）
+	if err := m.reloadEx("删除前卸载", map[string]bool{name: true}); err != nil {
+		return err
+	}
+	var firstErr error
+	for _, suf := range []string{".obk", ".obk-wal", ".obk-shm", ".obk.zip"} {
+		if err := os.Remove(filepath.Join(m.dir, name+suf)); err != nil &&
+			!os.IsNotExist(err) && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if firstErr != nil {
+		if err := m.reloadEx("删除失败恢复", nil); err != nil && m.log != nil {
+			m.log.Warn("删除失败后的恢复重载也失败", "err", err)
+		}
+		return fmt.Errorf("删除库文件失败（已恢复该库）: %w", firstErr)
+	}
+	if m.log != nil {
+		m.log.Info("库已删除", "book", name)
 	}
 	return nil
 }
@@ -261,11 +432,20 @@ func unzip(zipPath, dir string) error {
 		if name == "" || strings.HasPrefix(name, ".") {
 			continue
 		}
+		// 显式边界复核（防穿越第二道闸）：目标路径相对目标目录不得带 .. 前缀。
+		// 上方 Base 净化已保证落盘恒在 dir 内，这道闸是纵深——未来有人把
+		// Base 净化改掉时它仍在（CodeQL 的 go/zipslip 不识别 Base 净化，
+		// 同时靠行内抑制收口）
+		dest := filepath.Join(dir, name)
+		if rel, rerr := filepath.Rel(dir, dest); rerr != nil ||
+			rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+			return fmt.Errorf("zip 条目路径越界: %q", f.Name)
+		}
 		rc, err := f.Open()
 		if err != nil {
 			return err
 		}
-		out, err := os.Create(filepath.Join(dir, name))
+		out, err := os.Create(dest) // codeql[go/zipslip] 双重防穿越：Base 净化 + Rel 边界复核
 		if err != nil {
 			_ = rc.Close()
 			return err

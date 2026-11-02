@@ -2,8 +2,10 @@
 // 本地引擎/开局库已移除（分析全部由电脑端"内阁"完成，见 RemoteAnalysisClient）。
 // import 须在 plugins 块之前（Kotlin 脚本规则）；java.time 全限定写法会被
 // Gradle 的 java 扩展名遮蔽（Unresolved reference），必须显式 import。
+import java.io.File
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
+import java.util.Properties
 
 plugins {
     // 版本集中在 phone/gradle/libs.versions.toml（version catalog）。
@@ -32,6 +34,28 @@ val gitVersionName: String = runCatching {
         workingDir = rootDir
     }.standardOutput.asText.get().trim().removePrefix("v")
 }.getOrDefault("0.1.0-dev")
+
+// 正式签名（2026-10-31 用户拍板方案 A，chess-dike 5fc494a 同款模式）：keystore
+// 本机保管不入 git（根 .gitignore 有 *.jks/*.keystore 兜底），三要素——密钥路径/
+// 存储密码/密钥密码——经 local.properties（本机开发）或同名环境变量（CI 由
+// GitHub Secrets 注入）提供，路径必须写绝对路径（相对路径的解析基准随 gradle
+// 启动目录漂移）。齐备且文件存在时 release 用正式签名，否则回退 debug 签名
+// 保证任意环境（新克隆/无密钥 CI）可构建。
+val signingProps: Properties = Properties().apply {
+    val f = rootProject.file("local.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
+}
+// 空串视同缺失：CI 的 env 引用未配置 secrets 时得到空串而非 null，不能让它
+// 混过三要素检查后拿空密码去签名
+fun signingEnv(name: String): String? =
+    signingProps.getProperty(name)?.takeIf { it.isNotBlank() }
+        ?: System.getenv(name)?.takeIf { it.isNotBlank() }
+
+val releaseStoreFile: String? = signingEnv("CABINET_STORE_FILE")
+val releaseStorePwd: String? = signingEnv("CABINET_STORE_PWD")
+val releaseKeyPwd: String? = signingEnv("CABINET_KEY_PWD")
+val releaseSigningReady: Boolean = releaseStoreFile != null && releaseStorePwd != null &&
+    releaseKeyPwd != null && File(releaseStoreFile).isFile
 
 android {
     namespace = "com.cabinet"
@@ -65,11 +89,24 @@ android {
         }
     }
 
+    signingConfigs {
+        if (releaseSigningReady) {
+            create("release") {
+                // requireNotNull：releaseSigningReady 已确认三要素非空，lambda
+                // 捕获内编译器不继承 smart cast，此处显式收窄
+                storeFile = File(requireNotNull(releaseStoreFile))
+                storePassword = requireNotNull(releaseStorePwd)
+                keyAlias = "cabinet"
+                keyPassword = requireNotNull(releaseKeyPwd)
+            }
+        }
+    }
     buildTypes {
         release {
             isMinifyEnabled = false
-            // 无正式 keystore：交付包用 debug 签名保证可直接安装（与模拟器调试安装升级兼容）
-            signingConfig = signingConfigs.getByName("debug")
+            // 正式签名缺失时回退 debug 签名保证可直接安装（与模拟器调试安装升级兼容）
+            signingConfig = if (releaseSigningReady) signingConfigs.getByName("release")
+            else signingConfigs.getByName("debug")
             // TLS 收口（2026-10-27 规范轮）：release 禁止无指纹 trust-all 联调
             // 模式——防指纹为空时静默信任所有证书（RemoteAnalysisClient 消费）
             buildConfigField("boolean", "ENFORCE_TLS_FINGERPRINT", "true")

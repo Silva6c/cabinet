@@ -32,11 +32,13 @@ type EngineTuner interface {
 	SetHashMB(mb int) bool
 	SetThreads(n int) bool
 	SetMultiPV(n int) bool
+	SetSmart(on bool) // 智能思考（2026-11-02，仅 PC 面板热切；机制见 engine/smart.go）
 	Depth() int
 	MoveTimeMS() int
 	HashMB() int
 	Threads() int
 	MultiPV() int
+	Smart() bool
 	// ClearHash 请求引擎清空置换表（皮卡鱼 Clear Hash button 选项）；
 	// 在下一轮搜索开始前的空闲窗口执行。
 	ClearHash()
@@ -121,6 +123,19 @@ type Server struct {
 	// （沉淀照常写入）。优先级高于 cloudFirst：handlePosition 在 cloudLookupFirst
 	// 之前拦截。种子注入 New，运行时以本原子位为准
 	skipBooks atomic.Bool
+	// endgameEnable 残局库查询开关（2026-11-01，cloudbook.go）：独立于
+	// cloudEnable——开启后对本地库/沉淀未命中的局面另发 action=query&endgame=1
+	// 只查云库残局库（穷举绝对正解）。种子注入 New，运行时以本原子位为准
+	endgameEnable atomic.Bool
+	// lastEndgameMs 残局查询限流时间戳：与开局查询（lastCloudMs）分表——两者
+	// 是不同 action 的独立请求，共享限流会让"每局面先 queryall 占位"把残局
+	// 查询永久饿死；各自 1.5s 对公共端点总频率 ≤2次/1.5s，礼貌性可接受
+	lastEndgameMs atomic.Int64
+	// posGen 局面代次（2026-11-01 显示错位根修）：handlePosition 每接受一条
+	// 新局面递增；云库/残局异步回调下发前校验代次未变——同 FEN force 重发
+	// （桔库换库后重分析）时 lastFen 校验拦不住的旧异步帧（库命中已定着、
+	// 在途云帧仍覆盖显示"云库"）被代次拦下
+	posGen atomic.Uint64
 	// 本轮搜索起始时刻（UnixNano，0 = 空闲）：时间制仪表"用时/上限"的数据源。
 	// enginePump 在最新局面的首条 info 时起表、任意 bestmove/状态变化时停表——
 	// 计在服务端而非引擎包，避免为展示指标动 EngineBridge 接口（测试桩全要跟着改）
@@ -209,6 +224,7 @@ func New(cfg *config.Config, cert tls.Certificate, logger *slog.Logger, eng Engi
 	}
 	s.cloudEnable.Store(cfg.CloudBook.Enable) // 面板开关的启动种子（cfg 值仅此一次进入）
 	s.cloudFirst.Store(cfg.CloudBook.CloudFirst)
+	s.endgameEnable.Store(cfg.CloudBook.Endgame)
 	s.skipBooks.Store(cfg.Engine.SkipBooks)
 	return s
 }

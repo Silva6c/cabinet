@@ -6,6 +6,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -149,6 +150,7 @@ func run(configPath, resourceRoot string, noTray bool) error {
 			}, logger)
 			eng = engConcrete
 			engDone = engConcrete.Done()
+			engConcrete.SetSmart(cfg.Engine.Smart) // 智能思考启动种子（落盘值；面板热切走 TuneEngine 回写）
 			go engConcrete.Run(ctx)
 			slog.Info("引擎桥已启动", "path", cfg.Engine.Path, "nnue", nnue)
 		}
@@ -242,6 +244,9 @@ func run(configPath, resourceRoot string, noTray bool) error {
 		case "multipv":
 			snapshot.Engine.MultiPV = v
 			cfg.Engine.MultiPV = v
+		case "smart":
+			snapshot.Engine.Smart = v != 0
+			cfg.Engine.Smart = v != 0
 		default:
 			return
 		}
@@ -253,8 +258,9 @@ func run(configPath, resourceRoot string, noTray bool) error {
 		logger.Info("算力参数已落盘（重启后保持）", "kind", kind, "value", v)
 	})
 
-	// 库目录管理器（初始加载 + 热加载）
-	libMgr, err := library.New(cfg.Library.BooksDir, logger, srv.SetBook)
+	// 库目录管理器（初始加载 + 热加载；order/disabled 为用户自定义优先级与
+	// 禁用名单的配置初值，控制台调整后经 BookOrderingSet 回调热更并落盘）
+	libMgr, err := library.New(cfg.Library.BooksDir, cfg.Library.Order, cfg.Library.Disabled, logger, srv.SetBook)
 	if err != nil {
 		return fmt.Errorf("库目录管理器初始化失败: %w", err)
 	}
@@ -437,9 +443,137 @@ func run(configPath, resourceRoot string, noTray bool) error {
 			bs := libMgr.Books()
 			out := make([]console.BookRow, 0, len(bs))
 			for _, b := range bs {
-				out = append(out, console.BookRow{Name: b.Name, Entries: b.Entries, ModTime: b.ModTime})
+				out = append(out, console.BookRow{
+					Name: b.Name, Entries: b.Entries, ModTime: b.ModTime,
+					Enabled: b.Enabled, Status: b.Status,
+				})
 			}
 			return out
+		},
+		// ── 库管理（2026-11-01 控制台便当盒重做）：导入/优先级/启停 ──
+		BooksDir: cfg.Library.BooksDir,
+		BookImportName: func(src string) string {
+			_, target, cleanup, err := library.PrepareImport(src, logger)
+			if cleanup != nil {
+				defer cleanup()
+			}
+			if err != nil {
+				logger.Warn("库导入预检失败", "src", src, "err", err)
+				return ""
+			}
+			return target
+		},
+		BookImportFile: func(src string) string {
+			// 预检 + 拷贝进库目录：校验过才落地，坏库不进 books_dir（失败原因
+			// 直接返回 UI 弹窗，不经热加载的静默跳过路径）
+			obk, target, cleanup, err := library.PrepareImport(src, logger)
+			if cleanup != nil {
+				defer cleanup()
+			}
+			if err != nil {
+				logger.Warn("库导入失败", "src", src, "err", err)
+				return err.Error()
+			}
+			dst := filepath.Join(cfg.Library.BooksDir, target)
+			if err := copyFile(obk, dst); err != nil {
+				logger.Warn("库导入拷贝失败", "dst", dst, "err", err)
+				return fmt.Sprintf("拷贝失败: %v", err)
+			}
+			logger.Info("库已导入（等待热加载）", "target", target)
+			return ""
+		},
+		BookMove: func(name string, delta int) string {
+			// 以当前展示顺序（order 位次+字典序尾部）为基准交换相邻位，全序列
+			// 显式写入 order——调整一次后顺序完全落盘固化，后续新库追加尾部
+			bs := libMgr.Books()
+			names := make([]string, 0, len(bs))
+			idx := -1
+			for i, b := range bs {
+				if b.Name == name {
+					idx = i
+				}
+				names = append(names, b.Name)
+			}
+			if idx < 0 {
+				return "库不存在或已被移除: " + name
+			}
+			j := idx + delta
+			if j < 0 || j >= len(names) {
+				return "" // 已在边界：无操作（按钮态可能短暂滞后，无碍）
+			}
+			names[idx], names[j] = names[j], names[idx]
+			configPersistMu.Lock()
+			defer configPersistMu.Unlock()
+			cfg.Library.Order = names
+			if err := libMgr.SetOrdering(names, cfg.Library.Disabled); err != nil {
+				logger.Warn("库优先级热更新失败", "err", err)
+				return fmt.Sprintf("已落盘但热更新失败: %v", err)
+			}
+			snapshot := *cfg
+			snapshot.UnresolvePaths(resourceRoot)
+			if err := snapshot.Save(configPath); err != nil {
+				logger.Warn("库优先级落盘失败", "err", err)
+				return fmt.Sprintf("已切换但落盘失败: %v", err)
+			}
+			logger.Info("库优先级已调整", "order", names)
+			return ""
+		},
+		BookToggle: func(name string, enabled bool) string {
+			configPersistMu.Lock()
+			defer configPersistMu.Unlock()
+			disabled := cfg.Library.Disabled[:0:0]
+			for _, n := range cfg.Library.Disabled {
+				if n != name {
+					disabled = append(disabled, n)
+				}
+			}
+			if !enabled {
+				disabled = append(disabled, name) // 保持去重：已在列表的不会重复
+			}
+			cfg.Library.Disabled = disabled
+			if err := libMgr.SetOrdering(cfg.Library.Order, disabled); err != nil {
+				logger.Warn("库启停热更新失败", "err", err)
+				return fmt.Sprintf("已落盘但热更新失败: %v", err)
+			}
+			snapshot := *cfg
+			snapshot.UnresolvePaths(resourceRoot)
+			if err := snapshot.Save(configPath); err != nil {
+				logger.Warn("库启停落盘失败", "err", err)
+				return fmt.Sprintf("已切换但落盘失败: %v", err)
+			}
+			logger.Info("库启停已切换", "book", name, "enabled", enabled)
+			return ""
+		},
+		BookRemove: func(name string) string {
+			// 删除 = 先卸载连接再删文件（Windows 文件锁），实现在 library 层；
+			// 成功后把 order/disabled 里的死名字清掉并落盘（库已不存在，配置
+			// 不留垃圾；Manager 内存残留无害，下次用户排序/启停操作自然覆盖）
+			if err := libMgr.RemoveBook(name); err != nil {
+				logger.Warn("库删除失败", "book", name, "err", err)
+				return err.Error()
+			}
+			configPersistMu.Lock()
+			order := cfg.Library.Order[:0:0]
+			for _, n := range cfg.Library.Order {
+				if n != name {
+					order = append(order, n)
+				}
+			}
+			disabled := cfg.Library.Disabled[:0:0]
+			for _, n := range cfg.Library.Disabled {
+				if n != name {
+					disabled = append(disabled, n)
+				}
+			}
+			cfg.Library.Order, cfg.Library.Disabled = order, disabled
+			snapshot := *cfg
+			snapshot.UnresolvePaths(resourceRoot)
+			if err := snapshot.Save(configPath); err != nil {
+				logger.Warn("库删除后配置落盘失败", "err", err)
+			}
+			configPersistMu.Unlock()
+			logger.Info("库已删除", "book", name)
+			return ""
 		},
 		Recent: func(n int) []console.SugRow {
 			if st == nil {
@@ -525,6 +659,23 @@ func run(configPath, resourceRoot string, noTray bool) error {
 			logger.Info("云库优先开关已切换", "cloud_first", on)
 			return ""
 		},
+		// 残局库查询（2026-11-01）：独立于云库开关的穷举残局正解补充，语义见
+		// endgameLookupAsync
+		EndgameGet: srv.EndgameEnabled,
+		EndgameSet: func(on bool) string {
+			configPersistMu.Lock()
+			defer configPersistMu.Unlock()
+			srv.SetEndgameEnable(on)
+			cfg.CloudBook.Endgame = on
+			snapshot := *cfg
+			snapshot.UnresolvePaths(resourceRoot)
+			if err := snapshot.Save(configPath); err != nil {
+				logger.Warn("残局库开关落盘失败", "endgame", on, "err", err)
+				return fmt.Sprintf("已切换但落盘失败: %v", err)
+			}
+			logger.Info("残局库开关已切换", "endgame", on)
+			return ""
+		},
 		// 不走任何库（2026-10-30）：高级面板→开局库的勾选框；开启后建议链跳过
 		// 桔库/沉淀/云库（含 cloud_first），每步引擎直搜——拦截位置与语义见
 		// handlePosition
@@ -563,6 +714,7 @@ func run(configPath, resourceRoot string, noTray bool) error {
 				HashMB:     engConcrete.HashMB(),
 				Threads:    engConcrete.Threads(),
 				MultiPV:    engConcrete.MultiPV(),
+				Smart:      engConcrete.Smart(),
 				Ready:      srv.EngineState() == engine.StateReady,
 			}
 		},
@@ -649,4 +801,32 @@ func relaunchSelf(dir, exeName string) error {
 	cmd.Stdout = os.Stdout // console 构建的调试输出接力；windowsgui 下无控制台无碍
 	cmd.Stderr = os.Stderr
 	return cmd.Start()
+}
+
+// copyFile 拷贝单个文件（库导入用；目标存在则覆盖——同名覆盖由 UI 侧
+// Confirm 前置把关）。先写临时名再 rename，避免半成品被 fsnotify 的
+// reload 撞上（800ms 防抖窗口内 rename 已完成）。流式 io.Copy：自备库可达
+// 数百 MB，整体 ReadFile+WriteFile 的瞬时内存峰值约 2 倍文件体积（与
+// library.unzip 的流式口径对齐，2026-11-02 审查修正）。
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = in.Close() }()
+	tmp := dst + ".part"
+	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := out.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return os.Rename(tmp, dst)
 }

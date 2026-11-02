@@ -28,7 +28,8 @@ object RLog {
     /** 因队列满被丢弃的行数累计（发送方经 [takeDropped] 取走补报，让 PC 端知道有缺口） */
     private var droppedCount = 0L
 
-    // SimpleDateFormat 非线程安全，各线程 format 时同步
+    // SimpleDateFormat 非线程安全：format 固定在 queue 锁内（见 log 体内），
+    // 共享单实例免每线程/每条日志新建格式化器的分配开销
     private val tsFormat = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
 
     /**
@@ -72,8 +73,11 @@ object RLog {
             Log.WARN -> "W"; else -> "E"
         }
         val full = if (tr != null) "$msg | ${tr.javaClass.simpleName}: ${tr.message}" else msg
-        val line = "${tsFormat.format(Date())} $level/$tag: $full"
         synchronized(queue) {
+            // 时间戳格式化必须在锁内：SimpleDateFormat 非线程安全（JVM 明文档），
+            // log 被 worker/OkHttp/主线程并发调用，锁外 format 会损坏内部 Calendar
+            // 状态——轻则时间戳错乱，重则抛异常打断调用方的帧处理链
+            val line = "${tsFormat.format(Date())} $level/$tag: $full"
             if (queue.size >= MAX_QUEUE) {
                 queue.removeFirst()
                 droppedCount++

@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -61,12 +62,14 @@ func (f *fakeProc) Quit() error {
 // fakeEngine 模拟皮卡鱼：处理 UCI 命令、可脚本化的搜索行为。
 type fakeEngine struct {
 	mu          sync.Mutex
-	received    []string      // 收到的全部命令（断言用）
-	out         chan string   // 引擎输出（fakeProc.lines 共享）
-	slow        bool          // true：go 后不发 bestmove，等 stop/超时
-	crashOnStop bool          // true：收到 stop 即关闭输出流（模拟真实皮卡鱼打断时崩溃 EOF）
-	muteOnStop  bool          // true：收到 stop 后彻底静默——不回 bestmove 也不退出（模拟挂死引擎，A1 回归）
-	quit        chan struct{} // 关闭后输出流视为结束（out 本身不 close，避免 send panic）
+	received    []string                      // 收到的全部命令（断言用）
+	out         chan string                   // 引擎输出（fakeProc.lines 共享）
+	slow        bool                          // true：go 后不发 bestmove，等 stop/超时
+	crashOnStop bool                          // true：收到 stop 即关闭输出流（模拟真实皮卡鱼打断时崩溃 EOF）
+	muteOnStop  bool                          // true：收到 stop 后彻底静默——不回 bestmove 也不退出（模拟挂死引擎，A1 回归）
+	goScript    func(goCmd string, nth int32) // 非空时接管 go 处理（智能思考测试脚本；nth 从 1 计）
+	goN         atomic.Int32                  // 已收到的 go 次数（goScript 的 nth）
+	quit        chan struct{}                 // 关闭后输出流视为结束（out 本身不 close，避免 send panic）
 	once        sync.Once
 }
 
@@ -108,6 +111,11 @@ func (f *fakeEngine) handle(line string) {
 		// 长搜被打断：立即回 bestmove（皮卡鱼行为）
 		f.write("bestmove e3e4")
 	case len(line) > 3 && line[:3] == "go ":
+		if f.goScript != nil {
+			n := f.goN.Add(1)
+			go f.goScript(line, n)
+			return
+		}
 		if f.slow {
 			// 长搜：持续发 info 直到 stop/quit；设寿命上限防测试结束后长期泄漏
 			go func() {

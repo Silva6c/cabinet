@@ -339,3 +339,89 @@ func fenChar(p int) byte {
 	}
 	return '.' // 不可达：编码非法
 }
+
+// LegalMoves 局面全部合法着法：伪合法目标格过滤"走后己将被攻击/将帅照面"。
+// 智能思考的复杂度预判用（engine.countLegalMoves 消费方）；与 engine.PositionLegal
+// 的合法性语义一致，但本函数在纯规则包内自足实现（pieceTargets + 显式照面
+// 判定），不引入对 engine 的反向依赖。
+func LegalMoves(b book.Board, redGo bool) []Move {
+	var out []Move
+	for y := 0; y < 10; y++ {
+		for x := 0; x < 9; x++ {
+			p := b[y][x]
+			if p == book.Empty || IsRed(p) != redGo {
+				continue
+			}
+			from := Vec{x, y}
+			for _, to := range pieceTargets(b, from, p) {
+				m := Move{From: from, To: to}
+				if leavesKingSafe(b, redGo, m) {
+					out = append(out, m)
+				}
+			}
+		}
+	}
+	return out
+}
+
+// leavesKingSafe 应用 m 后己将是否安全：不被对方任一子攻击（对方的可走格=
+// 攻击格，炮隔子打/马蹩腿/兵方向规则全部由 pieceTargets 承担）且不与对方将
+// 照面（将的 pieceTargets 只有九宫一步、不含照面长距——显式判定补上，
+// fenlegal.attacked 同款语义在本包的自足实现）。
+func leavesKingSafe(b book.Board, redGo bool, m Move) bool {
+	nb := b // [10][9]int 数组值类型：赋值即整盘克隆
+	p := nb[m.From.Y][m.From.X]
+	nb[m.From.Y][m.From.X] = book.Empty
+	nb[m.To.Y][m.To.X] = p
+	king, hasKing := findKing(nb, redGo)
+	if !hasKing {
+		return true // 无王盘面（仅测试构造会出现）：无从被攻击，视为安全
+	}
+	// 照面：对方将与己将同列且中间全空（ fenlegal.clearBetween 同语义）
+	if enemy, ok := findKing(nb, !redGo); ok && enemy.X == king.X {
+		facing := true
+		lo, hi := enemy.Y, king.Y
+		if lo > hi {
+			lo, hi = hi, lo
+		}
+		for mid := lo + 1; mid < hi; mid++ {
+			if nb[mid][king.X] != book.Empty {
+				facing = false
+				break
+			}
+		}
+		if facing {
+			return false
+		}
+	}
+	for y2 := 0; y2 < 10; y2++ {
+		for x2 := 0; x2 < 9; x2++ {
+			p2 := nb[y2][x2]
+			if p2 == book.Empty || IsRed(p2) == redGo {
+				continue
+			}
+			for _, t := range pieceTargets(nb, Vec{x2, y2}, p2) {
+				if t == *king {
+					return false
+				}
+			}
+		}
+	}
+	return true
+}
+
+// findKing 盘面上 red 一方将/帅的位置；不存在返回 false（残缺测试盘面）。
+func findKing(b book.Board, red bool) (*Vec, bool) {
+	want := book.BJiang
+	if red {
+		want = book.WShuai
+	}
+	for y := 0; y < 10; y++ {
+		for x := 0; x < 9; x++ {
+			if b[y][x] == want {
+				return &Vec{x, y}, true
+			}
+		}
+	}
+	return nil, false
+}

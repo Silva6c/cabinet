@@ -65,6 +65,8 @@ func (f *fakeTunerEngine) SetMoveTimeMS(ms int) bool   { f.moveTimeMS = ms; retu
 func (f *fakeTunerEngine) SetHashMB(mb int) bool       { f.hashMB = mb; return true }
 func (f *fakeTunerEngine) SetThreads(n int) bool       { return true }
 func (f *fakeTunerEngine) SetMultiPV(n int) bool       { return true }
+func (f *fakeTunerEngine) SetSmart(on bool)            {}
+func (f *fakeTunerEngine) Smart() bool                 { return false }
 func (f *fakeTunerEngine) Depth() int                  { return f.depth }
 func (f *fakeTunerEngine) MoveTimeMS() int             { return f.moveTimeMS }
 func (f *fakeTunerEngine) HashMB() int                 { return f.hashMB }

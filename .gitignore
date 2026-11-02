@@ -1,5 +1,17 @@
 # 运行时产物（证书/数据/库文件不进 git）
 cert/
+
+# 密钥类文件兜底（2026-10-31 安全排查整改，对照 chess-dike 同款规则）：
+# 签名 keystore / 证书私钥一律本机保管不入 git——cert/ 规则只护 cert 目录名，
+# 未来密钥放到其他路径（如 phone/app/xxx.jks）时靠这些规则拦住误提交
+*.jks
+*.keystore
+*.bks
+*.p12
+*.pfx
+*.key
+*.pem
+*.mobileprovision
 # 锚定根：根 data/ 是外部数据集与沉淀库；internal/ 等源码目录不受影响
 /data/
 # 根目录 library/ 是皮卡鱼等版权物部署位；必须锚定根，否则误伤 internal/library/ 源码包
@@ -65,6 +77,8 @@ phone/tools/evidence/
 # 本机维护文件（不入库）
 AGENTS.md
 当前状态.md
+法律应对预案.md
+项目哲学.md
 
 # 本机维护文件（不入库）
 docs/美学设计研究.md

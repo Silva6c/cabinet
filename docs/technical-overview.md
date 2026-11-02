@@ -167,6 +167,14 @@ sequenceDiagram
   高级面板→开局库勾选框）：开启后每步先查云库——命中即采用 cloud 建议并**不再查本地
   桔库/沉淀、不进引擎**（与桔库命中"命中即 return"同构，省算力），未命中/失败/限流自动
   回落常规链；force 与调参重搜不受影响（语义矩阵见 cloudLookupFirst）。
+- **残局库查询**（2026-11-01 用户定稿，`cloudbook.endgame`，高级面板→开局库勾选框）：
+  本地库/沉淀双未命中的局面**另发** `action=query&endgame=1` 独立请求，只查云库
+  穷举残局表（chessdb，结论为穷举验证的绝对正解）。与开局云库完全解耦：独立开关/
+  独立限速/独立缓存（键加 `eg|` 前缀隔离）、**不参与 cloud_first 优先抢占**（纯补充
+  语义）；失败/缓存语义与云库同口径（2026-11-02 起失败不入缓存——失败≠端点答无，
+  网络恢复后同局面可重试）。命中以 `endgame:<域名>` source 复用 suggestion 帧下发
+  （协议 §4.5 残局库命中段）；展示语义在手机端——已有引擎定着时只登记"第二意见"
+  （着法一致追加"· 残局库"背书，不一致画琥珀第二箭头），无定着时到达即定着。
 - **不走任何库**（2026-10-30 用户定稿，`engine.skip_books`，高级面板→开局库勾选框）：
   建议链跳过**全部库**——桔库、沉淀、云库（含 cloud_first 优先路径）都不查，每步
   引擎直搜（handlePosition 在 cloudLookupFirst 之前拦截；引擎路径抽为 enginePath
@@ -206,6 +214,14 @@ sequenceDiagram
 - **运行中调参**：setter 只更新目标值；在下一轮搜索开始前的 UCI 空闲窗口应用，顺序
   Clear Hash → Threads → Hash → MultiPV；depth 直接体现在 `go depth N`；**时间制**
   （`movetime_ms` 500–20000）即时生效为 `go movetime N` 且优先于深度（0=按深度）。
+- **智能思考**（2026-11-02 用户定稿，仅 PC 端、面板开关默认关；手机端无感知、协议零改动）：
+  开启后两级自适应——①被迫着法预判：每轮起搜前 `xq.LegalMoves` 计数合法着法，
+  唯一着法本轮预算压地板（depth 4 / movetime 500ms）、≤3 着法次档（depth 10 / 1s），
+  只作用于本轮 go 拼装（局部 min），不碰用户原子/落盘/回显；②收敛早停：collect 读
+  info 流时主线（MultiPV 缺省/1）PV 首着连续 3 层稳定且 depth≥10 且分数极差≤60cp
+  即提前 `stop`（mate 分数 2 层即停）——UCI stop 后 bestmove 照常返回、Result 形态
+  不变，下发/沉淀链路零感知。铁律：早停的 stop 绝不置 preempt（preempt=作废本轮，
+  早停要的是接受本轮）；warmup 预热两级全豁免（保预热本意）。参数取舍见 engine/smart.go。
 - Windows 细节：子进程隐藏窗口 + CREATE_NO_WINDOW；启动后提权 HIGH_PRIORITY_CLASS
   （失败静默）。
 - 事件通道容量 64，满则丢最旧保新。
@@ -224,7 +240,10 @@ sequenceDiagram
 ### 3.5 internal/library / internal/store
 
 - **library**：fsnotify 监听 books/，800ms 防抖后 reload；zip 只取 basename（防路径穿越）；
-  热重建 book.Store 后回调 server 热替换（不重启服务）。无测试文件（两个无测试包之一）。
+  热重建 book.Store 后回调 server 热替换（不重启服务）。`RemoveBook`（2026-11-02
+  控制台"删除"按钮）先卸载（重建 Store 排除该库、关 SQLite 连接——Windows 上
+  被打开的文件删不掉）再删 .obk 与同名 -wal/-shm/.obk.zip 附属，失败自动恢复重载。
+  测试见 library_test.go（排序/禁用/坏库/热加载/删除）。
 - **store**：modernc.org/sqlite 纯 Go + WAL + synchronous=NORMAL；单写 goroutine + 1024
   缓冲 channel（Save 非阻塞，满则丢弃告警，绝不阻塞协议主流程）；攒批 64 条或 500ms 一事务；
   `PruneBefore` 启动时裁 90 天前记录；`LookupByFEN` 精确匹配取最新（沉淀命中链路）；
@@ -239,10 +258,11 @@ sequenceDiagram
   **云库开关行**、03 连接 tile——**列表恒定 100px**：连接数变化只在盒内滚动/留白，
   不推移下方区块、04 走势 tile），「05 高级功能」按钮
   排展开高级面板（调参/建议流/开局库详情/日志/检查更新，一次一个，再点收起）。
-  **面板盒随内容自适应、超高内容盒内滚动**（建议流/日志盒 ~190px——2026-10-30
-  用户定稿"砍一半"：建议流表格可视 120px、日志可视 140px 约 7 行/缓存 40 行，
-  库列表按行数收放 300px 封顶）；窗口宽 960 固定、高按
-  内容自适应（展开 ≈730-810，钳 1040 屏幕安全值，矮屏根滚动兜底）——便当盒不再
+  **五个面板便当盒统一盒高 220px**（2026-11-02 用户定稿：取此前最高面板稍大；
+  wrapBento 垫统一最小高、绝不裁字）——建议流表格/日志/开局库列表区弹性吸收
+  剩余高（下限 120/140/34px，盒内滚动），盒高与数据量解耦（库再多也只滚动）；
+  窗口宽 1020 固定（2026-11-02 加宽）、高按
+  内容自适应（展开 ≈760-830，钳 1040 屏幕安全值，矮屏根滚动兜底）——便当盒不再
   被窗口下沿裁掉。1.5s 自动刷新，取数全经 main 注入的只读回调（服务与 UI 解耦）；
   日志面板滚动跟随用户意图（上翻历史不拉底，回贴底恢复）。跨 goroutine UI 更新
   一律 `fyne.Do`。
@@ -291,6 +311,7 @@ sequenceDiagram
 | `engine.multi_pv` | `3` | 变招路数 |
 | `engine.depth` | `20` | 目标深度（固定深度制） |
 | `engine.movetime_ms` | `0`（按深度） | 时间制搜索上限毫秒；>0 = `go movetime` 优先于深度 |
+| `engine.smart` | `false` | 智能思考（2026-11-02，仅 PC 端）：被迫着法秒出 + 收敛早停；PC 调参面板可热切回写 |
 | `engine.skip_books` | `false` | 不走任何库：跳过桔库/沉淀/云库（含 cloud_first），每步引擎直搜；PC 面板可热切回写 |
 | `library.books_dir` | `"library/books"` | 桔库目录（热加载） |
 | `store.enable` | `true` | 建议沉淀开关 |
@@ -298,6 +319,7 @@ sequenceDiagram
 | `cloudbook.enable` | `false` | 云库查询开关（PC 面板可热切并回写本文件） |
 | `cloudbook.endpoint` | `https://www.chessdb.cn/chessdb.php` | 云库端点（免费公开基建预设） |
 | `cloudbook.api_key` | （空） | 自带 API 的使用者填；空 = 免 key 匿名查询 |
+| `cloudbook.endgame` | `false` | 残局库查询开关（2026-11-01；独立请求/限速/缓存，仅异步补充链路） |
 
 缺失键自动回填默认值；`configs/cabinet.example.toml` 为全量注释示例。
 

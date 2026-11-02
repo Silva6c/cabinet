@@ -47,8 +47,26 @@ jobs:
             --pattern "*.tflite" --dir phone/app/src/main/assets
           ls -la phone/app/src/main/assets/models/
 
+      - name: 解码签名密钥（secrets 注入；未配置则本构建回退 debug 签名）
+        env:
+          CABINET_KEYSTORE_B64: ${{ secrets.CABINET_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$CABINET_KEYSTORE_B64" ]; then
+            mkdir -p "$GITHUB_WORKSPACE/signing"
+            echo "$CABINET_KEYSTORE_B64" | base64 -d > "$GITHUB_WORKSPACE/signing/cabinet-release.keystore"
+          else
+            echo "::warning::未配置 CABINET_KEYSTORE_B64，本构建将回退 debug 签名"
+          fi
+
       - name: 构建 APK
         working-directory: phone
+        env:
+          # 三个 env 与 local.properties 同名同义（gradle 侧 signingEnv 读取）；
+          # CABINET_STORE_FILE 必须绝对路径（github.workspace 展开），相对路径
+          # 的解析基准随 gradle 启动目录漂移
+          CABINET_STORE_FILE: ${{ github.workspace }}/signing/cabinet-release.keystore
+          CABINET_STORE_PWD: ${{ secrets.CABINET_STORE_PWD }}
+          CABINET_KEY_PWD: ${{ secrets.CABINET_KEY_PWD }}
         run: |
           # runner 预装 SDK 未必含 compileSdk 34，先接受 license 让 gradle 自动补装
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null 2>&1 || true

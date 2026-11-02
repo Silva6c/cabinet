@@ -83,6 +83,10 @@ type BookRow struct {
 	Name    string
 	Entries int
 	ModTime time.Time
+	// Enabled 是否参与查询（用户禁用 = 只展示不加载）
+	Enabled bool
+	// Status 非空 = 打开失败原因（坏库警示：点击行弹完整原因）
+	Status string
 }
 
 // SugRow 建议流一行快照。
@@ -104,6 +108,7 @@ type TuneState struct {
 	HashMB     int // 0 = 自动
 	Threads    int // 0 = 自动
 	MultiPV    int
+	Smart      bool // 智能思考（2026-11-02，仅 PC 端；非协议参数，引擎行为开关）
 	Ready      bool // 引擎是否就绪（未就绪时调参控件禁用）
 }
 
@@ -189,6 +194,30 @@ type Options struct {
 	SkipBooksGet func() bool
 	// SkipBooksSet 切换"不走任何库"：立即生效 + 落盘 toml，返回错误消息（空 = 成功）
 	SkipBooksSet func(on bool) string
+	// ── 残局库查询（2026-11-01，02 tile + 高级面板勾选框；EndgameGet==nil = 行缺席）──
+	// 独立于云库开关：开启后本地库/沉淀未命中的局面另发 endgame=1 请求只查
+	// 云库残局库（穷举绝对正解），命中以 endgame:<域名> source 下发
+	EndgameGet func() bool
+	// EndgameSet 切换"残局库查询"：立即生效 + 落盘 toml，返回错误消息（空 = 成功）
+	EndgameSet func(on bool) string
+	// ── 库管理（高级面板→开局库，2026-11-01 便当盒重做；BookImportName==nil =
+	// 导入/排序/启停操作区整体缺席，退化为只读列表）──
+	// BooksDir 库目录绝对路径（"打开库目录"目标与同名冲突检查）
+	BooksDir string
+	// BookImportName 预检待导入文件（.obk 或 .zip）：解压 + schema 校验，
+	// 返回目标文件名（<名>.obk）；空串 = 校验失败（消息即原因）
+	BookImportName func(src string) string
+	// BookImportFile 执行导入（预检 + 拷贝进库目录，fsnotify 热加载自动接管）；
+	// 同名覆盖须由 UI 侧先 Confirm。返回错误消息（空 = 成功）
+	BookImportFile func(src string) string
+	// BookMove 调整选中库优先级（delta -1 上移 / +1 下移），返回错误消息（空 = 成功）
+	BookMove func(name string, delta int) string
+	// BookToggle 启用/禁用选中库，返回错误消息（空 = 成功）
+	BookToggle func(name string, enabled bool) string
+	// BookRemove 永久删除选中库及其同名文件（.obk 与 -wal/-shm/.obk.zip 附属，
+	// 不进回收站），返回错误消息（空 = 成功）；UI 侧必须先弹二次确认。
+	// 实现侧负责先卸载库连接再删文件（Windows 文件锁）。
+	BookRemove func(name string) string
 	// FirewallStatus 防火墙告警查询：非空 = 横幅告警文案（TCP 端口被防火墙
 	// 静默拦截）；空串 = 不告警。nil = 功能不可用（横幅不出现）。
 	// 刷新循环 1.5s 调一次——铁律是刷新路径上绝不拉 netsh 子进程（检测只在
@@ -247,10 +276,19 @@ type Console struct {
 	sugSig   string // 建议流内容签名（行数+首末行时间/着法）——不变则跳过表格重建
 	sugCount *widget.Label
 	// 库区 / 日志区
-	bookLabel    *widget.Label
-	bookListSetH func(float32)    // 库列表可视区调高（行数少随内容、300px 封顶内部滚动）
-	logRich      *widget.RichText // 日志尾部（紧凑渲染：时间+级别着色，见 refreshLog）
-	logScroll    *container.Scroll
+	logRich   *widget.RichText // 日志尾部（紧凑渲染：时间+级别着色，见 refreshLog）
+	logSig    string           // 日志文件 size+mtime 签名（refreshLog 防抖：没动整段跳过）
+	logScroll *container.Scroll
+	// 库管理（2026-11-01 便当盒重做，仿 03 连接：卡片行点选 + 操作区）
+	bookRowsBox  *fyne.Container // 库数据行列表容器（refreshBooks 重建）
+	stackBooks   *fyne.Container // 列表区（Stack：tapCatcher + fixedTable）
+	bookRows     []BookRow
+	bookSig      string // 行数据签名（变了才重建，防 1.5s 抖动）
+	selectedBook string // 当前选中库的名称（操作区作用对象）
+	bookUpBtn    *widget.Button
+	bookDownBtn  *widget.Button
+	bookTglBtn   *widget.Button
+	bookDelBtn   *widget.Button // 删除选中库（悬停变红的危险按钮底层，2026-11-02）
 	// 云库开关行（tileBooks 内；CloudBookGet==nil 时不创建）
 	cloudChk  *widget.Check
 	cloudBusy atomic.Bool // 刷新回写 SetChecked 时抑制 OnChanged 回环（fyne SetChecked 会回调）
@@ -261,14 +299,20 @@ type Console struct {
 	cloudFirstBusy atomic.Bool   // 同款回环抑制
 	skipBooksChk   *widget.Check // "不走任何库"（高级面板→开局库；SkipBooksGet==nil 时不创建）
 	skipBooksBusy  atomic.Bool   // 同款回环抑制
+	endgameChk     *widget.Check // "残局库查询"（高级面板→开局库；EndgameGet==nil 时不创建；
+	// 2026-11-02 用户定稿只留这一份——02 tile 的副本与云库开关并排显重复，已删）
+	endgameBusy atomic.Bool // 同款回环抑制
 
 	// 仪表标签动态化（时间制时"深度 / 目标"→"用时 / 上限"）
 	engLabelCells map[string]func(string)
 
 	// 调参区（引擎桥可调时才有）
-	tunerSelects map[string]*widget.Select // kind → 下拉框
-	tunerHint    *widget.Label             // 调参面板提示行（refreshTuner 追加当前思考模式）
-	tunerBusy    atomic.Bool               // 刷新回写 Selected 时抑制 OnChanged 回环
+	tunerSelects  map[string]*widget.Select // kind → 下拉框
+	tunerBaseOpts map[string][]string       // kind → 基础快捷档（refreshTuner 档外值并入回显用）
+	tunerHint     *widget.Label             // 调参面板提示行（refreshTuner 追加当前思考模式）
+	tunerBusy     atomic.Bool               // 刷新回写 Selected 时抑制 OnChanged 回环
+	smartChk      *widget.Check             // "智能思考"开关（2026-11-02，仅 PC 端；refreshTuner 回写）
+	smartBusy     atomic.Bool               // 回写勾选态时抑制 OnChanged 回环（cloudBusy 同款）
 
 	// 高级面板折叠：基础区（引擎/连接）常显，其余经按钮展开（一次一个）
 	advStack    *fyne.Container              // 当前展开面板的容器（空 = 全部收起）
@@ -313,24 +357,25 @@ type Console struct {
 	// 单设备零增重。trendDevKey 空 = 跟随焦点设备（此时无高亮差异，单设备常态）。
 	trendDevKey     string                    // 选中设备键（空 = 焦点设备）
 	trendDevBtnsBox *fyne.Container           // 按钮排容器（sectionTrend 建，组>1 才显示）
+	trendHeaderBox  fyne.CanvasObject         // 04 头部行（显隐按钮排后手动重排父级用）
 	trendDevBtns    map[string]*widget.Button // 设备键 → 按钮（点击/高亮同步用）
 	trendDevBtnsKey string                    // 按钮排内容键（组列表变化才重建，防 1.5s 抖动）
 }
 
 // 窗口默认尺寸（2026-10-18 实测重校"调到刚好"；2026-10-29 顶栏并入引擎 tile
-// 后兜底高随内容下调）：
-//   - 宽 960 固定：建议流 7 列合计 920（90+130+190+100+250+90+70）+ 左右呼吸
-//     边距与竖向滚动条占位（旧值 900 连最右"深度"列都在可视区外）
+// 后兜底高随内容下调；2026-11-02 用户定稿加宽 960→1020）：
+//   - 宽 1020 固定：建议流 7 列合计 920（90+130+190+100+250+90+70）+ 更宽的
+//     左右呼吸边距（旧值 960 边距刚好，库管理便当盒/走势区加宽后更透气）
 //   - 高不再用固定值：foldedHeight 按根内容实测最小高自适应（旧固定 570 比内容
 //     高 ~65px，底部留出一条空白"下巴"——用户实测反馈后改掉）
 var (
-	winSizeFolded = fyne.NewSize(960, 530) // 高仅作 contentRoot 未就绪时的兜底
+	winSizeFolded = fyne.NewSize(1020, 530) // 高仅作 contentRoot 未就绪时的兜底
 	// rootGap 根布局纵向间距（buildContent 的 vbox 与 cols2 共用视觉语言；
 	// expandedHeight/foldedHeight 计算时引用同一常量，防两处魔数静默失配）
 	rootGap float32 = 12
 	// advMaxExpand 展开态窗口高度上限（2026-10-30 重定语义：屏幕安全值而非内容
-	// 钳制）。高级面板盒随内容自适应、超高内容盒内滚动（建议流 ~345 / 日志 ~350 /
-	// 其余 100-200），展开总高 = 折叠内容 + 盒 ≈ 730-990，1080p 工作区完整显示
+	// 钳制）。高级面板盒统一 220（advPanelH，2026-11-02 用户定稿；此前随内容
+	// 100-350 不等），展开总高 = 折叠内容 + 220，1080p 工作区完整显示
 	// **便当盒永不被裁**；1040 仅供极端内容兜底，矮屏（768 高笔记本）由根 scroll
 	// 兜底滚动。
 	advMaxExpand = float32(1040)
@@ -443,6 +488,7 @@ func (c *Console) build() {
 // buildContent 组装根内容（窗口与截图测试共用；测试用 software 画布渲染同一棵树）
 func (c *Console) buildContent() fyne.CanvasObject {
 	c.tunerSelects = map[string]*widget.Select{}
+	c.tunerBaseOpts = map[string][]string{}
 	c.advBtns = map[string]*widget.Button{}
 	c.advPanels = map[string]fyne.CanvasObject{}
 	c.advStack = container.NewStack()

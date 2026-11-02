@@ -17,7 +17,10 @@
 
 > **合规声明**：本项目**只读屏幕、只做提示**——不自动走子、无点击注入、
 > 无障碍服务或 Root 能力，仅使用 MediaProjection 录屏 + 悬浮窗展示。
-> 请在对局允许辅助的场景使用，并对自己的账号行为负责。
+> 预设场景为单机复盘、离线分析、个人学习，或使用者拥有合法使用权 /
+> 已获运营方授权的环境；不鼓励、不支持用于未授权的在线竞技对局，使用者
+> 对自己的账号行为负责。设计边界与自行验证方法见
+> [DESIGN_BOUNDARIES.md](DESIGN_BOUNDARIES.md)。
 
 ## 功能特性
 
@@ -72,6 +75,15 @@ scripts\build-exe.bat
 | YOLO 模型 `yolov5n_xq_fp16.tflite` | 手机端 `assets/`（构建前放入） | 见 THIRD-PARTY-NOTICES §3 |
 | ONNX 模型 `4_v6-0301.onnx` / `nano_v3-0319.onnx` | 手机端 `assets/models/`（构建前放入） | [yolo12138/Chinese_Chess_Recognition](https://huggingface.co/spaces/yolo12138/Chinese_Chess_Recognition)（MIT） |
 
+**自定义开局库**（2026-11-01）：仅支持 OBK（兵河格式，SQLite）文件；库文件
+自备，使用时请遵守原发布者授权并致谢原作者（本软件不分发任何库文件）。控制台
+高级面板 → 开局库可"导入库文件"（自动预检 schema，坏库导入即报错）、调整优先级
+（上移/下移）、单库启用/禁用、"删除"库（二次确认；连同库文件与同名 -wal/-shm/
+.obk.zip 附属一并删除，不进回收站），全部即时热生效并落盘；也可手工把 `.obk` 拷进
+`library/books/`（同名 `.obk.zip` 自动解压）。多库查询按列表顺序首个命中即用。
+残局库：控制台"残局库查询"开关（默认关）——本地库未命中时向云库穷举残局表
+（chessdb.cn）查询绝对正解，⚠局面 FEN 同样发往端点。
+
 放行防火墙：管理员运行 `scripts/allow-9527.bat`（或按提示手工放行 9527 端口）。
 
 ### 2. 手机端
@@ -92,6 +104,27 @@ cd phone
 
 > Android 14+ 的 MediaProjection 授权为一次性：每次录屏会话结束需要重新授权，
 > 这是系统行为，重新点亮悬浮窗即可。
+
+## 签名与安全获取
+
+- **唯一官方获取渠道**：本仓的 GitHub Releases 页面。任何其他渠道分发的 APK
+  与本项目无关，请勿安装。
+- **发布签名核验**：正式版 APK 由专用密钥签名（v1.0.0 及更早的 Release 包为
+  临时 debug 签名，不适用此指纹），签名证书 SHA-256 指纹：
+
+  ```
+  9c6a8b8668b297c590b4f771db0f963f1090dc3037da9e6df4633cbb112b7801
+  ```
+
+  核验（Android SDK build-tools 自带 apksigner）：
+
+  ```bash
+  apksigner verify --print-certs cabinet_*.apk
+  ```
+
+- 从源码自建且未配置签名三要素（`CABINET_STORE_FILE` / `CABINET_STORE_PWD` /
+  `CABINET_KEY_PWD`，见 `phone/app/build.gradle.kts`）时，产物自动回退 debug
+  签名：功能无差别，但与官方包签名不同，不能互相覆盖升级。
 
 ## 故障排查（FAQ）
 
@@ -125,6 +158,7 @@ cd phone
 
 | 文档 | 内容 |
 |---|---|
+| [设计边界](DESIGN_BOUNDARIES.md) | 客观能力边界：只读输入、输出形态、权限与协议面、红线清单、自行验证方法 |
 | [用户说明书](docs/用户说明书.md) | 每个功能的详细用法：控制台五面板、悬浮窗全部按钮、建议来源链 |
 | [小白更新手册](docs/小白更新手册.md) | 安装/升级/搬家/备份/排障全场景 |
 | [系统技术文档](docs/technical-overview.md) | 双端架构、模块详解、安全模型、部署运维 |

@@ -38,7 +38,10 @@ var (
 	trendUpFill     = color.NRGBA{R: qiZhuBrand.R, G: qiZhuBrand.G, B: qiZhuBrand.B, A: 0x28}
 	trendDownFill   = color.NRGBA{R: qiIndigo.R, G: qiIndigo.G, B: qiIndigo.B, A: 0x28}
 	trendGridColor  = color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0x12}
-	trendZeroColor  = color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0x2E}
+	// 零基准线（2026-11-02 用户定稿：半透明白 → 明亮黄）：横贯曲线带的"平"参照
+	// 线要一眼可辨，琥珀（qiAmber）是色板里唯一明亮暖色，与优/劣双色面积图
+	// （朱砂/靛青）色相均不冲突
+	trendZeroColor = qiAmber
 )
 
 // sectionTrend 走势分区：头部（当前胜率小字 + 多设备时的设备按钮排）+ 曲线带。
@@ -59,8 +62,12 @@ func (c *Console) sectionTrend() fyne.CanvasObject {
 	c.trendDevBtnsBox.Hide() // 组列表就绪前隐藏（refreshTrend 按 >1 组显隐）
 	c.trendDevBtns = map[string]*widget.Button{}
 	c.trendCurve = newTrendCurve()
+	// 头部行引用留存：显隐按钮排后父级 HBox 须手动 Refresh 重排（fyne 隐藏
+	// 子项不会自动触发父级布局，硬留一个按钮宽的空洞到下次窗口重排）
+	header := sectionHeader("04", "走势", c.trendWin, c.trendDevBtnsBox)
+	c.trendHeaderBox = header
 	return bentoTile(container.NewVBox(
-		sectionHeader("04", "走势", c.trendWin, c.trendDevBtnsBox),
+		header,
 		c.trendCurve,
 	))
 }
@@ -100,8 +107,12 @@ func (c *Console) refreshTrend() {
 			}
 		}
 		c.trendWinSet(wr)
-		c.trendWin.Color = col
-		c.trendWin.Refresh()
+		// 颜色判重：canvas.Text 无判重机制，1.5s 轮询常态是档位没变，等值时
+		// 省一次 Refresh（col 恒为包内 NRGBA 常量，接口值比较安全）
+		if c.trendWin.Color != col {
+			c.trendWin.Color = col
+			c.trendWin.Refresh()
+		}
 	}
 	key := c.trendDevKey + "|" + fmt.Sprintf("%s|%d", snap.GameID, n)
 	if n > 0 {
@@ -140,9 +151,10 @@ func (c *Console) syncTrendDevBtns() {
 			c.trendDevKey = "" // 空键 = 焦点设备，语义恒可用
 		}
 	}
+	// 重建键含 Label：设备昵称改动重连后 Key 不变，漏 Label 会一直显示旧昵称
 	optKey := fmt.Sprint(len(devs))
 	for _, d := range devs {
-		optKey += "|" + d.Key
+		optKey += "|" + d.Key + "|" + d.Label
 	}
 	if c.trendDevBtnsKey == optKey {
 		return // 列表未变：高亮由 trendSelectDevice 在切换时同步，无需重排
@@ -159,7 +171,18 @@ func (c *Console) syncTrendDevBtns() {
 		c.trendDevBtns[dk] = btn
 		c.trendDevBtnsBox.Add(btn)
 	}
-	c.trendDevBtnsBox.Hidden = len(devs) <= 1
+	// 显隐走 Hide/Show 并手动重排父级（直写 Hidden 字段连 repaint 都没有，
+	// 且不触发父级 HBox 重排——见 sectionTrend 注）
+	if wantHidden := len(devs) <= 1; wantHidden != c.trendDevBtnsBox.Hidden {
+		if wantHidden {
+			c.trendDevBtnsBox.Hide()
+		} else {
+			c.trendDevBtnsBox.Show()
+		}
+		if c.trendHeaderBox != nil {
+			c.trendHeaderBox.Refresh()
+		}
+	}
 	// 多设备首现：自动选中最近活跃组（服务端按活跃降序返回第一项），
 	// 避免无高亮的"悬空"状态；单设备不选（按钮已隐藏）
 	if len(devs) > 1 && c.trendDevKey == "" {

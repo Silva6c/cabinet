@@ -152,8 +152,13 @@ type Engine struct {
 	opts Options
 	log  *slog.Logger
 
-	events    chan Event   // 事件流
-	pending   chan string  // 最新覆盖请求槽（容量 1，满了替换）
+	events  chan Event  // 事件流
+	pending chan string // 最新覆盖请求槽（容量 1，满了替换）
+	smart   atomic.Bool // 智能思考（2026-11-02，仅 PC 端）：按局面与收敛度自适应
+	// 算力，机制见 smart.go；关 = 现行行为逐字节不变。手机端无感知（协议零改动）
+	pendingMu sync.Mutex // 保护 Request 的"排干+放入"两段原子性（多设备并行时
+	// 各自 readLoop 并发调用 Request：无锁交错可为 G1 放入后被 G2 排干、G2 的
+	// 放入撞满槽被丢——较新请求反被丢。锁内串行化后最后到达者恒占槽）
 	state     atomic.Value // string: loading/ready/error
 	searching atomic.Bool  // 是否在搜索中（Request 据此决定是否发 stop）
 	preempt   atomic.Bool  // 外部打断标志：Request 发 stop 时置位，collect 收束时消费
@@ -239,6 +244,21 @@ func (e *Engine) SetMoveTimeMS(ms int) bool {
 
 // MoveTimeMS 当前时间制上限（0 = 深度制）。
 func (e *Engine) MoveTimeMS() int { return int(e.moveTimeMS.Load()) }
+
+// SetSmart / Smart 智能思考开关（2026-11-02，PC 调参面板；机制见 smart.go）。
+// 开启后两级自适应生效：被迫着法预算地板 + 主线收敛早停；关闭 = 现行行为
+// 逐字节不变。手机端无感知（无对应协议字段、无按钮）。
+func (e *Engine) SetSmart(on bool) {
+	e.smart.Store(on)
+	if on {
+		e.log.Info("智能思考已开启（简单局面秒出，收敛即提前收束）")
+	} else {
+		e.log.Info("智能思考已关闭")
+	}
+}
+
+// Smart 当前智能思考开关状态。
+func (e *Engine) Smart() bool { return e.smart.Load() }
 
 // SetHashMB 设置置换表大小（MB）。0 = 自动（defaultHashMB，2GiB）；
 // 手动范围 32–32768（对齐皮卡鱼 2026-09 版 Hash 上限 33554432MB，按产品档位收敛）。
@@ -382,10 +402,15 @@ func (e *Engine) setState(s string) {
 	}
 }
 
-// emit 事件入队：丢旧保新。隐式契约有三——① 只在 Run goroutine 内被调用
-// （setState/searchLoop/collect），"丢一再重试"依赖单生产者才保证必成功，
-// EventBestmove/EventCritical 因此永不丢；② 绝不可改为阻塞发送：collect 被
-// 阻塞会经 stdout 管道反压拖住引擎进程；③ 64 容量用于吸收 MultiPV info 突发。
+// emit 事件入队：丢旧保新。契约有三——① 只在 Run goroutine 内被调用
+// （setState/searchLoop/collect），单生产者保证"丢一再重试"后本次事件必入队；
+// ② 绝不可改为阻塞发送：collect 被阻塞会经 stdout 管道反压拖住引擎进程；
+// ③ 64 容量用于吸收 MultiPV info 突发。
+// ⚠①的准确边界（2026-11-02 审查修正）：被保证的是"本次 emit 的事件必入队"，
+// 不是"Bestmove/Critical 永不丢"——消费端 enginePump 被慢客户端拖住（网络写
+// 至多 3s）且 info 突发灌满 64 槽时，挤掉的是队头最旧事件，可能正是排队的
+// Critical（丢失=坏局面隔离延后，reSearchLatest 有 PositionLegal 前置闸兜底）。
+// 正常消费速率下二者不会被挤出。
 func (e *Engine) emit(ev Event) {
 	select {
 	case e.events <- ev:
@@ -404,7 +429,10 @@ func (e *Engine) emit(ev Event) {
 
 // Request 请求分析一个局面：最新覆盖——替换等待槽并打断进行中的搜索。
 func (e *Engine) Request(fen string) {
-	// 槽满则先取旧再放新，保证只保留最新
+	// 槽满则先取旧再放新，保证只保留最新。排干与放入必须在锁内成对完成：
+	// 两段之间无锁时并发 Request 可交错成"G1 放入→G2 排干→G2 放入撞满被
+	// 丢"，较新请求反被丢（与最新覆盖语义相反）；锁内最后到达者恒占槽。
+	e.pendingMu.Lock()
 	select {
 	case <-e.pending:
 	default:
@@ -413,6 +441,7 @@ func (e *Engine) Request(fen string) {
 	case e.pending <- fen:
 	default:
 	}
+	e.pendingMu.Unlock()
 	// 搜索中则打断：stop 后 bestmove 很快返回，旧结果由 preempt 标志作废。
 	// ⚠已知极窄竞态（接受）：本判定与下方 preempt.Store 之间若搜索恰好自然
 	// 收束（collect 的 Swap 先消费了 preempt 位），残留标志会作废下一轮搜索
@@ -633,6 +662,7 @@ func (e *Engine) searchLoop(ctx context.Context, p proc, warmup string) error {
 	for {
 		// 取最新请求（无任务轮询等待）
 		var fen string
+		var warm bool // 本轮是否 warmup 预热（智能思考的地板/早停豁免依据）
 		got := false
 		if first {
 			first = false
@@ -640,6 +670,7 @@ func (e *Engine) searchLoop(ctx context.Context, p proc, warmup string) error {
 			case fen = <-e.pending: // 用户请求优先
 			default:
 				fen = warmup // 预热兜底
+				warm = true
 			}
 			got = true
 		}
@@ -664,7 +695,13 @@ func (e *Engine) searchLoop(ctx context.Context, p proc, warmup string) error {
 					}
 					e.log.Info("引擎参数已空闲生效", "setoption", opt)
 				}
-			case <-time.After(100 * time.Millisecond):
+			case <-ctx.Done():
+				// Run 退出（Close）在等待分支直达：此前用 100ms 轮询
+				// ctx.Err()——引擎 7×24 常驻，空闲时每秒 10 个 timer
+				// +channel 纯浪费；pending/tuneNotify 本就即时唤醒，
+				// ctx.Done 补上第三个即时出口后轮询定时器整个退役
+				_ = p.WriteLine("quit")
+				return nil
 			}
 		}
 
@@ -693,16 +730,32 @@ func (e *Engine) searchLoop(ctx context.Context, p proc, warmup string) error {
 		}
 		// 思考模式二选一：时间制（movetime>0）优先——go movetime 自行收束；
 		// 深度制 go depth 由 searchTimeout 兜底。打断/最新覆盖机制两制共用。
-		goCmd := fmt.Sprintf("go depth %d", e.Depth())
-		if mt := e.moveTimeMS.Load(); mt > 0 {
-			goCmd = fmt.Sprintf("go movetime %d", mt)
+		// 智能思考开关本轮快照：warmup 预热豁免（保预热本意）；中途切换开关
+		// 对进行中的本轮无影响、下一轮生效——避免半轮内状态翻转的判定歧义
+		smartOn := e.smart.Load() && !warm
+		// 智能思考（PC 端，见 smart.go）：被迫/极少着法局面本轮预算压地板——
+		// 只作用于本轮 go 拼装（局部 min），不碰用户原子/落盘/回显
+		depth := e.Depth()
+		movetime := int(e.moveTimeMS.Load())
+		if smartOn {
+			if dFloor, mtFloor := smartBudget(fen); dFloor > 0 {
+				if movetime > 0 {
+					movetime = min(movetime, mtFloor)
+				} else {
+					depth = min(depth, dFloor)
+				}
+			}
+		}
+		goCmd := fmt.Sprintf("go depth %d", depth)
+		if movetime > 0 {
+			goCmd = fmt.Sprintf("go movetime %d", movetime)
 		}
 		if err := p.WriteLine(goCmd); err != nil {
 			lineErr = err
 			break
 		}
 
-		result, aborted, err := e.collect(ctx, p, fen)
+		result, aborted, err := e.collect(ctx, p, fen, smartOn)
 		e.searching.Store(false)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -722,11 +775,13 @@ func (e *Engine) searchLoop(ctx context.Context, p proc, warmup string) error {
 }
 
 // collect 收束一次搜索：读 info/bestmove 直到 bestmove、超时强停或被打断。
-// aborted=true 表示期间出现新请求（旧结果作废）。
-func (e *Engine) collect(ctx context.Context, p proc, fen string) (*Result, bool, error) {
+// aborted=true 表示期间出现新请求（旧结果作废）。smartOn 为智能思考本轮
+// 快照（searchLoop 已折算 warmup 豁免）。
+func (e *Engine) collect(ctx context.Context, p proc, fen string, smartOn bool) (*Result, bool, error) {
 	lines := make(map[int]*Info)
 	deadline := time.Now().Add(e.searchTimeout)
 	stopped := false
+	var smart smartTracker // 智能思考早停状态机（每轮新建 = 状态随搜索复位）
 	for {
 		if ctx.Err() != nil {
 			return nil, false, ctx.Err()
@@ -776,6 +831,13 @@ func (e *Engine) collect(ctx context.Context, p proc, fen string) (*Result, bool
 			if info, ok := parseInfo(tokens); ok {
 				lines[info.MultiPV] = info
 				e.emit(Event{Kind: EventInfo, Fen: fen, Info: info})
+				// 智能思考·收敛早停（PC 端，见 smart.go）：主线（MultiPV 缺省
+				// 或 1）判据命中即提前 stop——不置 preempt（本轮结果照常收束
+				// 下发），与超时强停互不干扰（早停先到则 deadline 不再触发）
+				if smartOn && (info.MultiPV == 0 || info.MultiPV == 1) && smart.observe(info) {
+					e.log.Info("智能思考：主线收敛，提前收束", "depth", info.Depth, "fen", fen)
+					_ = p.WriteLine("stop")
+				}
 			}
 		case "bestmove":
 			best := "null"

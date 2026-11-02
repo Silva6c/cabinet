@@ -8,6 +8,7 @@ import (
 	_ "modernc.org/sqlite"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -57,14 +58,26 @@ func loadVectorFile(t *testing.T, path string) []vector {
 	return doc.Vectors
 }
 
-// bookPaths 返回可用的桔库路径（library/books/*.obk；缺失时用例 Skip）。
+// bookPaths 返回可用的桔库路径（只取文件名含"桔库"的库；缺失时用例 Skip）。
+// 向量基准是桔库的权威锚点，而 books_dir 里可能混有用户自备的其他库（如
+// 狂刀库）——多库"首中即返回"语义下，字典序在前的非桔库会让起始局面返回
+// 不同的最佳着法，向量比对被无辜打破（2026-11-02 实录）。测试只锚桔库。
 func bookPaths(t *testing.T) []string {
 	t.Helper()
 	matches, err := filepath.Glob("../../library/books/*.obk")
-	if err != nil || len(matches) == 0 {
+	if err != nil {
 		t.Skip("library/books/*.obk 不存在（版权物不入 git）：跳过查库比对，仅跑哈希向量")
 	}
-	return matches
+	var ju []string
+	for _, p := range matches {
+		if strings.Contains(filepath.Base(p), "桔库") {
+			ju = append(ju, p)
+		}
+	}
+	if len(ju) == 0 {
+		t.Skip("library/books/ 无桔库：跳过查库比对，仅跑哈希向量")
+	}
+	return ju
 }
 
 // TestHashVectors 双端哈希一致性（核心铁闸）：每个向量用 Go 版 ParseFEN+GetZobrist

@@ -257,9 +257,12 @@ func (c *Checker) Check(ctx context.Context) {
 	c.state = StateUpdateAvail
 	c.message = "发现新版本 " + rel.TagName
 	c.assetURL, c.assetDigest, c.assetSize = "", "", 0
-	if name, url, digest, size := pickUpdateAsset(rel); name != "" {
+	if name, url, digest, size := pickUpdateAsset(rel); name != "" && digest != "" {
 		c.assetURL, c.assetDigest, c.assetSize = url, digest, size
 	} else {
+		// 升级包缺失**或命中但无官方 sha256 digest**（无校验绝不安装，与
+		// canInstallLocked 同口径）：提示手动下载——此前命中无 digest 包时
+		// 只报"发现新版本"却静默缺席下载按钮，用户无解释（2026-11-02 审查修正）
 		c.message += "（无带校验值的升级包，请到 Release 页手动下载）"
 	}
 }

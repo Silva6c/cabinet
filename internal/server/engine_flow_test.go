@@ -31,6 +31,7 @@ type fakeBridge struct {
 	hash       atomic.Int64
 	threads    atomic.Int64
 	multiPV    atomic.Int64
+	smart      atomic.Bool
 	// onRequest 由测试注入的事件脚本：fen → 事件序列（后台发送）
 	onRequest func(fb *fakeBridge, fen string)
 }
@@ -101,6 +102,11 @@ func (fb *fakeBridge) MoveTimeMS() int { return int(fb.moveTimeMS.Load()) }
 func (fb *fakeBridge) HashMB() int     { return int(fb.hash.Load()) }
 func (fb *fakeBridge) Threads() int    { return int(fb.threads.Load()) }
 func (fb *fakeBridge) MultiPV() int    { return int(fb.multiPV.Load()) }
+
+// SetSmart / Smart 智能思考开关（EngineTuner 接口 2026-11-02 新增成员）：
+// 假桥存独立原子位，供 smart kind 的 apply/no-op 检测断言用
+func (fb *fakeBridge) SetSmart(on bool) { fb.smart.Store(on) }
+func (fb *fakeBridge) Smart() bool      { return fb.smart.Load() }
 
 func (fb *fakeBridge) Request(fen string) {
 	fb.mu.Lock()

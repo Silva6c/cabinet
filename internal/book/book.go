@@ -53,11 +53,65 @@ type Book struct {
 type Store struct {
 	books []*Book
 	log   *slog.Logger
+	// failed 打开失败的库（坏库上报：不进查询链，但控制台库区要能显示原因）
+	failed []BookError
+}
+
+// BookError 打开失败的库及其原因（控制台库区坏库警示用）。
+type BookError struct {
+	// Name 库名（文件名去 .obk 后缀，与 Book.Name 同口径）
+	Name string
+	// Err 失败原因（含路径与具体校验错）
+	Err string
 }
 
 // querySQL 逐字对齐 上游 openbook/BHOpenBook.java:27-32 的查询
 // （原版用 String.format 拼 vkey，语义等同参数绑定；排序与 limit 逐字一致）。
 const querySQL = "select * from bhobk where vvalid = 1 and vkey = ? order by vscore desc, vwin desc limit 5"
+
+// bhobkCols bhobk 建表列序（与 Query 的 Scan 目标顺序逐字对表，见该处
+// "列序铁闸"注释）。打开库时按 PRAGMA table_info 的定义序逐位核对。
+var bhobkCols = []string{"id", "vkey", "vmove", "vscore", "vwin", "vdraw", "vlost", "vvalid", "vmemo", "vindex"}
+
+// checkBHOBKSchema 校验 bhobk 表的列名与列序。上游 Java 按列名取值天然免疫
+// 列序，Go 按 select * 位置 Scan——同名不同列的"假桔库"（自制/损坏/未来
+// 变体 schema）会在查询时整行错位且无报错，必须在打开时拦下。
+// 只查列名与顺序，不查类型（上游 schema 类型即可用性的事实源，用户自备库
+// 出现 INTEGER/TEXT 混写时仍可查询，Scan 按驱动转换语义走）。
+func checkBHOBKSchema(db *sql.DB) error {
+	rows, err := db.Query("pragma table_info(bhobk)")
+	if err != nil {
+		return fmt.Errorf("读取表结构失败: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var got []string
+	for rows.Next() {
+		// table_info 行：cid, name, type, notnull, dflt_value, pk——后四列只丢弃
+		var cid int
+		var name, typ string
+		var notnull int
+		var dflt, pk any
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			return fmt.Errorf("读取表结构行失败: %w", err)
+		}
+		got = append(got, name)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("遍历表结构失败: %w", err)
+	}
+	for i, want := range bhobkCols {
+		if i >= len(got) {
+			return fmt.Errorf("列数不足（应 %d 列，实际 %d 列）", len(bhobkCols), len(got))
+		}
+		if got[i] != want {
+			return fmt.Errorf("第 %d 列应为 %q，实际 %q（列名/列序与桔库 schema 不符）", i+1, want, got[i])
+		}
+	}
+	if len(got) != len(bhobkCols) {
+		return fmt.Errorf("列数不符（应 %d 列，实际 %d 列）", len(bhobkCols), len(got))
+	}
+	return nil
+}
 
 // OpenBook 打开单个 .obk（须为已解压的 SQLite 文件；zip 包请先行解压）。
 // 以只读模式打开（file:...?mode=ro），库文件永不写入。只读的原因：库文件
@@ -83,6 +137,11 @@ func OpenBook(path string, logger *slog.Logger) (*Book, error) {
 	if err := db.QueryRow("select count(*) from sqlite_master where type='table' and name='bhobk'").Scan(&n); err != nil || n == 0 {
 		_ = db.Close()
 		return nil, fmt.Errorf("不是有效的桔库（缺 bhobk 表）: %s", path)
+	}
+	// 列名/列序校验：select * 的 Scan 契约依赖冻结 schema，错位库打开即拦
+	if err := checkBHOBKSchema(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 	// 条数只做展示用：count 一次（主键索引扫，很快），失败不致命（显示 0）
@@ -164,7 +223,10 @@ func OpenStore(logger *slog.Logger, paths ...string) (*Store, error) {
 		}
 		b, err := OpenBook(p, logger)
 		if err != nil {
-			// 单库坏/缺不拖垮整体：记日志跳过（多库场景其余库仍可用）
+			// 单库坏/缺不拖垮整体：记日志跳过（多库场景其余库仍可用），
+			// 同时记入 failed 供控制台库区显示坏库原因（2026-11-01 坏库反馈）
+			name := strings.TrimSuffix(filepath.Base(p), filepath.Ext(p))
+			s.failed = append(s.failed, BookError{Name: name, Err: err.Error()})
 			if logger != nil {
 				logger.Warn("桔库打开失败，跳过", "path", p, "err", err)
 			}
@@ -184,6 +246,9 @@ func (s *Store) Close() {
 
 // Len 已成功打开的库数量。
 func (s *Store) Len() int { return len(s.books) }
+
+// Errors 打开失败的库清单（坏库上报；不随查询热路径变动，库集合重建时刷新）。
+func (s *Store) Errors() []BookError { return s.failed }
 
 // BookStat 单库的静态信息（控制台库区显示）。
 type BookStat struct {

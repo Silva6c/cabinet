@@ -72,7 +72,7 @@ class RemoteAnalysisClient(
          * 出现"手机 0.25g / 电脑 2048"的脱节——2026-10-02 用户反馈）。
          */
         fun onServerEngineConfig(depth: Int, hashMB: Int, movetimeMS: Int?)
-        /** 收到建议（source="book:库名" 或 "engine"；分数为红方视角，可为空=库命中） */
+        /** 收到建议（source="book:库名"/"cloud:域名"/"endgame:域名" 或 "engine"；分数为红方视角，可为空=库命中） */
         fun onSuggestion(sug: RemoteSuggestion)
         /** 引擎实时指标（带指标的 status 帧，搜索中 500ms 节流） */
         fun onEngineMetrics(state: String, depth: Int, nodes: Long, nps: Long, hashfull: Int)
@@ -151,20 +151,21 @@ class RemoteAnalysisClient(
                 // 成了手机感知半开的唯一机制（等 TCP 层超时要数分钟）。协议层 pong 由
                 // TCP 栈自动应答、不经应用层帧，PC 的 45s 应用层判定零干扰
                 .pingInterval(10, TimeUnit.SECONDS)
-            if (serverUrl.startsWith("wss") && lockedFp.isEmpty() &&
+            // release 交付包禁止无指纹 trust-all（2026-10-27 立项收口，2026-10-31
+            // 修复真正落地——此前本分支只打日志未拦截，trust-all 照常生效）：命中
+            // 时不安装任何自定义 TrustManager/HostnameVerifier，连接走 OkHttp
+            // 默认标准 TLS 校验——自签证书无系统信任锚，校验必然失败 → 既有
+            // onConnectError 错误链给出配对指引。trust-all 联调仅限 debug 构建；
+            // 正式使用必须先扫码配对写入指纹（走下方指纹锁定分支）
+            val enforceNoFp = serverUrl.startsWith("wss") && lockedFp.isEmpty() &&
                 com.cabinet.BuildConfig.ENFORCE_TLS_FINGERPRINT
-            ) {
-                // release 交付包禁止无指纹 trust-all（2026-10-27 规范轮收口）：
-                // 不安装信任所有证书的 TrustManager，连接走标准 TLS 校验——
-                // 自签证书校验失败 → OkHttp 报错 → 既有 onConnectError 错误链
-                // 给出指引。联调模式（trust-all）仅限 debug 构建；正式使用必须
-                // 先完成扫码配对写入指纹（走下方指纹锁定分支）
+            if (enforceNoFp) {
                 RLog.w(TAG, "release 构建拒绝无指纹 trust-all 联调模式，请先扫码配对写入指纹")
             }
-            if (serverUrl.startsWith("wss")) {
+            if (serverUrl.startsWith("wss") && !enforceNoFp) {
                 if (lockedFp.isEmpty()) {
                     // 联调模式（未配指纹）：信任所有 + 主机名不校验，等同 mockphone 的 InsecureSkipVerify
-                    // （release 构建已被上方 ENFORCE 分支拦截告警，不会真正建立不安全连接）
+                    // （仅 debug 构建可达：release 命中 enforceNoFp 时上方分支已整体跳过本块）
                     val tm = object : X509TrustManager {
                         override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) {}
                         override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String) {}
@@ -350,7 +351,19 @@ class RemoteAnalysisClient(
             return
         }
         setState(ConnectionState.CONNECTING)
-        val req = Request.Builder().url(serverUrl).build()
+        // 用户手填的 serverUrl 可能无法解析为 http/https（如漏 scheme 的
+        // "192.168.1.10:9527/ws"）——OkHttp 对此抛 IllegalArgumentException。
+        // 不接住：测试连接/开始识别（主线程链路）直接闪退；重连定时器里炸死
+        // net HandlerThread 则此后所有重连静默失效、状态卡"连接中"。
+        // 指纹非法分支同款语义：配置错误不重试，明示用户修正。
+        val req = try {
+            Request.Builder().url(serverUrl).build()
+        } catch (e: IllegalArgumentException) {
+            RLog.w(TAG, "serverUrl 无法解析: $serverUrl")
+            setState(ConnectionState.DISCONNECTED)
+            listener.onConnectError("电脑地址格式非法（应以 ws:// 或 wss:// 开头）——请检查后重试")
+            return
+        }
         val newWs = client.newWebSocket(req, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 RLog.i(TAG, "ws open，等待 PC hello（协议 §3）")
@@ -415,6 +428,11 @@ class RemoteAnalysisClient(
             "连接超时（IP 不可达，或电脑防火墙未放行 $PORT_HINT）"
         is java.net.ConnectException ->
             "连接被拒绝（电脑端未启动，或地址/端口不对）"
+        // SSLHandshakeException 是 SSLException 子类，必须在前：release 包未配
+        // 指纹时走系统标准 TLS 校验（2026-10-31 起 trust-all 已收口），自签证书
+        // 无系统信任锚必然在此失败——文案要引导配对，而不是泛泛的"握手失败"
+        is javax.net.ssl.SSLHandshakeException ->
+            "TLS 证书校验未通过（自签证书需先配对）——请在电脑端\"②连接\"区扫码配对后再连"
         // SSLPeerUnverifiedException 是 SSLException 子类，必须在前：
         // 指纹锁定校验失败时 OkHttp 抛此异常，要给出区别于一般 TLS 错误的指引
         is javax.net.ssl.SSLPeerUnverifiedException ->
@@ -607,7 +625,8 @@ class RemoteAnalysisClient(
 
 /** PC → 手机 suggestion（§4.5）。score 为红方视角（PC 已换算）：cp 正=红优，mate 正=红将杀。 */
 class RemoteSuggestion(
-    val source: String,          // "book:<库名>" / "cloud:<域名>"（2026-10-30 起）或 "engine"
+    val source: String,          // "book:<库名>" / "cloud:<域名>"（2026-10-30 起）/
+                                 // "endgame:<域名>"（2026-11-01 起）或 "engine"
     val bestMove: String,        // UCCI 4 字符
     val scoreCp: Int?,
     val scoreMate: Int?,
@@ -633,6 +652,11 @@ class RemoteSuggestion(
      *  不识别该前缀会落"引擎建议"分支显示"（暂定）"白等一个永远不来的收束帧 */
     val fromCloud: Boolean get() = source.startsWith("cloud:")
     val cloudHost: String get() = if (fromCloud) source.removePrefix("cloud:") else ""
+    /** 残局库建议（2026-11-01 PC 端残局查询新增来源）：云库穷举残局正解，帧形态
+     *  与 cloud 帧同口径（无分数/PV/深度）。PC 端引擎已定着时照发——手机端据此
+     *  登记为"第二意见"渲染双箭头/一致文案（覆盖语义在 ScreenAssistService） */
+    val fromEndgame: Boolean get() = source.startsWith("endgame:")
+    val endgameHost: String get() = if (fromEndgame) source.removePrefix("endgame:") else ""
 }
 
 // 协议帧（仅本端发送的类型）

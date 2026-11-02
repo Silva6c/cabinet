@@ -8,11 +8,14 @@
 package console
 
 import (
+	"fmt"
 	"image/color"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
@@ -117,6 +120,70 @@ func (v *vbox) MinSize(objs []fyne.CanvasObject) fyne.Size {
 	return fyne.NewSize(w, h)
 }
 
+// vboxFlex 纵向堆叠 + 弹性子项：布局同 vbox，但第 flex 个子项额外吸收
+// 容器高减去其余子项最小高（与间距）的剩余部分——统一盒高（advPanelH）下
+// 让滚动/列表区填满盒子而不是在盒底留白条。flex 索引按可见子项序列计；
+// MinSize 与 vbox 一致（弹性只影响分配不影响最小高，盒不会被裁）。
+type vboxFlex struct {
+	gap  float32
+	flex int
+}
+
+func (v *vboxFlex) Layout(objs []fyne.CanvasObject, size fyne.Size) {
+	// 可见子项最小高合计（间距只算可见相邻对），得出弹性子项可吸收的余量
+	mins := make([]float32, len(objs))
+	total := float32(0)
+	nvis := 0
+	for i, o := range objs {
+		if !o.Visible() {
+			continue
+		}
+		mins[i] = o.MinSize().Height
+		total += mins[i]
+		if nvis > 0 {
+			total += v.gap
+		}
+		nvis++
+	}
+	extra := size.Height - total
+	if extra < 0 {
+		extra = 0
+	}
+	y := float32(0)
+	for i, o := range objs {
+		if !o.Visible() {
+			continue
+		}
+		h := mins[i]
+		if i == v.flex {
+			h += extra // 弹性子项吸收剩余高（其最小高已含在 total 里）
+		}
+		o.Move(fyne.NewPos(0, y))
+		o.Resize(fyne.NewSize(size.Width, h))
+		y += h + v.gap
+	}
+}
+
+func (v *vboxFlex) MinSize(objs []fyne.CanvasObject) fyne.Size {
+	var w, h float32
+	first := true
+	for _, o := range objs {
+		if !o.Visible() {
+			continue
+		}
+		s := o.MinSize()
+		if s.Width > w {
+			w = s.Width
+		}
+		h += s.Height
+		if !first {
+			h += v.gap
+		}
+		first = false
+	}
+	return fyne.NewSize(w, h)
+}
+
 // sizedBox 固定最小尺寸容器（状态点/图标等小件）
 type sizedBox struct{ w, h float32 }
 
@@ -171,13 +238,23 @@ func bentoTile(content fyne.CanvasObject) fyne.CanvasObject {
 	return container.NewStack(rect, container.New(padAll(8), content))
 }
 
+// advPanelH 05 高级面板统一盒高（2026-11-02 用户定稿：五个面板便当盒改成
+// 统一大小，取值 = 此前最高面板（日志 196）稍大 → 220）。实现是"最小高"语义：
+// Stack 里垫不可见占位把盒撑到统一高，内容 min 超过它仍随内容长（绝不裁字）；
+// 各面板的滚动/列表区经 vboxFlex 弹性吸收剩余高（库多时盒内滚动，盒高恒定）。
+// 减 16 = bentoTile 的 padAll(8) 上下内边距（占位垫在内容层里）。
+const advPanelH float32 = 220
+
 // wrapBento 高级面板统一包便当盒卡片——展开态与折叠态 tile 同语言
 // （此前四面板是裸 VBox，展开后质感骤降）；nil 穿透（面板不可用语义不变）。
+// 占位只贡献最小高不绘制（sizedBox 作布局、无子对象：Layout 空转，MinSize
+// 即占位尺寸），盒高恒为 advPanelH 与内容多少无关。
 func wrapBento(p fyne.CanvasObject) fyne.CanvasObject {
 	if p == nil {
 		return nil
 	}
-	return bentoTile(p)
+	return bentoTile(container.NewStack(
+		container.New(sizedBox{w: 10, h: advPanelH - 16}), p))
 }
 
 // sectionHeader 分区头：编号（朱砂等宽小字，设计稿 §06 tile-hd .num）＋ 标题 ＋
@@ -429,15 +506,23 @@ func (r *clientRow) CreateRenderer() fyne.WidgetRenderer {
 	return widget.NewSimpleRenderer(r.contentBox)
 }
 
-// setText 判重更新（widget.Label.SetText 自带判重，此处仅统一入口语义）
-func (r *clientRow) setText(l *widget.Label, v string) {
+// setText 判重更新：widget.Label.SetText **无**等值守卫（v2.8.2 label.go 恒
+// Refresh——2026-11-02 审查修正，此前注释误以为自带判重）。1.5s 轮询常态是
+// 字段没变，先比对可把每行 7 次 SetText + 1 次 Refresh 的常态重绘压到零。
+// 返回是否发生了变更（调用方累计决定是否整行 Refresh）。
+func (r *clientRow) setText(l *widget.Label, v string) bool {
+	if l.Text == v {
+		return false
+	}
 	l.SetText(v)
+	return true
 }
 
 // set 回填一行：row 数据 + 选中态（朱砂描边加粗——v2 卡片同款语言，不用旧
-// Table 的整行暗红底，太重）
+// Table 的整行暗红底，太重）。全字段判重：无变化零重绘。
 func (r *clientRow) set(row ClientRow, selected bool) {
 	r.fullID = row.FullID
+	changed := false
 	stroke := color.Color(qiLine2)
 	r.content.StrokeWidth = 1
 	if selected {
@@ -446,6 +531,7 @@ func (r *clientRow) set(row ClientRow, selected bool) {
 	}
 	if r.content.StrokeColor != stroke {
 		r.content.StrokeColor = stroke
+		changed = true
 	}
 
 	// 设备（列 1，2026-10-28 昵称功能）：昵称·devid前4；旧手机端未上报昵称时
@@ -476,18 +562,305 @@ func (r *clientRow) set(row ClientRow, selected bool) {
 	if r.labels[2].Importance != wantImp {
 		r.labels[2].Importance = wantImp
 		r.labels[2].Refresh()
+		changed = true
 	}
-	r.setText(r.labels[0], row.Session)
-	r.setText(r.labels[1], dev)
-	r.setText(r.labels[2], name)
-	r.setText(r.labels[3], orDash(row.Ver))
-	r.setText(r.labels[4], fmtRTT(row.RTTMs))
-	r.setText(r.labels[5], orDash(row.Path))
+	changed = r.setText(r.labels[0], row.Session) || changed
+	changed = r.setText(r.labels[1], dev) || changed
+	changed = r.setText(r.labels[2], name) || changed
+	changed = r.setText(r.labels[3], orDash(row.Ver)) || changed
+	changed = r.setText(r.labels[4], fmtRTT(row.RTTMs)) || changed
+	changed = r.setText(r.labels[5], orDash(row.Path)) || changed
 	// 最后 position：FEN 摘要（尚未发过局面退最近活动时间），旧表列语义
-	r.setText(r.labels[6], orDash(fenBrief(row.Fen, row.LastPos)))
+	changed = r.setText(r.labels[6], orDash(fenBrief(row.Fen, row.LastPos))) || changed
 
+	if changed {
+		r.Refresh()
+	}
+}
+
+// ---------- 库区横排行（2026-11-01，仿 03 连接便当盒行） ----------
+
+// bookColW 库区横排列宽：序号（优先级位次）/库名/条数/状态/文件时间。
+// 2026-11-02 用户反馈"便当盒有点太大"：库名 300→260 收窄，5 列合计 642。
+// 超长名 Truncation 截断，与连接区同款"锁宽+省略号"语言。
+var bookColW = []float32{32, 260, 80, 90, 180}
+
+// bookHeaderRow 库区表头行（与连接区同构：五列锁宽标题恒显不随行滚动）。
+func bookHeaderRow() fyne.CanvasObject {
+	titles := []string{"#", "库名", "条数", "状态", "文件时间"}
+	box := container.NewHBox()
+	for i, t := range titles {
+		txt := qiText(t, qiSize(theme.SizeNameCaptionText), qiMuted, false, true)
+		box.Add(container.New(sizedBox{w: bookColW[i], h: 14}, txt))
+	}
+	return container.New(&pad{left: 12, right: 12, top: 2, bottom: 2}, box)
+}
+
+// bookRow 库数据行（仿 clientRow v4 矮便当盒）：行底 qiSurface 圆角 8 + 描边
+// 选中换朱砂。整行 Tappable：点击回调 onTap(name)（sectionBooks 维护单选；
+// 坏库行点击弹完整原因 dialog）。状态列 canvas.Text 着色三态（2026-11-02
+// 用户定稿）：启用=玉绿高亮 / 已禁用=警示红 / 加载失败=警示红。
+type bookRow struct {
+	widget.BaseWidget
+	name  string
+	onTap func(name string)
+
+	contentBox *fyne.Container
+	content    *canvas.Rectangle
+	// labels 四列 Label：序号/库名/条数/时间（状态列独立 statusText 着色）
+	labels []*widget.Label
+	status *canvas.Text
+}
+
+func newBookRow(onTap func(name string)) *bookRow {
+	r := &bookRow{onTap: onTap}
+	// UI 树构造期建好（clientRow 同款：set 可能在挂树前被调用）
+	r.content = canvas.NewRectangle(qiSurface)
+	r.content.CornerRadius = 8
+	r.content.StrokeColor = qiLine2
+	r.content.StrokeWidth = 1
+	box := container.NewHBox()
+	for i := 0; i < 5; i++ {
+		if i == 3 {
+			// 状态列：canvas.Text 直控颜色（Label 无色字段，Importance 两档
+			// 表达不了绿/红高亮），短文本无截断需求，widthBox 锁宽保列对齐
+			r.status = qiText("启用", qiSize(theme.SizeNameText), qiJade, false, false)
+			box.Add(container.New(&widthBox{w: bookColW[i]}, r.status))
+			continue
+		}
+		// 序号/条数/时间等宽数字对齐；库名常规亮色
+		mono := i == 0 || i == 2 || i == 4
+		cell, lbl := clientCell("—", mono, false, bookColW[i])
+		if mono {
+			lbl.Importance = widget.LowImportance
+		} else {
+			lbl.Importance = widget.MediumImportance
+		}
+		r.labels = append(r.labels, lbl)
+		box.Add(cell)
+	}
+	padded := container.New(&pad{top: 4, right: 12, bottom: 4, left: 12}, box)
+	r.contentBox = container.NewStack(r.content, padded)
+	r.ExtendBaseWidget(r)
+	return r
+}
+
+// Tapped 整行点击：交由 sectionBooks 维护单选
+func (r *bookRow) Tapped(*fyne.PointEvent) {
+	if r.onTap != nil {
+		r.onTap(r.name)
+	}
+}
+
+// CreateRenderer 渲染器只包构造期建好的内容树
+func (r *bookRow) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(r.contentBox)
+}
+
+// set 回填一行：位次（1-based 优先级）+ 快照 + 选中态（clientRow 同款朱砂描边）。
+// labels 映射：0=序号 1=库名 2=条数 3=时间（状态在 r.status）。
+func (r *bookRow) set(pos int, row BookRow, selected bool) {
+	r.name = row.Name
+	stroke := color.Color(qiLine2)
+	r.content.StrokeWidth = 1
+	if selected {
+		stroke = qiPrimary
+		r.content.StrokeWidth = 1.5
+	}
+	if r.content.StrokeColor != stroke {
+		r.content.StrokeColor = stroke
+	}
+
+	// 状态三态着色（2026-11-02 用户定稿：启用绿 / 禁用红 / 坏库红）
+	status := "启用"
+	st := qiJade
+	switch {
+	case row.Status != "":
+		status = "✕ 加载失败"
+		st = qiDanger
+	case !row.Enabled:
+		status = "已禁用"
+		st = qiDanger
+	}
+	if r.status.Text != status {
+		r.status.Text = status
+	}
+	if r.status.Color != st {
+		r.status.Color = st
+	}
+	entries := fmtInt(int64(row.Entries))
+	if !row.Enabled || row.Status != "" {
+		entries = "—" // 禁用/坏库未加载，条数无从统计
+	}
+	r.labels[0].SetText(fmt.Sprintf("%d", pos))
+	r.labels[1].SetText(row.Name)
+	r.labels[2].SetText(entries)
+	r.labels[3].SetText(fmtFullTime(row.ModTime))
 	r.Refresh()
 }
+
+// infoChip 圆形 ⓘ 提示标（2026-11-02 用户定稿）：注解行尾的更多信息入口——
+// 悬停描边变亮 + 指针光标，点击弹说明窗（fyne 无内置 tooltip，悬停浮层需
+// 自管窗口定位，点击弹 dialog 是可靠路径）。构造期定文案，无动态更新需求。
+type infoChip struct {
+	widget.BaseWidget
+	title string
+	body  string
+	win   fyne.Window
+
+	circle *canvas.Circle
+	mark   *canvas.Text
+	box    *fyne.Container
+}
+
+func newInfoChip(title, body string, win fyne.Window) *infoChip {
+	c := &infoChip{title: title, body: body, win: win}
+	c.circle = canvas.NewCircle(color.NRGBA{A: 0x00})
+	c.circle.StrokeColor = qiMuted
+	c.circle.StrokeWidth = 1
+	c.mark = qiText("i", qiSize(theme.SizeNameCaptionText), qiMuted, false, true)
+	// i 字居中：圆 18px、字宽 ~7px，手调偏移由 Layout 摆放（不引布局类型）
+	c.box = container.NewStack(c.circle, c.mark)
+	c.ExtendBaseWidget(c)
+	return c
+}
+
+// Tapped 点击：弹详细说明（标题即注解主题）
+func (c *infoChip) Tapped(*fyne.PointEvent) {
+	dialog.ShowInformation(c.title, c.body, c.win)
+}
+
+// MouseIn/MouseOut 悬停反馈：描边亮起（无 tooltip 浮层的最小可用语义）
+func (c *infoChip) MouseIn(*desktop.MouseEvent) {
+	c.circle.StrokeColor = qiForeground
+	c.circle.StrokeWidth = 1.5
+	canvas.Refresh(c.circle)
+}
+
+func (c *infoChip) MouseMoved(*desktop.MouseEvent) {}
+
+func (c *infoChip) MouseOut() {
+	c.circle.StrokeColor = qiMuted
+	c.circle.StrokeWidth = 1
+	canvas.Refresh(c.circle)
+}
+
+// Cursor 悬停显示手型指针（可点击暗示）
+func (c *infoChip) Cursor() desktop.Cursor { return desktop.PointerCursor }
+
+// CreateRenderer 渲染器只包构造期建好的内容树
+func (c *infoChip) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(c.box)
+}
+
+// MinSize 锁 18×18（圆标统一尺寸；Resize 居中摆字）
+func (c *infoChip) MinSize() fyne.Size {
+	return fyne.NewSize(18, 18)
+}
+
+func (c *infoChip) Resize(s fyne.Size) {
+	c.BaseWidget.Resize(s)
+	c.circle.Move(fyne.NewPos(0, 0))
+	c.circle.Resize(fyne.NewSize(18, 18))
+	// "i" 水平居中、垂直略上（canvas.Text 的字形基线偏下）
+	c.mark.Resize(c.mark.MinSize())
+	c.mark.Move(fyne.NewPos((18-c.mark.MinSize().Width)/2, 2))
+}
+
+// tapCatcher 透明点击捕获层（连接区"点击空白取消选中"）：铺在卡片列表底层
+
+// dangerHoverBtn 危险动作按钮：平时与普通按钮同形态（不抢视觉），悬停叠
+// 半透明红罩变红——"删除库"这类破坏性动作的视觉警示（2026-11-02 用户定稿：
+// "红色太刺眼，挪上去才变红"）。
+//
+// 【为什么不用 Importance 切换】fyne 原生按钮渲染 = importance 底色与 hover
+// blend 层混合（applyTheme 把 background 与 theme.ColorNameHover 做 blend）
+// ——qiTheme 的 Hover 色是**不透明**深灰 #262A31，悬停瞬间把 Danger 红整个
+// 盖掉（渲染像素实测 #23262C≈Hover 色，2026-11-02 vc15 真机"悬停不红"根因；
+// 字段 Importance 切换、Refresh 链路逐环排查均正常）。原生默认主题的 hover
+// 色带 alpha 才没这问题；改主题 Hover 的 alpha 是全局行为变更（所有按钮
+// hover 观感），故走局部路线：renderer 持有 tint 层（hiliteButton 验证过的
+// 模式）直控显隐，Importance 恒 Medium 不碰 blend。
+//
+// 【结构铁律】值嵌入 widget.Button + 构造期 ExtendBaseWidget(b)（hiliteButton
+// 同款模式）：**指针嵌入 *widget.Button 会让 fyne 的 super/渲染路径漂移到
+// 嵌入 Button，布局错乱、悬停事件收不到**（2026-11-02 渲染快照实证——
+// "删除"按钮漂浮到操作行上方）。
+type dangerHoverBtn struct {
+	widget.Button
+	tint *canvas.Rectangle // 悬停警示罩（半透明红；MouseIn 显、MouseOut 隐）
+}
+
+// dangerTint 悬停罩色：警示红半透明——叠在深灰按钮底上呈暗红、白字仍可读。
+var dangerTint = color.NRGBA{R: 0xFF, G: 0x52, B: 0x52, A: 0x50}
+
+// newDangerButton 构造悬停变红的危险动作按钮。
+func newDangerButton(label string, onTap func()) *dangerHoverBtn {
+	b := &dangerHoverBtn{}
+	b.Text = label
+	b.OnTapped = onTap
+	b.Importance = widget.MediumImportance
+	b.ExtendBaseWidget(b)
+	return b
+}
+
+// CreateRenderer 复用原生渲染树 + 顶层叠警示罩（tint 在 objects 末尾=画在
+// 最上层，原生文字/涟漪透出半透明红）。
+func (b *dangerHoverBtn) CreateRenderer() fyne.WidgetRenderer {
+	native := b.Button.CreateRenderer()
+	b.ExtendBaseWidget(b) // super 修回（原生 CreateRenderer 的 ExtendBaseWidget 副作用防御）
+
+	b.tint = canvas.NewRectangle(color.NRGBA{A: 0}) // 初始全透明
+	b.tint.CornerRadius = 8                         // 与主题按钮圆角同款
+	return &dangerHoverRenderer{
+		native: native,
+		tint:   b.tint,
+		objects: append(append([]fyne.CanvasObject{}, native.Objects()...),
+			b.tint),
+	}
+}
+
+// MouseIn/MouseOut 悬停显隐警示罩；禁用态不变红（不可删时无警示语义）。
+// 原生 hover 状态透传（背景微亮的原生反馈保留）。tint 显隐走自身 Refresh
+// （renderer 持有对象直改，不依赖按钮重绘——Importance 路线已被主题 blend
+// 否决，见类型注释）。
+func (b *dangerHoverBtn) MouseIn(*desktop.MouseEvent) {
+	b.Button.MouseIn(nil)
+	if b.tint != nil && !b.Disabled() {
+		b.tint.FillColor = dangerTint
+		b.tint.Refresh()
+	}
+}
+
+func (b *dangerHoverBtn) MouseOut() {
+	b.Button.MouseOut()
+	if b.tint != nil {
+		b.tint.FillColor = color.NRGBA{A: 0}
+		b.tint.Refresh()
+	}
+}
+
+// dangerHoverRenderer 原生渲染树 + 顶层警示罩的复合渲染器（hiliteRenderer
+// 同款五方法结构；布局/尺寸委托原生）。
+type dangerHoverRenderer struct {
+	native  fyne.WidgetRenderer
+	tint    *canvas.Rectangle
+	objects []fyne.CanvasObject
+}
+
+func (r *dangerHoverRenderer) Layout(s fyne.Size) {
+	r.native.Layout(s)
+	r.tint.Move(fyne.NewPos(0, 0))
+	r.tint.Resize(s)
+}
+
+func (r *dangerHoverRenderer) MinSize() fyne.Size { return r.native.MinSize() }
+
+func (r *dangerHoverRenderer) Objects() []fyne.CanvasObject { return r.objects }
+
+func (r *dangerHoverRenderer) Destroy() { r.native.Destroy() }
+
+func (r *dangerHoverRenderer) Refresh() { r.native.Refresh() }
 
 // tapCatcher 透明点击捕获层（连接区"点击空白取消选中"）：铺在卡片列表底层
 // （container.NewStack(catcher, cards)——卡片在上层自己收 tap；点卡片之间/

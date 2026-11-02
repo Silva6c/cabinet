@@ -49,6 +49,9 @@ class OverlayModel(
     /** 推荐走法起止（canonical 内部坐标 x,y） */
     val arrowFrom: Pair<Int, Int>? = null,
     val arrowTo: Pair<Int, Int>? = null,
+    /** 残局库第二意见箭头（2026-11-01）：与主箭头并存（先画在下层）；null 不画 */
+    val arrow2From: Pair<Int, Int>? = null,
+    val arrow2To: Pair<Int, Int>? = null,
     /** 被识别屏幕红方在上（迷你棋盘随动：同样红在上显示） */
     val flipped: Boolean = false,
     val mySideIsRed: Boolean = true,
@@ -279,6 +282,8 @@ class OverlayPanelView @JvmOverloads constructor(
         chess.pieces = model.pieces
         chess.arrowFrom = model.arrowFrom
         chess.arrowTo = model.arrowTo
+        chess.arrow2From = model.arrow2From
+        chess.arrow2To = model.arrow2To
         chess.flipped = model.flipped
         chess.mySideIsRed = model.mySideIsRed
         chess.mature = model.mature

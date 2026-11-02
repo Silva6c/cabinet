@@ -48,6 +48,12 @@ type CloudBookConfig struct {
 	// 桔库/沉淀、不进引擎，与桔库命中"命中即 return"同构）；未命中/失败自动
 	// 回落常规链。隐私口径与 Enable 一致：开启后局面 FEN 必然发往端点。
 	CloudFirst bool `toml:"cloud_first"`
+	// Endgame 残局库查询开关（2026-11-01 新增：默认关）。开启后对本地库/
+	// 沉淀未命中的局面，另发一条 action=query&endgame=1 请求只查云库残局库
+	// （穷举绝对正解；与 Enable 相互独立，可只开残局不开开局查询）。隐私
+	// 口径与 Enable 一致：开启后局面 FEN 必然发往端点。命中以 "endgame:<域名>"
+	// 前缀 source 下发（协议 §7 值域扩展）。
+	Endgame bool `toml:"endgame"`
 	// Endpoint 查询端点（action=queryall&board=<FEN> 形状，chessdb.cn 兼容）
 	Endpoint string `toml:"endpoint"`
 	// APIKey 自带 API 的密钥（chessdb 免费端点留空）
@@ -67,6 +73,13 @@ func DefaultCloudBook() CloudBookConfig {
 type LibraryConfig struct {
 	// BooksDir 库目录（*.obk 及 *.obk.zip；目录内文件增删自动热加载）
 	BooksDir string `toml:"books_dir"`
+	// Order 自定义优先级（2026-11-01 用户定稿：控制台可调）：库名列表
+	// （文件名去 .obk 后缀，与控制台库区显示同名）按优先级排列，首位最先
+	// 查询。目录里有但不在列表中的库按文件名字典序追加尾部（新放入的库
+	// 自动可用）；空列表 = 维持字典序。控制台调整后由 main 回调落盘回写。
+	Order []string `toml:"order"`
+	// Disabled 禁用的库名列表（只展示不加载；控制台单库开关落盘回写本键）
+	Disabled []string `toml:"disabled"`
 }
 
 // StoreConfig 沉淀库配置。
@@ -106,6 +119,12 @@ type EngineConfig struct {
 	// MoveTimeMS 时间制搜索上限（毫秒）；0 = 按深度（默认）。>0（500–20000）
 	// 时每步 go movetime——快棋/跟盘节奏下深度制会拖慢出建议，时间制恒定耗时
 	MoveTimeMS int `toml:"movetime_ms"`
+	// Smart 智能思考（2026-11-02 用户定稿，仅 PC 端）：按局面复杂度与搜索收敛度
+	// 自适应分配算力——被迫着法预算压地板秒出、主线稳定即提前收束（速度优先，
+	// 上限仍受当前深度制/时间制约束；机制见 engine/smart.go）。默认关（行为
+	// 开关一律从关起步）；PC 调参面板热切并落盘回写本文件。手机端无感知
+	//（协议零改动、无按钮）。
+	Smart bool `toml:"smart"`
 	// SkipBooks 不走任何库（2026-10-30 用户定稿：默认关）。开启后建议链跳过
 	// 全部库——桔库、沉淀、云库（含 cloud_first）都不查，每步引擎直搜；
 	// 只停"查"不停"记"（引擎建议照常沉淀入库，建议流不断供）。PC 高级面板
@@ -125,7 +144,8 @@ func DefaultEngine() EngineConfig {
 		HashMB:     256, // 默认最低档，切换后落盘生效
 		MultiPV:    1,   // 2026-10-18 默认单线（MultiPV>1 分散搜索同深度棋力明显下降；变招功能由用户手动开启）
 		Depth:      20,
-		MoveTimeMS: 0, // 默认按深度；时间制（500–20000）由用户在面板/手机端开启
+		MoveTimeMS: 0,     // 默认按深度；时间制（500–20000）由用户在面板/手机端开启
+		Smart:      false, // 智能思考默认关（新行为开关从关起步，面板热切）
 	}
 }
 

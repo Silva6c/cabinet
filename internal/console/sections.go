@@ -9,6 +9,9 @@ import (
 	"fmt"
 	"image/color"
 	"net/url"
+	"os"
+	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -17,6 +20,7 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/layout"
+	"fyne.io/fyne/v2/storage"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
@@ -96,7 +100,7 @@ func (c *Console) tileBooks() fyne.CanvasObject {
 		if u, err := url.Parse(endpoint); err == nil && u.Host != "" {
 			endpoint = u.Host
 		}
-		cloudHint, cloudHintSet := qiDynamic("桔库/沉淀未命中才查", qiSize(theme.SizeNameCaptionText), qiMuted, false, false)
+		cloudHint, cloudHintSet := qiDynamic("本地库/沉淀未命中才查", qiSize(theme.SizeNameCaptionText), qiMuted, false, false)
 		c.cloudHintSet = cloudHintSet
 		rows = append(rows, container.NewHBox(
 			c.cloudChk,
@@ -105,6 +109,8 @@ func (c *Console) tileBooks() fyne.CanvasObject {
 			cloudHint,
 		))
 	}
+	// 残局库开关不放 02 tile（2026-11-02 用户定稿：与云库开关并排显重复）——
+	// 高级面板→开局库的单份开关统一管理
 	return bentoTile(container.NewVBox(rows...))
 }
 
@@ -174,6 +180,21 @@ func (c *Console) refreshCloudFirst() {
 	c.cloudFirstBusy.Store(true)
 	defer c.cloudFirstBusy.Store(false)
 	c.cloudFirstChk.SetChecked(on)
+}
+
+// refreshEndgame 回写"残局库查询"勾选态（endgameBusy 抑制 SetChecked 回环，
+// 与 refreshCloudFirst 同款套路）。单一实例（02 tile 副本已于 2026-11-02 删除）。
+func (c *Console) refreshEndgame() {
+	if c.endgameChk == nil || c.opts.EndgameGet == nil {
+		return
+	}
+	on := c.opts.EndgameGet()
+	if c.endgameChk.Checked == on {
+		return
+	}
+	c.endgameBusy.Store(true)
+	defer c.endgameBusy.Store(false)
+	c.endgameChk.SetChecked(on)
 }
 
 // refreshSkipBooks 回写"不走任何库"勾选态（skipBooksBusy 抑制 SetChecked 回环，
@@ -247,6 +268,7 @@ func (c *Console) sectionTuner() fyne.CanvasObject {
 		s := widget.NewSelect(opts, func(string) { c.onTunerChanged(kind) })
 		s.PlaceHolder = "—"
 		c.tunerSelects[kind] = s
+		c.tunerBaseOpts[kind] = opts
 		return s
 	}
 	th := mk("threads", tunerThreadOpts)
@@ -268,8 +290,35 @@ func (c *Console) sectionTuner() fyne.CanvasObject {
 		container.NewVBox(widget.NewLabel("搜索深度"), dp),
 		container.NewVBox(widget.NewLabel("时间上限"), mt),
 	)
+	// 智能思考开关（2026-11-02 用户定稿，仅 PC 端）：两级自适应——被迫着法
+	// 预算压地板秒出 + 主线收敛提前收束（机制见 engine/smart.go）。非协议参数：
+	// 手机端无感知、不加按钮；热切经 TunerSet("smart") 走 TuneEngine 统一通道
+	//（应用 + reSearchLatest + 落盘），与五下拉同一事实源。放头部行与清空置换表
+	// 并排：五面板统一盒高 220 竖向无余量（新起一行会撑破，advpanel_test 锚死），
+	// 说明全文收进行尾 ⓘ
+	c.smartChk = widget.NewCheck("智能思考", func(on bool) {
+		if c.smartBusy.Load() {
+			return
+		}
+		v := 0
+		if on {
+			v = 1
+		}
+		if msg := c.opts.TunerSet("smart", v); msg != "" {
+			dialog.ShowError(errors.New(msg), c.win)
+		}
+		c.refreshTuner() // 立即回显服务端实际接受值（失败自动弹回）
+	})
 	return container.NewVBox(
-		sectionTitle("引擎调参", clearBtn),
+		sectionTitle("引擎调参", container.NewHBox(
+			c.smartChk,
+			newInfoChip("关于\"智能思考\"",
+				"开启后按局面与搜索收敛度自适应分配算力：唯一/极少着法的局面本轮直接低预算秒出；"+
+					"主线着法连续多层稳定且分数平稳即提前收束（速度优先，深度略浅；杀棋局面更快）。\n\n"+
+					"思考上限仍受当前深度制/时间制约束，可随时关闭。仅电脑端生效——手机端无感知、无按钮，协议零改动。",
+				c.win),
+			clearBtn,
+		)),
 		row,
 		hint,
 		widget.NewSeparator(),
@@ -365,7 +414,7 @@ func tunerOptionText(kind string, v int) string {
 // refreshTuner 回写调参区当前值（tunerBusy 抑制 SetSelected 触发的 OnChanged 回环）。
 //
 // 回环时序：fyne 的 Select.SetSelected 会同步重入 OnChanged（v2.8.1 select.go
-// updateSelected 直接回调），busy=true 窗口覆盖下面 4 次 SetSelected 的同步重入。
+// updateSelected 直接回调），busy=true 窗口覆盖下面 5 次 SetSelected 的同步重入。
 // atomic 够用的前提是"用户点击回调与刷新都串行在 fyne 主 goroutine"（刷新经
 // fyne.Do 排队）——两路天然互斥，无并发窗口；若 refresh 脱离 fyne.Do 直接在
 // 后台调用，此标志即失效，必须换互斥锁。
@@ -377,12 +426,27 @@ func (c *Console) refreshTuner() {
 	c.tunerBusy.Store(true)
 	defer c.tunerBusy.Store(false)
 	set := func(kind, text string, enabled bool) {
-		if s, ok := c.tunerSelects[kind]; ok {
-			s.Enable()
-			s.SetSelected(text)
-			if !enabled {
-				s.Disable()
+		s, ok := c.tunerSelects[kind]
+		if !ok {
+			return
+		}
+		// 档外值兜底：fyne 的 SetSelected 只在 text 命中 Options 时生效
+		//（v2.8.2 select.go 逐字核实），否则静默空转、下拉残留上一个参数的
+		// 旧值——而服务端合法范围远宽于快捷档（深度 1-40 全收/时间任意秒/
+		// Hash 任意 MB，手机端可下任意值）。回显 = 基础快捷档 + 当前值并入，
+		// 下拉如实显示当前值而不是撒谎。Selected 等值短路：Select 的
+		// updateSelected 无判重，1.5s 轮询常态是值没变，等值时零重绘。
+		if s.Selected != text {
+			base := c.tunerBaseOpts[kind]
+			if !slices.Contains(base, text) {
+				base = append(slices.Clone(base), text)
 			}
+			s.Options = base
+			s.SetSelected(text)
+		}
+		s.Enable()
+		if !enabled {
+			s.Disable()
 		}
 	}
 	set("threads", tunerOptionText("threads", ts.Threads), ts.Ready)
@@ -399,6 +463,13 @@ func (c *Console) refreshTuner() {
 		}
 		c.tunerHint.Text = "改动即时以最近局面重新搜索；与手机端调节双向同步 · " + mode
 		c.tunerHint.Refresh()
+	}
+	// 智能思考勾选态回写（smartBusy 抑制 SetChecked 的 OnChanged 回环，
+	// cloudBusy 同款套路）
+	if c.smartChk != nil && c.smartChk.Checked != ts.Smart {
+		c.smartBusy.Store(true)
+		c.smartChk.SetChecked(ts.Smart)
+		c.smartBusy.Store(false)
 	}
 }
 
@@ -468,6 +539,9 @@ func (c *Console) sectionClients() fyne.CanvasObject {
 	// 不得推移下方区块——1-2 台留白、3 台起盒内滚动，窗口高度全程稳定；原
 	// "行数少随内容"方案每加一台就把走势/05 面板顶下去一次）
 	c.clientRowsBox = container.New(&vbox{gap: 4})
+	// 冷启动空态：syncClientRows 对"0 行 vs 0 行"走零循环不重建，空态提示
+	// （只在 rebuild 里创建）会缺席到首台设备连线再断开——构建期先重建一次
+	c.rebuildClientRows()
 	catcher := newTapCatcher(func() { c.selectClient("") })
 	listArea, _ := c.fixedTable(c.clientRowsBox, 100)
 	listArea = container.NewStack(catcher, listArea)
@@ -669,11 +743,12 @@ func (c *Console) sectionSuggestions() fyne.CanvasObject {
 		c.sugTable.SetColumnWidth(i, w)
 	}
 	c.sugTable.SetRowHeight(-1, 30)
-	// 可视 120px（2026-10-30 用户定稿"盒砍一半"：表头 + 约 3 行，其余盒内滚动；
-	// 50 条数据全量可滚，盒只负责"小"）——说明行用 caption 小字，尾部 separator
-	// 删除（盒内已有滚动边界，分隔线是冗余装饰）
+	// 可视区下限 120px（2026-10-30 用户定稿"盒砍一半"）+ 弹性吸收统一盒高
+	// （advPanelH，2026-11-02）的剩余高——盒高恒定，表头 + 约四行起，其余盒内
+	// 滚动；50 条数据全量可滚，盒只负责"统一"。尾部 separator 删除（盒内已有
+	// 滚动边界，分隔线是冗余装饰）
 	sugArea, _ := c.fixedTable(c.sugTable, 120)
-	return container.NewVBox(
+	return container.New(&vboxFlex{gap: 4, flex: 2},
 		sectionTitle("建议流（历史沉淀 · 最近 50 条）", c.sugCount, clearBtn),
 		qiCaption("每次开局库命中 / 引擎出招沉淀一条；未连接手机时不会新增"),
 		sugArea,
@@ -731,24 +806,69 @@ func (c *Console) confirmClearSuggestions() {
 
 // ---------- ④ 库区 ----------
 
-// sectionBooks 启用库列表 + 热加载状态（文件修改时间）。列表可视高按库数收放
-// （复用连接区 fixedTable 动态 setter 模式）：单库一行小巧、多库封顶 300px 盒内
-// 滚动——小便当盒哲学：盒随内容、超高内滚，横向超宽的库文件名也由内滚兜住。
+// sectionBooks 库管理面板（2026-11-01 便当盒重做，仿 03 连接：表头 + 卡片行
+// 点选 + 操作区）：列表区弹性吸收统一盒高（advPanelH，2026-11-02）的剩余高，
+// 库多时盒内滚动、盒高恒定（原"随行数收放、封顶"动态调高退役）；操作区按钮
+// 作用于选中行（无选中禁用）。格式边界如实告知：仅支持 OBK（兵河格式），
+// 库文件自备。
 func (c *Console) sectionBooks() fyne.CanvasObject {
-	c.bookLabel = &widget.Label{Text: "无（library/books/ 目录下未发现 .obk）"}
-	listArea, setH := c.fixedTable(c.bookLabel, 34)
-	c.bookListSetH = setH
+	c.bookRowsBox = container.New(&vbox{gap: 4})
+	listArea, _ := c.fixedTable(c.bookRowsBox, 34)
+	// 点击空白取消选中（tapCatcher 铺 Stack 底层，连接区同款）
+	c.stackBooks = container.NewStack(newTapCatcher(func() {
+		if c.selectedBook == "" {
+			return
+		}
+		c.selectedBook = ""
+		c.syncBookActionButtons()
+		c.rebuildBookRows() // 复位选中描边
+	}), listArea)
+
 	rows := []fyne.CanvasObject{
-		sectionTitle("开局库"),
-		listArea,
-		widget.NewSeparator(),
+		sectionTitle("开局库", bookHeaderRow()),
+		c.stackBooks,
 	}
-	// "默认走云库"行（2026-10-30 用户定稿；CloudFirstGet==nil = 行缺席）：
-	// 云库命中即终（不查本地桔库/沉淀、不进引擎，与桔库命中"命中即 return"
-	// 同构），未命中回落常规链——语义矩阵见 server cloudLookupFirst。勾选状态
-	// 独立于云库总开关持久（可先勾后开云库），caption 提示依赖关系。
+	// 操作区（BookImportName==nil = 只读列表，操作区缺席）：导入/上移/下移/
+	// 启停/删除/打开目录。上移/下移/启停/删除作用于选中行；导入与打开目录
+	// 全局可用。格式边界声明不再单独占行（2026-11-02 用户定稿"小字全部进
+	// info"）——收进行尾 ⓘ（书格式说明含授权/查询/导入规则全文）。
+	if c.opts.BookImportName != nil {
+		importBtn := newHiliteButton("导入库文件", func() { c.importBookDialog() })
+		upBtn := widget.NewButton("上移", func() { c.moveSelectedBook(-1) })
+		downBtn := widget.NewButton("下移", func() { c.moveSelectedBook(1) })
+		tglBtn := widget.NewButton("禁用", func() { c.toggleSelectedBook() })
+		// 删除：平时与普通按钮同形态，悬停才变红（2026-11-02 用户定稿
+		// "红色太刺眼"——警示红由 dangerHoverBtn 的 tint 罩悬停时叠加，不走
+		// Importance 切换：qiTheme 的 Hover 色不透明，悬停 blend 会把红全盖掉）
+		delBtn := newDangerButton("删除", func() { c.removeSelectedBook() })
+		openBtn := widget.NewButton("打开库目录", func() { openDir(c.opts.BooksDir) })
+		c.bookUpBtn, c.bookDownBtn, c.bookTglBtn = upBtn, downBtn, tglBtn
+		// &delBtn.Button 取字段地址（值嵌入下直接赋值会拷贝整个 Button 结构体
+		// ——副本上 Enable/Disable 作用不到真实按钮）。悬停变红由包装层在
+		// 同一结构上叠 tint 警示罩，与启停两路操作互不冲突。
+		c.bookDelBtn = &delBtn.Button
+		c.syncBookActionButtons()
+		rows = append(rows, container.NewHBox(
+			importBtn, upBtn, downBtn, tglBtn, delBtn, layout.NewSpacer(),
+			newInfoChip("开局库格式说明",
+				"本软件仅支持 OBK（兵河格式，SQLite 数据库）开局库文件，库文件一律自备，"+
+					"请遵守原发布者授权条款并向原作者致谢（本软件不分发任何库文件）。\n\n"+
+					"查询规则：按列表顺序逐库查询，首个命中即采用——\"上移/下移\"调整优先级，"+
+					"\"启用/禁用\"决定该库是否参与查询。\n\n"+
+					"导入：支持 .obk 与 .obk.zip（自动解压）；导入时先做 schema 预检，"+
+					"结构不符的坏库会被拒绝并说明原因。目录内同名 .obk.zip 比旧文件新时自动解压覆盖。",
+				c.win),
+			openBtn,
+		))
+	}
+	// 三个库策略开关一行（2026-11-02 用户定稿"压缩成一行"）：默认走云库 /
+	// 残局库查询 / 不走任何库。括号注释与行尾小字全部并入各自 ⓘ（原三行
+	// 各 ~28px + 说明行 ~20px 压成一行，面板收窄 ~80px）。语义：
+	//   cloud_first 命中即终未命中回落（cloudLookupFirst）→ 残局独立补充
+	//   （endgameLookupAsync）→ skip_books 全跳（handlePosition 最先拦截）。
+	switchRow := container.NewHBox()
 	if c.opts.CloudFirstGet != nil {
-		c.cloudFirstChk = widget.NewCheck("默认走云库（优先于本地库与引擎）", func(on bool) {
+		c.cloudFirstChk = widget.NewCheck("默认走云库", func(on bool) {
 			if c.cloudFirstBusy.Load() || c.opts.CloudFirstSet == nil {
 				return
 			}
@@ -756,19 +876,35 @@ func (c *Console) sectionBooks() fyne.CanvasObject {
 				dialog.NewError(errors.New(msg), c.win).Show()
 			}
 		})
-		rows = append(rows, container.NewHBox(
-			c.cloudFirstChk,
-			qiCaption("需先开启云库查询"),
-			layout.NewSpacer(),
-			qiCaption("云库未命中自动回落本地"),
-		))
+		switchRow.Add(c.cloudFirstChk)
+		switchRow.Add(newInfoChip("关于\"默认走云库\"",
+			"优先于本地库与引擎：开启后（仍需先勾选 02 区的\"云库查询\"）每步局面先查云库——"+
+				"命中即采用云库建议，不再查本地开局库/沉淀、不进引擎（省算力正是收益，需要引擎深度分析时"+
+				"用手机端\"更新\"或关掉本开关）；未命中或限流窗口内自动回落本地常规链，建议流不断供。\n\n"+
+				"⚠隐私口径与\"云库查询\"一致：开启后对局局面 FEN 必然发往所配端点（默认 chessdb.cn）。",
+			c.win))
 	}
-	// "不走任何库"行（2026-10-30 用户定稿；SkipBooksGet==nil = 行缺席）：建议链
-	// 跳过桔库/沉淀/云库，每步引擎直搜——纯引擎出招的持续策略。优先级高于
-	// "默认走云库"（server handlePosition 在 cloudLookupFirst 之前拦截），caption
-	// 如实写明；只停"查"不停"记"，建议流与沉淀复用数据源不受影响。
+	if c.opts.EndgameGet != nil {
+		c.endgameChk = widget.NewCheck("残局库查询", func(on bool) {
+			if c.endgameBusy.Load() || c.opts.EndgameSet == nil {
+				return
+			}
+			if msg := c.opts.EndgameSet(on); msg != "" {
+				dialog.NewError(errors.New(msg), c.win).Show()
+			}
+		})
+		switchRow.Add(c.endgameChk)
+		switchRow.Add(newInfoChip("关于\"残局库查询\"",
+			"云库穷举正解：开启后对本地开局库/沉淀都未命中的局面，另发一条残局库查询——查的是"+
+				"云库（chessdb.cn）穷举计算的残局表，结论为绝对正解（胜/和/负与最优着法均经穷举验证）。\n\n"+
+				"手机端展示：残局着法与引擎建议一致时，建议文案追加\"· 残局库\"；不一致时悬浮窗"+
+				"并列两支箭头（琥珀色为残局库正解，绿色为当前建议）；无引擎建议时残局正解"+
+				"直接作为主建议显示。\n\n"+
+				"开关独立于\"云库查询\"，可只开残局；⚠隐私口径同云库：局面 FEN 会发往端点。",
+			c.win))
+	}
 	if c.opts.SkipBooksGet != nil {
-		c.skipBooksChk = widget.NewCheck("不走任何库（每步引擎直搜）", func(on bool) {
+		c.skipBooksChk = widget.NewCheck("不走任何库", func(on bool) {
 			if c.skipBooksBusy.Load() || c.opts.SkipBooksSet == nil {
 				return
 			}
@@ -776,14 +912,176 @@ func (c *Console) sectionBooks() fyne.CanvasObject {
 				dialog.NewError(errors.New(msg), c.win).Show()
 			}
 		})
-		rows = append(rows, container.NewHBox(
-			c.skipBooksChk,
-			qiCaption("开启后无视云库开关"),
-			layout.NewSpacer(),
-			qiCaption("建议照常沉淀记录"),
-		))
+		switchRow.Add(c.skipBooksChk)
+		switchRow.Add(newInfoChip("关于\"不走任何库\"",
+			"每步引擎直搜：持续策略开关，开启后建议链跳过全部库——本地开局库、沉淀复用、"+
+				"云库（含\"默认走云库\"）与残局库都不查。开启后无视云库开关（优先级最高）。\n\n"+
+				"只停\"查\"不停\"记\"：引擎建议照常沉淀入库、建议流不断供；重新关闭后历史沉淀照常复用。",
+			c.win))
 	}
-	return container.NewVBox(rows...)
+	switchRow.Add(layout.NewSpacer())
+	rows = append(rows, switchRow)
+	// flex:1 = stackBooks（rows[1]，恒定位置）：统一盒高下列表区弹性填充，
+	// 操作区/开关行钉在底部
+	return container.New(&vboxFlex{gap: 4, flex: 1}, rows...)
+}
+
+// importBookDialog 文件选择导入（全仓首个 FileOpen）：限定 .obk/.zip → 预检
+// 拿目标名 → 同名 Confirm → 执行导入（拷进库目录，fsnotify 热加载自动接管）。
+func (c *Console) importBookDialog() {
+	fd := dialog.NewFileOpen(func(rc fyne.URIReadCloser, err error) {
+		if err != nil {
+			dialog.NewError(err, c.win).Show()
+			return
+		}
+		if rc == nil {
+			return // 用户取消
+		}
+		defer func() { _ = rc.Close() }()
+		src := rc.URI().Path()
+		target := c.opts.BookImportName(src)
+		if target == "" {
+			return // 预检失败原因已由实现侧记录日志；无明确反馈不弹空错
+		}
+		// 同名冲突先确认（覆盖用户库文件是破坏性动作）
+		if _, err := os.Stat(filepath.Join(c.opts.BooksDir, target)); err == nil {
+			dialog.NewConfirm("同名库已存在",
+				fmt.Sprintf("库目录中已存在 %s，导入将覆盖它。继续？", target), func(ok bool) {
+					if !ok {
+						return
+					}
+					c.doImportBook(src)
+				}, c.win).Show()
+			return
+		}
+		c.doImportBook(src)
+	}, c.win)
+	fd.SetFilter(storage.NewExtensionFileFilter([]string{".obk", ".zip"}))
+	fd.Resize(fyne.NewSize(640, 480))
+	fd.Show()
+}
+
+// doImportBook 执行导入并反馈（Confirm 后段；预检失败/导入失败弹 Error）。
+func (c *Console) doImportBook(src string) {
+	if msg := c.opts.BookImportFile(src); msg != "" {
+		dialog.NewError(errors.New(msg), c.win).Show()
+		return
+	}
+	dialog.ShowInformation("导入完成", "库文件已放入库目录，热加载稍候自动生效。", c.win)
+}
+
+// moveSelectedBook 上移/下移选中库（delta -1/+1）；实现侧调整 order 并落盘。
+func (c *Console) moveSelectedBook(delta int) {
+	if c.selectedBook == "" || c.opts.BookMove == nil {
+		return
+	}
+	if msg := c.opts.BookMove(c.selectedBook, delta); msg != "" {
+		dialog.NewError(errors.New(msg), c.win).Show()
+	}
+}
+
+// toggleSelectedBook 启用/禁用选中库；坏库行不可启停（不进查询链与开关无关）。
+func (c *Console) toggleSelectedBook() {
+	if c.selectedBook == "" || c.opts.BookToggle == nil {
+		return
+	}
+	for _, b := range c.bookRows {
+		if b.Name == c.selectedBook {
+			if b.Status != "" {
+				// 坏库点击：弹完整原因（加载失败与启停无关，先诊断）
+				dialog.NewError(fmt.Errorf("库加载失败：%s", b.Status), c.win).Show()
+				return
+			}
+			if msg := c.opts.BookToggle(b.Name, !b.Enabled); msg != "" {
+				dialog.NewError(errors.New(msg), c.win).Show()
+			}
+			return
+		}
+	}
+}
+
+// removeSelectedBook 永久删除选中库：二次确认（明示"不进回收站"）→ 实现侧
+// 先卸载连接再删 .obk 与同名附属（-wal/-shm/.obk.zip，见 library.RemoveBook）。
+// 成功后立即整树刷新（签名比对重建列表，选中态随库消失一并复位）。
+func (c *Console) removeSelectedBook() {
+	name := c.selectedBook
+	if name == "" || c.opts.BookRemove == nil {
+		return
+	}
+	dialog.NewConfirm("删除库",
+		fmt.Sprintf("确定永久删除库“%s”？\n\n将删除其库文件及同名附属文件"+
+			"（-wal/-shm/.obk.zip），不进回收站，无法恢复。", name),
+		func(ok bool) {
+			if !ok {
+				return
+			}
+			if msg := c.opts.BookRemove(name); msg != "" {
+				dialog.NewError(errors.New(msg), c.win).Show()
+				return
+			}
+			c.selectedBook = ""
+			c.refresh()
+		}, c.win).Show()
+}
+
+// syncBookActionButtons 操作区按钮可用性随选中态：无选中禁用上移/下移/启停/
+// 删除；启停按钮文本随选中行状态（"禁用"/"启用"）。坏库行可删（删除是坏库
+// 的正当出口之一，点击行弹完整原因由"原因"按钮承担）。
+func (c *Console) syncBookActionButtons() {
+	if c.bookUpBtn == nil {
+		return
+	}
+	has := false
+	for _, b := range c.bookRows {
+		if b.Name == c.selectedBook {
+			has = true
+			if b.Status != "" {
+				c.bookTglBtn.SetText("原因")
+			} else if b.Enabled {
+				c.bookTglBtn.SetText("禁用")
+			} else {
+				c.bookTglBtn.SetText("启用")
+			}
+			break
+		}
+	}
+	if !has {
+		c.bookTglBtn.SetText("禁用")
+	}
+	base := c.selectedBook != "" && has
+	c.bookUpBtn.Disable()
+	c.bookDownBtn.Disable()
+	c.bookTglBtn.Disable()
+	c.bookDelBtn.Disable()
+	if base {
+		c.bookUpBtn.Enable()
+		c.bookDownBtn.Enable()
+		c.bookTglBtn.Enable()
+		c.bookDelBtn.Enable()
+	}
+}
+
+// rebuildBookRows 全量重建库行（数据签名变化/选中复位时；库行少且变更罕见，
+// 全量重建的抖动可忽略——签名比对在 refreshBooks）。坏库行的完整原因经操作区
+// "原因"按钮查看（toggleSelectedBook 弹窗），点行只做选中。
+func (c *Console) rebuildBookRows() {
+	c.bookRowsBox.RemoveAll()
+	for i, b := range c.bookRows {
+		name := b.Name
+		row := newBookRow(func(n string) {
+			// 单选 toggle：再点同行取消选中
+			if c.selectedBook == n {
+				c.selectedBook = ""
+			} else {
+				c.selectedBook = n
+			}
+			c.syncBookActionButtons()
+			c.rebuildBookRows()
+		})
+		row.set(i+1, b, c.selectedBook == name)
+		c.bookRowsBox.Add(row)
+	}
+	c.syncBookActionButtons()
 }
 
 // ---------- ⑤ 日志尾部 ----------
@@ -794,22 +1092,35 @@ const logTailLines = 40
 
 // sectionLog 最近日志尾部（紧凑渲染：时间 + 级别着色 + 垃圾行剔除）+
 // "打开日志目录"按钮；滚动跟随意图（贴底跟随、上翻不动，见 refresh）。
-// 可视高 140（2026-10-30 用户定稿"盒砍一半"：约 7 行，其余盒内滚动）。
+// 可视区下限 140（2026-10-30 用户定稿"盒砍一半"：约 7 行），弹性吸收统一盒高
+// （advPanelH）剩余部分——盒高恒定，可视约 9 行起，其余盒内滚动。
 func (c *Console) sectionLog() fyne.CanvasObject {
 	c.logRich = widget.NewRichText()
 	c.logRich.Wrapping = fyne.TextWrapWord
 	scroll := container.NewScroll(c.logRich)
 	c.logScroll = scroll
 	openBtn := newHiliteButton("打开日志目录", func() { openDir(c.opts.LogDir) })
-	return container.NewVBox(
+	return container.New(&vboxFlex{gap: 4, flex: 1},
 		sectionTitle("日志", openBtn),
 		container.New(&fixedHeight{h: 140}, scroll),
 	)
 }
 
 // refreshLog 解析日志尾部并映射为级别着色的段落（每行独立段落，parse 失败的
-// 异构行原样透传）；垃圾行已在 compactLogLines 剔除。
+// 异构行原样透传）；垃圾行已在 compactLogLines 剔除。签名短路（size+mtime）：
+// 文件没动整段跳过——此前每 1.5s 无条件读文件+解析+重建 segments（sugSig/
+// bookSig 都有防抖，此处 2026-11-02 审查补齐）。
 func (c *Console) refreshLog() {
+	var sig string
+	if st, err := os.Stat(c.opts.LogFile); err == nil {
+		sig = fmt.Sprintf("%d|%d", st.Size(), st.ModTime().UnixNano())
+	} else {
+		sig = "missing"
+	}
+	if sig == c.logSig {
+		return
+	}
+	c.logSig = sig
 	entries := compactLogLines(tailLines(c.opts.LogFile, logTailLines))
 	if len(entries) == 0 {
 		entries = []logEntry{{msg: "（暂无日志）"}}
@@ -943,7 +1254,9 @@ func (c *Console) refreshUpdate() {
 // 行数增长，直接放 VBox 会塌缩或无限撑高，必须由外部容器锁定高度。
 // v3 起也装自定义数据行列表（连接区）——参数泛化为 CanvasObject。
 // 返回调高函数：连接区 v4 按"行数少随内容、多则封顶"动态收放（无设备时不
-// 留大空白，设备多时封顶后内部滚动——两头都不违反"新连接不挤兑其他区块"）。
+// 留大空白，设备多时封顶后内部滚动——两头都不违反"新连接不挤兑其他区块"）；
+// 高级面板（建议流/日志/开局库）2026-11-02 起不再用 setter——列表区高度由
+// vboxFlex 按统一盒高分配，setter 仅连接区保留。
 func (c *Console) fixedTable(content fyne.CanvasObject, h float32) (fyne.CanvasObject, func(float32)) {
 	f := &fixedHeight{h: h}
 	box := container.New(f, container.NewScroll(content))
@@ -956,12 +1269,18 @@ func (c *Console) fixedTable(content fyne.CanvasObject, h float32) (fyne.CanvasO
 	}
 }
 
-// fixedHeight 布局：宽度随父容器，高度锁死。
+// fixedHeight 布局：宽度随父容器，高度下限锁死（h 只是最小可视高——父容器
+// 给出更大高度时如实填满，vboxFlex 弹性分配统一盒高的前提；min 承诺仍为 h，
+// "至少这么高、多了不嫌"）。
 type fixedHeight struct{ h float32 }
 
 func (f *fixedHeight) Layout(objs []fyne.CanvasObject, size fyne.Size) {
+	h := f.h
+	if size.Height > h {
+		h = size.Height
+	}
 	for _, o := range objs {
-		o.Resize(fyne.NewSize(size.Width, f.h))
+		o.Resize(fyne.NewSize(size.Width, h))
 	}
 }
 
@@ -1037,28 +1356,29 @@ func (c *Console) refresh() {
 	c.refreshTrend()
 	if c.opts.Books != nil {
 		books := c.opts.Books()
-		if len(books) == 0 {
-			c.bookLabel.SetText("无（library/books/ 目录下未发现 .obk）")
-		} else {
-			var sb strings.Builder
-			for _, b := range books {
-				fmt.Fprintf(&sb, "· %s — %s 条 · 文件时间 %s\n",
-					b.Name, fmtInt(int64(b.Entries)), fmtFullTime(b.ModTime))
-			}
-			c.bookLabel.SetText(strings.TrimRight(sb.String(), "\n"))
-		}
+		c.bookRows = books
 		c.updateBookTile(books)
-		// 可视高随内容收放、300 封顶（多库盒内滚动）——与连接区同款模式
-		if c.bookListSetH != nil {
-			h := c.bookLabel.MinSize().Height
-			if h > 300 {
-				h = 300
+		// 行数据签名（行数+每行名称/条数/状态/文件时间）：库集合变化是罕见事件
+		// ——签名不变的刷新周期零重建（1.5s 防抖动），变了才全量重挂（选中态
+		// 保留：选中库仍在列表中时 rebuild 后描边不丢）。ModTime 必须进签名：
+		// 同名覆盖导入且条数恰好不变（修复版重打包）时，"文件时间"列要跟着
+		// 热加载翻新——漏了它该行会永久显示旧时间（2026-11-02 审查修正）
+		var sb strings.Builder
+		for _, b := range books {
+			fmt.Fprintf(&sb, "%s|%d|%t|%s|%d;", b.Name, b.Entries, b.Enabled, b.Status, b.ModTime.Unix())
+		}
+		if sig := fmt.Sprintf("%d|%s", len(books), sb.String()); sig != c.bookSig {
+			c.bookSig = sig
+			if c.bookRowsBox != nil {
+				c.rebuildBookRows()
 			}
-			c.bookListSetH(h)
+			// 列表区高度由 vboxFlex 弹性分配（统一盒高，2026-11-02），多库盒内
+			// 滚动——不再随行数调高
 		}
 	}
 	c.refreshCloudBook()
 	c.refreshCloudFirst()
+	c.refreshEndgame()
 	c.refreshSkipBooks()
 	if c.opts.Recent != nil {
 		rows := c.opts.Recent(50)
@@ -1130,7 +1450,10 @@ func fmtDay(t time.Time) string {
 	return t.Format("01-02")
 }
 
-// fmtSource 建议来源展示：book:桔库 → 开局库·桔库；engine → 引擎
+// fmtSource 建议来源展示：book:桔库 → 开局库·桔库；engine → 引擎。
+// 无需 cloud:/endgame: 分支：建议流数据源是沉淀库，而 recordSuggestion 只挂
+// 桔库主选与引擎终态（见 server.position），云库/残局命中不落库——沉淀行
+// source 恒为 "book:<名>"（复用行沿用原值）或 "engine"。
 func fmtSource(s string) string {
 	if strings.HasPrefix(s, "book:") {
 		return "开局库·" + strings.TrimPrefix(s, "book:")

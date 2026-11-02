@@ -5,6 +5,9 @@
 // 用法：
 //
 //	go run ./tools/mockphone -url wss://127.0.0.1:9527/ws -token <令牌>
+//
+// TLS 校验默认开启；连自签证书的 PC 端需跳过时显式设环境变量
+// MOCKPHONE_INSECURE_TLS=1（绝不写死——不安全配置只在显式注入时生效）。
 package main
 
 import (
@@ -13,6 +16,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"time"
 
@@ -131,9 +135,13 @@ func main() {
 		log.Fatal("缺少 -token（取 cabinet 配置文件的 token 字段）")
 	}
 
-	// 自签证书：联调工具明确跳过校验（真机端 M2 起改为证书指纹校验）
+	// 自签证书：TLS 校验默认开启（PC 端 cert/ 是标准自签证书，系统不信任会
+	// 握手失败）；确需跳过时经环境变量显式注入，与 tools/mock-phone.mjs 同
+	// 纪律——不安全开关绝不写死进脚本/代码，防止联调习惯带入生产
+	insecureTLS := os.Getenv("MOCKPHONE_INSECURE_TLS") == "1"
 	d := websocket.Dialer{
-		TLSClientConfig:  &tls.Config{InsecureSkipVerify: true},
+		// codeql[go/disabled-certificate-check] 仅 MOCKPHONE_INSECURE_TLS=1 时跳过校验，默认走标准校验
+		TLSClientConfig:  &tls.Config{InsecureSkipVerify: insecureTLS},
 		HandshakeTimeout: 5 * time.Second,
 	}
 	ws, resp, err := d.Dial(*url, nil)

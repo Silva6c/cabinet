@@ -105,6 +105,10 @@ internal/tray 在用）、golang.org/x/sys、golang.org/x/text——均为各自
   来源：象棋鱼 [zfdang/chinese-chess-fish-android](https://github.com/zfdang/chinese-chess-fish-android)
   （MIT），由部署者自行提供，不在本包分发范围；testdata/ju-book-*.json 为其
   衍生向量（MIT 义务=保留版权与许可声明）
+- **OBK 开局库格式说明（2026-11-01）**：本软件自定义开局库功能仅支持 OBK
+  （兵河/冰河系 `.obk`，SQLite 数据库，`bhobk` 表）格式，格式源自兵河五四
+  开源社区。本软件**只实现读取、不分发任何库文件**——库数据一律由使用者
+  自备，使用时请遵守原发布者的授权条款，并向原作者致谢。
 
 ## 9. 参考但不分发
 

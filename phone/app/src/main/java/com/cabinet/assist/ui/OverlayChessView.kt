@@ -41,6 +41,13 @@ class OverlayChessView @JvmOverloads constructor(
     var arrowTo: Pair<Int, Int>? = null
         set(value) { field = value; invalidate() }
 
+    /** 残局库第二意见箭头（2026-11-01）：与主箭头并存时先画（下层）、主箭头
+     *  后画（上层）；两箭头同格起止时调用方应置 null（单箭头+文字说明） */
+    var arrow2From: Pair<Int, Int>? = null
+        set(value) { field = value; invalidate() }
+    var arrow2To: Pair<Int, Int>? = null
+        set(value) { field = value; invalidate() }
+
     /** 被识别屏幕是否"红在上"（换边/翻转朝向）：true 时迷你棋盘同样红在上 */
     var flipped: Boolean = false
         set(value) { field = value; invalidate() }
@@ -126,6 +133,12 @@ class OverlayChessView @JvmOverloads constructor(
         /** "我方"色条颜色（原 Color.parseColor("#E53935")/"#37474F" 的常量化） */
         private const val COLOR_RED_BAR = 0xFFE53935.toInt()
         private const val COLOR_DARK_BAR = 0xFF37474F.toInt()
+
+        /** 残局库第二箭头（琥珀）：深描边+浅填充与主箭头同构（#FF8F00 在木色棋盘
+         *  上对比 ~3.6:1，描边承担辨识、填充高亮语义；形态是箭头不与手动选中
+         *  金圈混淆，色相与定着绿/暂定蓝区分明确） */
+        private const val COLOR_ENDGAME_STROKE = 0xFFFF8F00.toInt()
+        private const val COLOR_ENDGAME_FILL = 0xFFFFE082.toInt()
     }
 
     /** 缩放与棋盘原点（onDraw 中更新） */
@@ -177,16 +190,35 @@ class OverlayChessView @JvmOverloads constructor(
     }
 
     private fun drawArrow(canvas: Canvas) {
+        // 残局第二箭头先画（下层）；主箭头后画（上层）——主建议永远视觉优先。
+        // 两箭头同起止的场景由调用方置 null（单箭头+文字说明），这里不判重。
+        val f2 = arrow2From
+        val t2 = arrow2To
+        if (f2 != null && t2 != null) {
+            drawArrowShape(canvas, f2, t2, COLOR_ENDGAME_STROKE, COLOR_ENDGAME_FILL)
+        }
         val f = arrowFrom ?: return
         val t = arrowTo ?: return
-        center(f.first, f.second)
-        val fx = cx; val fy = cy
-        center(t.first, t.second)
-        val tx = cx; val ty = cy
         // 我方着法箭头：暂定=蓝，定着（成熟）=深玉绿（#1B5E20 在木色棋盘上对比 4.45:1，
         // 由描边承担对比，填充 #A5D6A7 只是高亮语义）
         val strokeColor = if (mature) 0xFF1B5E20.toInt() else 0xFF2B6FFF.toInt()
         val fillColor = if (mature) 0xFFA5D6A7.toInt() else 0xFF8AB6FF.toInt()
+        drawArrowShape(canvas, f, t, strokeColor, fillColor)
+    }
+
+    /** 按起止格与配色画一枚箭头（主/残局两路共用；arrowPath 复用——drawPath
+     *  立即执行，两次 getTransformedPath 之间不互相覆盖）。 */
+    private fun drawArrowShape(
+        canvas: Canvas,
+        f: Pair<Int, Int>,
+        t: Pair<Int, Int>,
+        strokeColor: Int,
+        fillColor: Int,
+    ) {
+        center(f.first, f.second)
+        val fx = cx; val fy = cy
+        center(t.first, t.second)
+        val tx = cx; val ty = cy
         // ArrowShape 默认参数基于 1240x1340 基准坐标系，按本视图缩放；
         // 参数只随 scale 变，scale 未变直接复用（重绘热路径免构造+免 Matrix 重算）。
         // ⚠缓存键只有 scale 是够的：其余参数是常量，起止点每次经 getTransformedPath

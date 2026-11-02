@@ -89,9 +89,14 @@ class YoloBoardDetector(context: Context, useNnapi: Boolean = false) {
         val shifted = if (cx0 == 0 && cy0 == 0) dets
         else dets.map { YoloDetection(it.labelId, it.score, it.cx + cx0, it.cy + cy0, it.w, it.h) }
         val mapped = DetectionBoardMapper.map(shifted, frame.width, frame.height)
-        Log.d(TAG, "yolo: infer=${inferMs}ms crop=${cw}x$ch dets=${dets.size} " +
-            "pieces=${mapped?.pieceCount ?: 0} avg=${mapped?.avgScore?.let { "%.2f".format(it) }} " +
-            "dropped=${mapped?.dropped ?: 0}")
+        // 逐帧统计仅 debug 构建输出（BuildConfig 是编译期常量，release 直接
+        // 消除）；保持 android.util.Log 而不走 RLog.d——这是热路径，高频日志
+        // 不能进 RLog 环形队列挤掉关键日志（见 RLog 类注释雷区）
+        if (com.cabinet.BuildConfig.DEBUG) {
+            Log.d(TAG, "yolo: infer=${inferMs}ms crop=${cw}x$ch dets=${dets.size} " +
+                "pieces=${mapped?.pieceCount ?: 0} avg=${mapped?.avgScore?.let { "%.2f".format(it) }} " +
+                "dropped=${mapped?.dropped ?: 0}")
+        }
         return mapped
     }
 
