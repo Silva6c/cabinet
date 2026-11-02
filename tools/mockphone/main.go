@@ -140,7 +140,8 @@ func main() {
 	// 纪律——不安全开关绝不写死进脚本/代码，防止联调习惯带入生产
 	insecureTLS := os.Getenv("MOCKPHONE_INSECURE_TLS") == "1"
 	d := websocket.Dialer{
-		// codeql[go/disabled-certificate-check] 仅 MOCKPHONE_INSECURE_TLS=1 时跳过校验，默认走标准校验
+		// 校验开关取自环境变量而非字面量 true，CodeQL 的 disabled-certificate-check
+		// 不再判定为告警（该告警已随 2026-11-02 扫描自动关闭，非注释抑制所致）
 		TLSClientConfig:  &tls.Config{InsecureSkipVerify: insecureTLS},
 		HandshakeTimeout: 5 * time.Second,
 	}

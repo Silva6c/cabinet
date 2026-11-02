@@ -434,8 +434,9 @@ func unzip(zipPath, dir string) error {
 		}
 		// 显式边界复核（防穿越第二道闸）：目标路径相对目标目录不得带 .. 前缀。
 		// 上方 Base 净化已保证落盘恒在 dir 内，这道闸是纵深——未来有人把
-		// Base 净化改掉时它仍在（CodeQL 的 go/zipslip 不识别 Base 净化，
-		// 同时靠行内抑制收口）
+		// Base 净化改掉时它仍在。CodeQL 的 go/zipslip 未建模 Base 净化能力，
+		// 该告警已在 GitHub 侧以 false positive 处置（理由见 dismissal 注释）；
+		// 行内 // codeql[...] 抑制对函数级告警范围实测不生效，勿再添加
 		dest := filepath.Join(dir, name)
 		if rel, rerr := filepath.Rel(dir, dest); rerr != nil ||
 			rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
@@ -445,7 +446,7 @@ func unzip(zipPath, dir string) error {
 		if err != nil {
 			return err
 		}
-		out, err := os.Create(dest) // codeql[go/zipslip] 双重防穿越：Base 净化 + Rel 边界复核
+		out, err := os.Create(dest)
 		if err != nil {
 			_ = rc.Close()
 			return err
