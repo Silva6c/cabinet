@@ -159,7 +159,9 @@ object OnnxGeom {
     }
 
     /**
-     * 仿射重映射：m6 为 forward（源→输出）矩阵，对每个输出像素用逆矩阵找源坐标采样，
+     * 仿射重映射（分配版测试缝）：生产走 warpAffineInto 复用缓冲；本分配版
+     * 仅 OnnxGeomTest 对照零分配版行为使用，勿在生产热路径调用。
+     * m6 为 forward（源→输出）矩阵，对每个输出像素用逆矩阵找源坐标采样，
      * 越界补黑——语义与 OpenCV warpAffine(src, dst, M)（默认 flags）一致。
      */
     fun warpAffine(px: IntArray, w: Int, h: Int, m6: FloatArray, outW: Int, outH: Int): IntArray {
@@ -170,7 +172,12 @@ object OnnxGeom {
 
     /** 复用输出缓冲版 [warpAffine]：识别热路径用，dst 长度须为 outW*outH */
     fun warpAffineInto(px: IntArray, w: Int, h: Int, m6: FloatArray, outW: Int, outH: Int, dst: IntArray) {
-        val inv = invertAffine(m6)
+        warpAffineIntoInv(px, w, h, invertAffine(m6), outW, outH, dst)
+    }
+
+    /** [warpAffineInto] 的预求逆变体：调用方对同一 forward 矩阵还要做逆映射
+     *  （detectCorners 的角点还原）时复用同一份 inv，免二次求逆与数组分配 */
+    fun warpAffineIntoInv(px: IntArray, w: Int, h: Int, inv: FloatArray, outW: Int, outH: Int, dst: IntArray) {
         var o = 0
         for (dy in 0 until outH) {
             // 增量计算：x' = ia·dx + (ib·dy + ic)，dx 每步加 ia
@@ -198,7 +205,7 @@ object OnnxGeom {
         }
     }
 
-    /** 双线性缩放（中心对齐 + 边界复制，等价 OpenCV resize INTER_LINEAR） */
+    /** 双线性缩放（分配版测试缝，生产走 resizeBilinearInto；中心对齐 + 边界复制，等价 OpenCV resize INTER_LINEAR） */
     fun resizeBilinear(px: IntArray, sw: Int, sh: Int, dw: Int, dh: Int): IntArray {
         val out = IntArray(dw * dh)
         resizeBilinearInto(px, sw, sh, dw, dh, out)
@@ -224,7 +231,7 @@ object OnnxGeom {
     val IMAGENET_MEAN = floatArrayOf(123.675f, 116.28f, 103.53f)
     val IMAGENET_STD = floatArrayOf(58.395f, 57.12f, 57.375f)
 
-    /** ARGB 像素 → RGB 三平面 CHW FloatArray，逐通道 (p − mean) / std */
+    /** ARGB 像素 → RGB 三平面 CHW FloatArray（分配版测试缝，生产走 normalizeChwInto），逐通道 (p − mean) / std */
     fun normalizeChw(px: IntArray): FloatArray {
         val out = FloatArray(3 * px.size)
         normalizeChwInto(px, out)

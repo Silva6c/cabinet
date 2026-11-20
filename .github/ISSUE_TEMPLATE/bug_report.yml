@@ -1,0 +1,39 @@
+name: Bug 报告
+description: 报告识别错误、连接问题、建议异常等功能缺陷
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提交前请先读 [DESIGN_BOUNDARIES.md](DESIGN_BOUNDARIES.md)（边界声明）。
+        请求"自动走子 / 绕过检测"类内容会被直接关闭并留档。
+  - type: dropdown
+    id: side
+    attributes:
+      label: 问题所在端
+      options:
+        - 电脑端（cabinet.exe / 控制台）
+        - 手机端（悬浮窗 / 识别）
+        - 双端协同（连接 / 协议 / 建议）
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: 手机端"关于"弹窗的版本号，或电脑端控制台"关于"的版本串
+      placeholder: "如 1.1.1 / vc7-20261103"
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 现象与复现步骤
+      description: 做了什么、期望什么、实际发生什么；开局库问题请注明库文件名与来源
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志片段（可选，请脱敏）
+      description: 电脑端日志在托盘菜单"打开日志目录"

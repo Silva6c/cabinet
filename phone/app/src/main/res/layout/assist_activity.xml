@@ -210,7 +210,7 @@
                 android:layout_marginTop="@dimen/qi_sp_1"
                 android:paddingTop="10dp"
                 android:paddingBottom="6dp"
-                android:text="证书指纹（可选，扫码自动填入）›"
+                android:text="@string/fp_entry_collapsed"
                 android:textColor="@color/qi_muted"
                 android:textSize="12sp" />
 

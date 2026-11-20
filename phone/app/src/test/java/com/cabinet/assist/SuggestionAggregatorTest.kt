@@ -198,4 +198,30 @@ class SuggestionAggregatorTest {
         agg.onSuggestion(sug("h2e2", source = "cloud:www.chessdb.cn", depth = 0, scoreCp = null))
         assertEquals(listOf("h2e2"), agg.candidates.map { it.bestMove })
     }
+
+    @Test
+    fun `云库迟到帧同着法去重_变招不空转`() {
+        // 2026-11-14 红队第二轮：异步云库帧（序号缺省落槽 1、无分数）与引擎某线
+        // 同着法时占两个槽——"变招"在两条相同着法间空转、优势行在"有分/无分"
+        // 间闪烁。去重后保留高排名权威槽。
+        val agg = SuggestionAggregator()
+        agg.onSuggestion(sug("h2e2", multipv = 1, depth = 20))
+        agg.onSuggestion(sug("b2e2", multipv = 2, depth = 20))
+        assertEquals(listOf("h2e2", "b2e2"), agg.candidates.map { it.bestMove })
+        // 云库帧（source=cloud、无分数、序号缺省落槽 1）着法与引擎第 2 线相同
+        agg.onSuggestion(sug("b2e2", scoreCp = null, depth = 0, source = "cloud:x"))
+        assertEquals(listOf("b2e2"), agg.candidates.map { it.bestMove })
+    }
+
+    @Test
+    fun `去重保留各自到达时刻_高排名在先`() {
+        val agg = SuggestionAggregator()
+        agg.onSuggestion(sug("h2e2", multipv = 1, depth = 20))
+        Thread.sleep(5)
+        agg.onSuggestion(sug("b2e2", multipv = 2, depth = 20))
+        // 同着法重复（槽 1 被覆盖后与槽 2 同着法）→ 去重；arrivedAtOf 按幸存槽取
+        agg.onSuggestion(sug("h2e2", multipv = 2, depth = 20))
+        assertEquals(listOf("h2e2"), agg.candidates.map { it.bestMove })
+        assertTrue(agg.arrivedAtOf("h2e2") > 0)
+    }
 }

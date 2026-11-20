@@ -1,0 +1,25 @@
+name: 功能建议
+description: 提出新功能或改进建议
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        功能建议须与项目边界兼容：本工具只读屏幕、只做提示，
+        不含自动执行 / 注入 / 反检测能力（见
+        [DESIGN_BOUNDARIES.md](DESIGN_BOUNDARIES.md) §6）。与边界冲突的
+        建议一律不做。
+  - type: textarea
+    id: scenario
+    attributes:
+      label: 使用场景
+      description: 你在什么局面下需要它、现在是怎么绕的
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 期望方案
+      description: 期望的交互与效果（不用给实现细节）
+    validations:
+      required: true

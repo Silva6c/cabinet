@@ -66,7 +66,13 @@ func EnsureCert(certDir string) (tls.Certificate, error) {
 }
 
 // generateSelfSigned 生成 ECDSA P-256 自签证书并写盘。
-// SAN 覆盖：localhost、环回地址、主机名与本机所有非环回 IPv4（局域网手机按 IP 连接）。
+// SAN 覆盖：localhost、cabinet.local 与本机所有非环回 IPv4（局域网手机按
+// IP 连接）——**不含主机名**（2026-11-08 用户拍板，业界主流形态：SAN 与
+// 部署环境解耦）。历史教训：曾把 os.Hostname() 原样写进 DNS SAN，中文电脑
+// 名（外部用户实测"无序"）在 x509.CreateCertificate 处报 IA5String 编码
+// 失败、首次启动即静默退出——SAN 里的主机名从第一天起就是零功能（手机按
+// IP 直连、靠二维码指纹配对），固定服务名让任何电脑名永不踩坑；将来若做
+// mDNS 自动发现，cabinet.local 即刻成为有真实消费方的名字。
 func generateSelfSigned(certPath, keyPath string) error {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -78,7 +84,6 @@ func generateSelfSigned(certPath, keyPath string) error {
 		return fmt.Errorf("生成序列号失败: %w", err)
 	}
 
-	host, _ := os.Hostname()
 	notBefore := time.Now().Add(-time.Hour) // 时钟略回拨，避免刚生成即"未生效"
 	tmpl := x509.Certificate{
 		SerialNumber: serial,
@@ -91,7 +96,7 @@ func generateSelfSigned(certPath, keyPath string) error {
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
-		DNSNames:              sanHostnames(host),
+		DNSNames:              sanHostnames(),
 		IPAddresses:           sanIPs(),
 	}
 
@@ -131,14 +136,15 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
-// sanHostnames 证书的 DNS SAN：localhost + 主机名。
-// 注意：IP 一律放 IP SAN，不混入 DNSNames。
-func sanHostnames(hostname string) []string {
-	names := []string{"localhost"}
-	if hostname != "" {
-		names = append(names, hostname)
-	}
-	return names
+// certServiceDNS 证书 DNS SAN 的固定服务名：mDNS 风格（RFC 6762/6763），
+// 为将来 mDNS 自动发现预留有真实消费方的名字；当前仅作稳定标识。
+const certServiceDNS = "cabinet.local"
+
+// sanHostnames 证书的 DNS SAN：固定 [localhost, cabinet.local]，与部署环境
+// （主机名/语言/字符集）完全解耦——2026-11-08 用户拍板的业界主流形态，
+// 任何电脑名永不触发 IA5String 编码失败。注意：IP 一律放 IP SAN。
+func sanHostnames() []string {
+	return []string{"localhost", certServiceDNS}
 }
 
 // sanIPs 证书的 IP SAN：环回地址 + 本机所有非环回 IPv4。

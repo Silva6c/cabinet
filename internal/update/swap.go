@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // 更新中间文件固定名（全部锚定 exe 目录——绿色软件零残留承诺，铁律见包注释）：
@@ -27,14 +28,26 @@ func Writable(dir string) error {
 }
 
 // Apply 换入新 exe（调用方已优雅停止全部服务；运行中的 exe 允许改名、不允许
-// 覆盖写，所以是"改名让位 → 新文件就位"两步）。两步任一失败立即回滚并删净
-// 新文件——本进程映像已在内存，文件系统变化不影响继续运行旧版本。
-// 成功后旧版本保留为 .old（新进程稳定运行后由 RemoveOldBackup 延迟删除，
-// 防"新 exe 启动即崩"时失去回退手段）。
-func Apply(dir, exeName string) error {
+// 覆盖写，所以是"改名让位 → 新文件就位"两步）。
+// newDigest 为解压阶段记录的 .new 自身 sha256 十六进制串（随 Checker 状态机
+// 内存传递）：换入前重验——zip 官方 digest 校验的是 zip 全文件，从解出 .new 到
+// 换入之间的停机窗口内 .new 可能被同目录写权限者替换（2026-11-14 红队第二轮），
+// 重验把窗口收拢为零；不匹配即删净弃用。
+// 两步任一失败立即回滚并删净新文件——本进程映像已在内存，文件系统变化不影响
+// 继续运行旧版本。成功后旧版本保留为 .old（新进程稳定运行后由 RemoveOldBackup
+// 延迟删除，防"新 exe 启动即崩"时失去回退手段）。
+func Apply(dir, exeName, newDigest string) error {
 	cur := filepath.Join(dir, exeName)
 	old := filepath.Join(dir, exeName+exeOldSuffix)
 	neu := filepath.Join(dir, exeName+exeNewSuffix)
+	sum, err := fileSHA256(neu)
+	if err != nil {
+		return fmt.Errorf("重验新程序失败: %w", err)
+	}
+	if newDigest == "" || !strings.EqualFold(sum, newDigest) {
+		_ = os.Remove(neu)
+		return fmt.Errorf("新程序重验不匹配（疑似被篡改或损坏），已弃用")
+	}
 	if err := os.Rename(cur, old); err != nil {
 		_ = os.Remove(neu)
 		return fmt.Errorf("备份当前程序失败: %w", err)

@@ -24,6 +24,7 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
+	"cabinet/internal/memwatch"
 	"cabinet/internal/update"
 	"cabinet/internal/xq"
 )
@@ -75,23 +76,23 @@ func (c *Console) tileBooks() fyne.CanvasObject {
 	head, headSet := qiDynamic("—", qiSize(theme.SizeNameCaptionText), qiMuted, false, false)
 	total, totalSet := qiDynamic("0", qiSize(meterSizeName), qiForeground, false, true)
 	rate, rateSet := qiDynamic("—", qiSize(theme.SizeNameText), qiForeground, false, true)
-	sub, subSet := qiDynamic("最近更新 —", qiSize(theme.SizeNameCaptionText), qiMuted, false, false)
 	bar, barSet := newHBar()
-	c.bookHeadSet, c.bookTotalSet, c.bookRateSet, c.bookSubSet, c.bookBarSet = headSet, totalSet, rateSet, subSet, barSet
+	c.bookHeadSet, c.bookTotalSet, c.bookRateSet, c.bookBarSet = headSet, totalSet, rateSet, barSet
 	rows := []fyne.CanvasObject{
 		sectionHeader("02", "开局库", head),
 		qiCaption("收录局面"),
 		total,
 		bar,
-		container.NewHBox(qiCaption("今日命中率"), rate, layout.NewSpacer(), sub),
+		container.NewHBox(qiCaption("今日命中率"), rate),
 	}
-	// 云库开关行（可选外部开局库；nil 回调 = 行缺席）。说明小字随"默认走云库"
-	// 切换措辞（cloudLookupFirst 语义矩阵的 UI 面，静态文案会失真）
+	// 云库开关行（可选外部开局库；nil 回调 = 行缺席）。查询时机由开关语义
+	// 自明，不放说明小字（写死措辞会随行为演进失真，2026-11-05 清理）
 	if c.opts.CloudBookGet != nil {
 		c.cloudChk = widget.NewCheck("云库查询", func(on bool) {
 			if c.cloudBusy.Load() || c.opts.CloudBookSet == nil {
 				return
 			}
+			unfocusWidget(c.cloudChk) // 点击即失焦，焦点环光晕不挂（见 unfocusWidget）
 			if msg := c.opts.CloudBookSet(on); msg != "" {
 				dialog.NewError(errors.New(msg), c.win).Show()
 			}
@@ -100,13 +101,9 @@ func (c *Console) tileBooks() fyne.CanvasObject {
 		if u, err := url.Parse(endpoint); err == nil && u.Host != "" {
 			endpoint = u.Host
 		}
-		cloudHint, cloudHintSet := qiDynamic("本地库/沉淀未命中才查", qiSize(theme.SizeNameCaptionText), qiMuted, false, false)
-		c.cloudHintSet = cloudHintSet
 		rows = append(rows, container.NewHBox(
 			c.cloudChk,
 			qiCaption(endpoint),
-			layout.NewSpacer(),
-			cloudHint,
 		))
 	}
 	// 残局库开关不放 02 tile（2026-11-02 用户定稿：与云库开关并排显重复）——
@@ -114,27 +111,22 @@ func (c *Console) tileBooks() fyne.CanvasObject {
 	return bentoTile(container.NewVBox(rows...))
 }
 
-// updateBookTile 回填开局库 tile：收录总局面 + 今日命中率 + 最近更新
+// updateBookTile 回填开局库 tile：收录总局面 + 今日命中率
 func (c *Console) updateBookTile(books []BookRow) {
 	if c.bookTotalSet == nil {
 		return
 	}
 	total := 0
-	var newest time.Time
 	for _, b := range books {
 		total += b.Entries
-		if b.ModTime.After(newest) {
-			newest = b.ModTime
-		}
 	}
 	if len(books) == 0 {
 		c.bookHeadSet("未发现 .obk")
 	} else {
-		c.bookHeadSet(books[0].Name + " · 热加载")
+		c.bookHeadSet(books[0].Name)
 	}
 	c.bookTotalSet(fmtInt(int64(total)))
-	c.bookSubSet("最近更新 " + fmtDay(newest))
-	if rate, ok := c.todayBookRate(); ok {
+	if rate, ok := c.todayBookRateCached(); ok {
 		c.bookRateSet(fmt.Sprintf("%.0f%%", rate*100))
 		c.bookBarSet(rate)
 	} else {
@@ -158,18 +150,9 @@ func (c *Console) refreshCloudBook() {
 	c.cloudChk.SetChecked(on)
 }
 
-// refreshCloudFirst 回写"默认走云库"勾选态与 02 tile 云库说明措辞
-// （cloudFirstBusy 抑制 SetChecked 回环，与 refreshCloudBook 同款套路）。
-// 措辞随开关切换：cloudLookupFirst 语义矩阵的 UI 面——cloud_first 开启后
-// 云库命中即终，"未命中才查"的旧说法会失真。
+// refreshCloudFirst 回写"默认走云库"勾选态（cloudFirstBusy 抑制 SetChecked
+// 回环，与 refreshCloudBook 同款套路）。
 func (c *Console) refreshCloudFirst() {
-	if c.cloudHintSet != nil {
-		if c.opts.CloudFirstGet != nil && c.opts.CloudFirstGet() {
-			c.cloudHintSet("云库优先：命中即用，未命中才走本地")
-		} else {
-			c.cloudHintSet("桔库/沉淀未命中才查")
-		}
-	}
 	if c.cloudFirstChk == nil || c.opts.CloudFirstGet == nil {
 		return
 	}
@@ -212,6 +195,23 @@ func (c *Console) refreshSkipBooks() {
 	defer c.skipBooksBusy.Store(false)
 	c.skipBooksChk.SetChecked(on)
 }
+
+// todayBookRateCached 带缓存的今日命中率：底层查询是 console 刷新路径上
+// 最重的分配源（modernc sqlite 每查询 200 行×字符串扫描，2026-11-08 内存
+// 排查 S1），而命中率分钟级变化足够——10 秒缓存把每 1.5s 一次的全量查询
+// 降为每 10s 一次，对局结束后缓存自然冻结（不再有任何查询）。
+func (c *Console) todayBookRateCached() (float32, bool) {
+	now := time.Now()
+	if now.Sub(c.bookRateAt) < bookRateCacheTTL {
+		return c.bookRateVal, c.bookRateOK
+	}
+	v, ok := c.todayBookRate()
+	c.bookRateVal, c.bookRateOK, c.bookRateAt = v, ok, now
+	return v, ok
+}
+
+// bookRateCacheTTL 今日命中率缓存窗口（见 todayBookRateCached）。
+const bookRateCacheTTL = 10 * time.Second
 
 // todayBookRate 今日命中率：今天沉淀的建议里开局库来源占比（今天无样本返回 false）。
 // 取样最近 200 条（跨天时自然只剩今天的条目参与统计）。200 的存在理由：复用
@@ -278,11 +278,6 @@ func (c *Console) sectionTuner() fyne.CanvasObject {
 	mt := mk("movetime", tunerMoveTimeOpts)
 	clearBtn := newHiliteButton("清空置换表", c.onClearHash)
 
-	hint := widget.NewLabel("改动即时以最近局面重新搜索；与手机端调节双向同步")
-	c.tunerHint = hint // refreshTuner 逐轮追加当前思考模式（含手机端远程调节的跟随回显）
-	hint.TextStyle = fyne.TextStyle{Italic: true}
-	hint.Importance = widget.LowImportance
-
 	row := container.NewGridWithColumns(5,
 		container.NewVBox(widget.NewLabel("线程数"), th),
 		container.NewVBox(widget.NewLabel("变招路数"), mp),
@@ -300,6 +295,7 @@ func (c *Console) sectionTuner() fyne.CanvasObject {
 		if c.smartBusy.Load() {
 			return
 		}
+		unfocusWidget(c.smartChk) // 点击即失焦，焦点环光晕不挂（见 unfocusWidget）
 		v := 0
 		if on {
 			v = 1
@@ -320,7 +316,6 @@ func (c *Console) sectionTuner() fyne.CanvasObject {
 			clearBtn,
 		)),
 		row,
-		hint,
 		widget.NewSeparator(),
 	)
 }
@@ -335,6 +330,7 @@ func (c *Console) onTunerChanged(kind string) {
 	if sel == nil || sel.Selected == "" {
 		return
 	}
+	unfocusWidget(sel) // 点击即失焦，焦点环光晕不挂（与勾选框同口径，见 unfocusWidget）
 	v, err := parseTunerOption(kind, sel.Selected)
 	if err != nil {
 		return
@@ -454,16 +450,6 @@ func (c *Console) refreshTuner() {
 	set("hash", tunerOptionText("hash", ts.HashMB), ts.Ready)
 	set("depth", tunerOptionText("depth", ts.Depth), ts.Ready)
 	set("movetime", tunerOptionText("movetime", ts.MoveTimeMs), ts.Ready)
-	// 当前思考模式动态提示（时间制优先于深度——手机端芯片远程调节时此行即
-	// PC 侧的"以谁为准"回显，1.5s 轮询自动跟随）
-	if c.tunerHint != nil {
-		mode := fmt.Sprintf("当前：深度制 %d 层", ts.Depth)
-		if ts.MoveTimeMs > 0 {
-			mode = fmt.Sprintf("当前：时间制 %d 秒", ts.MoveTimeMs/1000)
-		}
-		c.tunerHint.Text = "改动即时以最近局面重新搜索；与手机端调节双向同步 · " + mode
-		c.tunerHint.Refresh()
-	}
 	// 智能思考勾选态回写（smartBusy 抑制 SetChecked 的 OnChanged 回环，
 	// cloudBusy 同款套路）
 	if c.smartChk != nil && c.smartChk.Checked != ts.Smart {
@@ -501,9 +487,8 @@ func (c *Console) sectionAdvancedBar() fyne.CanvasObject {
 	addBtn("books", "开局库", theme.StorageIcon())
 	addBtn("log", "日志", theme.DocumentIcon())
 	addBtn("update", "检查更新", theme.DownloadIcon())
-	hint := qiCaption("一次展开一个面板")
 	return container.NewVBox(
-		sectionHeader("05", "高级功能", hint),
+		sectionHeader("05", "高级功能"),
 		container.NewHBox(btns...),
 	)
 }
@@ -547,7 +532,7 @@ func (c *Console) sectionClients() fyne.CanvasObject {
 	listArea = container.NewStack(catcher, listArea)
 
 	return bentoTile(container.NewVBox(
-		sectionHeader("03", "连接", connText, qiCaption("WSS · 自签证书（指纹锁定）")),
+		sectionHeader("03", "连接", connText),
 		clientHeaderRow(),
 		listArea,
 		container.NewHBox(qiCaption("证书指纹"), c.fpChip.object()),
@@ -689,7 +674,10 @@ func (c *Console) sectionSuggestions() fyne.CanvasObject {
 				lbl.SizeName = theme.SizeNameCaptionText
 				lbl.Importance = widget.LowImportance
 				lbl.Alignment = fyne.TextAlignLeading
-				lbl.SetText([...]string{"时间", "来源", "局面", "着法", "变招", "分数", "深度"}[id.Col])
+				// "分数"列标"红方分"（2026-11-14 红队第二轮）：沉淀分恒为红方
+				// 视角，执黑用户的"走势"面板按 myRed 翻转——两处符号相反不是
+				// 算错，列头明示消除误读
+				lbl.SetText([...]string{"时间", "来源", "局面", "着法", "变招", "红方分", "深度"}[id.Col])
 				return
 			}
 			lbl.TextStyle = fyne.TextStyle{}
@@ -747,10 +735,12 @@ func (c *Console) sectionSuggestions() fyne.CanvasObject {
 	// （advPanelH，2026-11-02）的剩余高——盒高恒定，表头 + 约四行起，其余盒内
 	// 滚动；50 条数据全量可滚，盒只负责"统一"。尾部 separator 删除（盒内已有
 	// 滚动边界，分隔线是冗余装饰）
+	// flex:1 = sugArea（子项索引 0 基：[标题, 表格]）——此前误写 flex:2 指向
+	// 不存在的第 3 子项，弹性无人吸收，表格永远停在 120px 下限、盒底大片留黑
+	// （2026-11-05 用户实测"没有像日志那样全数展开"根因）。
 	sugArea, _ := c.fixedTable(c.sugTable, 120)
-	return container.New(&vboxFlex{gap: 4, flex: 2},
-		sectionTitle("建议流（历史沉淀 · 最近 50 条）", c.sugCount, clearBtn),
-		qiCaption("每次开局库命中 / 引擎出招沉淀一条；未连接手机时不会新增"),
+	return container.New(&vboxFlex{gap: 4, flex: 1},
+		sectionTitle("建议流（历史沉淀）", c.sugCount, clearBtn),
 		sugArea,
 	)
 }
@@ -787,6 +777,23 @@ func (c *Console) countToday() int {
 	return c.opts.CountToday()
 }
 
+// sugCacheTTL 建议流取数缓存窗口（见 sugCached）。
+const sugCacheTTL = 5 * time.Second
+
+// sugCached Recent(50) 行 + 今日条数的 5s 缓存取数（2026-11-09 内存治理：
+// 空载分配速率主导项降频，两条 SQL 共用一个窗口；签名短路逻辑不变）。
+func (c *Console) sugCached() ([]SugRow, string) {
+	now := time.Now()
+	if now.Sub(c.sugCacheAt) < sugCacheTTL {
+		return c.sugCacheRows, c.sugCacheToday
+	}
+	rows := c.opts.Recent(50)
+	c.sugCacheRows = rows
+	c.sugCacheToday = fmt.Sprintf("%d 条", c.countToday())
+	c.sugCacheAt = now
+	return rows, c.sugCacheToday
+}
+
 // confirmClearSuggestions 清空沉淀的二次确认（防误触；确认后立即刷新）。
 func (c *Console) confirmClearSuggestions() {
 	n := len(c.sugRows)
@@ -800,6 +807,7 @@ func (c *Console) confirmClearSuggestions() {
 				dialog.NewError(err, c.win).Show()
 				return
 			}
+			c.sugCacheAt = time.Time{} // 穿透取数缓存（见 sugCached），清空后立即刷新
 			c.refresh()
 		}, c.win).Show()
 }
@@ -851,12 +859,14 @@ func (c *Console) sectionBooks() fyne.CanvasObject {
 		rows = append(rows, container.NewHBox(
 			importBtn, upBtn, downBtn, tglBtn, delBtn, layout.NewSpacer(),
 			newInfoChip("开局库格式说明",
-				"本软件仅支持 OBK（兵河格式，SQLite 数据库）开局库文件，库文件一律自备，"+
-					"请遵守原发布者授权条款并向原作者致谢（本软件不分发任何库文件）。\n\n"+
+				"本软件支持 OBK 开局库文件（SQLite 数据库）：兵河系 bhobk 与鹏飞系 pfbook 表"+
+					"均可读取，列序、缺列、局面键的存储形态（整数/文本/混合）自动适配。"+
+					"加密库与键体系未知的库不支持——导入后零命中会在日志记一次告警。\n\n"+
+					"库文件一律自备，请遵守原发布者授权条款并向原作者致谢（本软件不分发任何库文件）。\n\n"+
 					"查询规则：按列表顺序逐库查询，首个命中即采用——\"上移/下移\"调整优先级，"+
-					"\"启用/禁用\"决定该库是否参与查询。\n\n"+
-					"导入：支持 .obk 与 .obk.zip（自动解压）；导入时先做 schema 预检，"+
-					"结构不符的坏库会被拒绝并说明原因。目录内同名 .obk.zip 比旧文件新时自动解压覆盖。",
+					"\"启用/禁用\"决定该库是否参与查询。状态列 ⚠ = 该库存在格式警示（如未建索引查询较慢），全文见日志。\n\n"+
+					"导入：支持 .obk 与 .obk.zip（自动解压）；导入时先做结构预检，"+
+					"无法读取的坏库会被拒绝并说明原因。目录内同名 .obk.zip 比旧文件新时自动解压覆盖。",
 				c.win),
 			openBtn,
 		))
@@ -872,6 +882,7 @@ func (c *Console) sectionBooks() fyne.CanvasObject {
 			if c.cloudFirstBusy.Load() || c.opts.CloudFirstSet == nil {
 				return
 			}
+			unfocusWidget(c.cloudFirstChk) // 点击即失焦，焦点环光晕不挂（见 unfocusWidget）
 			if msg := c.opts.CloudFirstSet(on); msg != "" {
 				dialog.NewError(errors.New(msg), c.win).Show()
 			}
@@ -881,7 +892,7 @@ func (c *Console) sectionBooks() fyne.CanvasObject {
 			"优先于本地库与引擎：开启后（仍需先勾选 02 区的\"云库查询\"）每步局面先查云库——"+
 				"命中即采用云库建议，不再查本地开局库/沉淀、不进引擎（省算力正是收益，需要引擎深度分析时"+
 				"用手机端\"更新\"或关掉本开关）；未命中或限流窗口内自动回落本地常规链，建议流不断供。\n\n"+
-				"⚠隐私口径与\"云库查询\"一致：开启后对局局面 FEN 必然发往所配端点（默认 chessdb.cn）。",
+				"⚠隐私口径与\"云库查询\"一致：开启后对局局面 FEN 必然发往所配端点（见 02 区）。",
 			c.win))
 	}
 	if c.opts.EndgameGet != nil {
@@ -889,6 +900,7 @@ func (c *Console) sectionBooks() fyne.CanvasObject {
 			if c.endgameBusy.Load() || c.opts.EndgameSet == nil {
 				return
 			}
+			unfocusWidget(c.endgameChk) // 点击即失焦，焦点环光晕不挂（见 unfocusWidget）
 			if msg := c.opts.EndgameSet(on); msg != "" {
 				dialog.NewError(errors.New(msg), c.win).Show()
 			}
@@ -896,7 +908,7 @@ func (c *Console) sectionBooks() fyne.CanvasObject {
 		switchRow.Add(c.endgameChk)
 		switchRow.Add(newInfoChip("关于\"残局库查询\"",
 			"云库穷举正解：开启后对本地开局库/沉淀都未命中的局面，另发一条残局库查询——查的是"+
-				"云库（chessdb.cn）穷举计算的残局表，结论为绝对正解（胜/和/负与最优着法均经穷举验证）。\n\n"+
+				"云库端点穷举计算的残局表，结论为绝对正解（胜/和/负与最优着法均经穷举验证）。\n\n"+
 				"手机端展示：残局着法与引擎建议一致时，建议文案追加\"· 残局库\"；不一致时悬浮窗"+
 				"并列两支箭头（琥珀色为残局库正解，绿色为当前建议）；无引擎建议时残局正解"+
 				"直接作为主建议显示。\n\n"+
@@ -908,6 +920,7 @@ func (c *Console) sectionBooks() fyne.CanvasObject {
 			if c.skipBooksBusy.Load() || c.opts.SkipBooksSet == nil {
 				return
 			}
+			unfocusWidget(c.skipBooksChk) // 点击即失焦，焦点环光晕不挂（见 unfocusWidget）
 			if msg := c.opts.SkipBooksSet(on); msg != "" {
 				dialog.NewError(errors.New(msg), c.win).Show()
 			}
@@ -1100,8 +1113,14 @@ func (c *Console) sectionLog() fyne.CanvasObject {
 	scroll := container.NewScroll(c.logRich)
 	c.logScroll = scroll
 	openBtn := newHiliteButton("打开日志目录", func() { openDir(c.opts.LogDir) })
+	// 内存计量小字（2026-11-07 计量表）：诊断"久开内存涨"的实时读数，与
+	// memwatch.WatchLoop 的定期日志同口径。放标题行右端（独立行会顶破五
+	// 面板统一盒高契约，TestAdvPanelsUniformHeight 抓出）
+	memObj, memSet := qiDynamic(memwatch.FormatShort(memwatch.Take()),
+		qiSize(theme.SizeNameCaptionText), qiMuted, false, false)
+	c.memSet = memSet
 	return container.New(&vboxFlex{gap: 4, flex: 1},
-		sectionTitle("日志", openBtn),
+		sectionTitle("日志", openBtn, memObj),
 		container.New(&fixedHeight{h: 140}, scroll),
 	)
 }
@@ -1181,6 +1200,7 @@ func (c *Console) sectionUpdate() fyne.CanvasObject {
 	c.updateBar.Hide()
 	verLine := qiCaption("当前版本 " + c.opts.Version)
 	c.updateAutoChk = widget.NewCheck("启动时自动检查（默认关）", func(on bool) {
+		unfocusWidget(c.updateAutoChk) // 点击即失焦（无 busy 守卫；构建期 SetChecked 触发时为无害 no-op）
 		if c.opts.UpdateAutoCheckSet == nil {
 			return
 		}
@@ -1340,6 +1360,15 @@ func (c *Console) refresh() {
 			set("模式", "深度制")
 		}
 		c.clientRows = clients
+		// 二维码窗配对监视：认证会话数 0→1 跳变即自动关窗（2026-11-17 扫码
+		// 五件套，见 qr.go pairingWatch——refresh 已在 fyne 主 goroutine）
+		authed := 0
+		for _, row := range clients {
+			if row.Authed {
+				authed++
+			}
+		}
+		c.pairingWatch(authed)
 		// 选中会话已消失（自行断开/被踢）时复位选中态，避免"断开会话"指向空 ID
 		if c.selectedID != "" && c.rowByID(c.selectedID) == nil {
 			c.selectedID = ""
@@ -1381,13 +1410,15 @@ func (c *Console) refresh() {
 	c.refreshEndgame()
 	c.refreshSkipBooks()
 	if c.opts.Recent != nil {
-		rows := c.opts.Recent(50)
+		// 取数缓存（2026-11-09 内存治理）：Recent(50)+CountToday 是空载期仍
+		// 每 1.5s 必跑的两条 SQLite 全程 prepare/finalize 查询，是空载分配
+		// 速率的主导项——sugSig 防抖已证明内容绝大多数周期无变化，5s 缓存
+		// 把取数降为每 5s 一次（清空沉淀时穿透，见 confirmClearSuggestions）
+		rows, today := c.sugCached()
 		// 签名短路：沉淀数据在绝大多数刷新周期无变化（1.5s 刷新节奏 vs 对局
 		// 节奏），内容键相同则跳过行数据重赋值与表格 Refresh（后者触发全部
 		// 可视 cell 重渲染）。签名 = 行数 + 首末行（时间,着法）：SQLite 侧
 		// 时间文本秒级精度，补着法消"同秒多条"碰撞；清空沉淀行数骤变必穿透。
-		// Recent 查询本身仍每轮执行（<1ms，取数才能判变没变；store 侧版本号
-		// 属跨层加 API，收益不成比例）。
 		sig := "0"
 		if n := len(rows); n > 0 {
 			sig = fmt.Sprintf("%d|%v|%s|%v|%s", n, rows[0].TS.UnixNano(), rows[0].BestMove,
@@ -1398,8 +1429,7 @@ func (c *Console) refresh() {
 			c.sugRows = rows
 			c.sugTable.Refresh()
 		}
-		today := fmt.Sprintf("%d 条", c.countToday()) // 一次数出两处：面板 sugCount + 01 tile kv
-		c.sugCount.SetText("今日 " + today)
+		c.sugCount.SetText("今日 " + today) // 一次数出两处：面板 sugCount + 01 tile kv
 		if f, ok := c.engCells["今日建议"]; ok {
 			f(today)
 		}
@@ -1424,6 +1454,16 @@ func (c *Console) refresh() {
 			c.logScroll.Refresh()
 		}
 	}
+	// 内存计量小字随刷新更新——只在日志面板展开时读（2026-11-09 内存治理：
+	// ReadMemStats 是 STW 操作，每 1.5s 读一次纯属浪费；小字只在日志面板
+	// 可见，隐藏时旧值保持，展开面板当下刷新一次）
+	if c.memSet != nil && c.advCurrent == "log" {
+		c.memSet(memwatch.FormatShort(memwatch.Take()))
+	}
+	// 窗口位置记忆（2026-11-20）：位置变化才落盘（1.5s 轮询判重，拖动后
+	// 下一轮捕获；无变化零 IO）。fyne v2.8 Window 接口无位置 API，读取走
+	// RunNative+HWND——判重与写盘在驱动回调内完成，见 pollWindowPosSave
+	c.pollWindowPosSave()
 }
 
 // orDash 空字符串显示占位符。
@@ -1440,14 +1480,6 @@ func fmtTime(t time.Time) string {
 		return "—"
 	}
 	return t.Format("15:04:05")
-}
-
-// fmtDay 短日期（开局库 tile"最近更新"）。
-func fmtDay(t time.Time) string {
-	if t.IsZero() {
-		return "—"
-	}
-	return t.Format("01-02")
 }
 
 // fmtSource 建议来源展示：book:桔库 → 开局库·桔库；engine → 引擎。

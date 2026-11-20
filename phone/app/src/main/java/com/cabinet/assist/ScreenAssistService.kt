@@ -69,6 +69,11 @@ class ScreenAssistService : Service() {
         const val EXTRA_RESULT_DATA = "result_data"
         private const val CHANNEL_ID = "assist_foreground"
         private const val NOTIF_ID = 1001
+        // 多处复用的用户可见文案（单源常量，2026-11-05 文案轮收敛——同文案
+        // 此前各散落 2 份，改一处漏一处）
+        private const val MSG_NO_PEER_CONFIG = "未配置电脑地址/令牌\n请在连线页填写后重试"
+        private const val MSG_RECOGNIZING_BOARD = "正在识别棋盘…\n请让棋盘完整无遮挡"
+        private const val MSG_TURN_MISMATCH = "轮次可能识别有误\n走一步后自动纠正"
         private const val MIN_FRAME_INTERVAL_MS = 220L
         /** 慢路径（棋盘未定位 sessionGrid==null 或跟踪不稳定）抓帧间隔：
          *  全图定位推理很重，按 1.4s 节流防烧机。⚠旧注释"遮挡才放慢/抓帧前隐藏面板"
@@ -78,6 +83,17 @@ class ScreenAssistService : Service() {
         private const val OVERLAY_FRAME_INTERVAL_MS = 1400L
         /** 建议成熟阈值：距最后一条建议到达的静默时长，超过即视为"定着"（绿箭头） */
         private const val SUGGEST_IDLE_MS = 800L
+        /**
+         * 遮挡判定面积阈值：窗口与棋盘外接矩形相交面积占窗口面积的下限。
+         * 2026-11-07 用户反馈"明明能正常识别却仍提示挡住"——旧判定是矩形
+         * 任意相交（蹭到一条边/一个角即算挡，棋盘外接矩形还含网格边距，
+         * 贴边悬浮常触发）。FLAG_SECURE 下遮挡本不影响识别，提示纯观感
+         * 引导，按"窗口明显压在棋盘上"口径取 1/4：擦边不再打扰，真压住仍提示
+         */
+        private const val OCCLUSION_AREA_RATIO = 0.25f
+        /** 截屏临时窗口时长：撤 FLAG_SECURE 到自动恢复的间隔（短窗口降低悬浮窗
+         *  入镜污染识别的时间，同时给用户留出唤起系统截屏的余量） */
+        private const val SCREENSHOT_WINDOW_MS = 10_000L
         /**
          * 建议渲染节流：info 流（depth/bestmove 变化即推）高频到达时合并悬浮窗重绘——
          * 每条全量重绘会刷爆主线程（2026-09-30 用户反馈卡顿），节流窗口内只安排一次补绘
@@ -151,7 +167,7 @@ class ScreenAssistService : Service() {
             remote = null
             if (mediaProjection == null) return@post // 录屏未启动：服务未运行，无需重建
             if (config.serverUrl.isBlank() || config.serverToken.isBlank()) {
-                setStatus("未配置电脑地址/令牌\n请在连线页填写后重试")
+                setStatus(MSG_NO_PEER_CONFIG)
                 return@post
             }
             remote = RemoteAnalysisClient(config.serverUrl, config.serverToken, remoteListener,
@@ -248,6 +264,10 @@ class ScreenAssistService : Service() {
      * 点选"起点→终点"录入实战着法（自动翻转走子方）、再点一次已选中子将其删除。
      */
     @Volatile private var manualMode = false
+    /** 结构门拒绝留痕去重（与 tracker.lastGateReject 对比，变化才记日志） */
+    private var lastLoggedGateReject: String? = null
+    /** 滑行候选提示去重（与 tracker.slidingCandidate 对比，变化才重绘大字"对方走子中"） */
+    private var lastRenderedSliding = false
     /** 手动模式下小棋盘当前选中的格（canonical x,y） */
     @Volatile private var manualSelected: Pair<Int, Int>? = null
     /** 用户已点击“关闭”：不再重建悬浮窗，直到重新启动服务 */
@@ -303,7 +323,8 @@ class ScreenAssistService : Service() {
      * 远程分析客户端：分析全部在电脑端"内阁"完成（开局库优先 → 皮卡鱼），
      * 手机端只上行局面、下行建议。本地引擎/开局库已彻底移除（瘦客户端）。
      */
-    private var remote: RemoteAnalysisClient? = null
+    // worker 写（applyConnection）/main 读（芯片按钮链）——跨线程可见性纪律
+    @Volatile private var remote: RemoteAnalysisClient? = null
     @Volatile private var remoteConnected = false
     @Volatile private var pcEngineReady = false
     /** PC 引擎原始状态（offline/loading/ready/error，welcome/status 携带）：
@@ -312,6 +333,21 @@ class ScreenAssistService : Service() {
     @Volatile private var pcEngineState = "offline"
     /** 最近一次连接/协议错误（显示于状态栏；连接恢复时清除） */
     @Volatile private var remoteErrorText: String? = null
+    /**
+     * 错误分类（2026-11-13"连接异常"误报治理）：true=连接类（onConnectError，
+     * 状态行显示"连接异常"）；false=局面提示类（showRemoteError，如识别自愈
+     * 未成功/终局提示——连接完好，此前一律渲染"连接异常"误导用户以为断线，
+     * 实测终局 no_moves 即触发）。建议到达清除时一并复位。
+     */
+    @Volatile private var remoteErrorIsConn = false
+    /**
+     * 终局态文案（2026-11-13 no_moves 移出自愈瀑布）：同局面第二次 no_moves
+     * 置位——真绝杀/困毙的确定性提示，渲染"对局结束"而非错误横幅。NEW_GAME/
+     * 更新/手动三处退出（重开/悔棋/改盘都应回到正常流程）。
+     */
+    @Volatile private var gameOverText: String? = null
+    /** 最近一次 no_moves 的盘面段（终局二次确认锚，见 gameOverText） */
+    @Volatile private var lastNoMovesBoard: String? = null
     /** 采集启动时刻：悬浮窗状态行"用时 x.xs"（0 = 未启动/已释放） */
     @Volatile private var captureStartedAtMs = 0L
 
@@ -361,7 +397,20 @@ class ScreenAssistService : Service() {
      * 确定性复现同一非法局面，二次仍拒就落错误提示（防识别↔重探死循环）。
      * 每次新局面确认时重新武装（onBoardConfirmed）。
      */
-    @Volatile private var lastReprobeFen: String? = null
+    /** 已自愈重探过的盘面段（会话级记账，上限 8 段淘汰最旧）：同一盘面终身只
+     *  重探一次——结构门（2026-11-10）扩大 bad_frame 触发面后，识别振荡（两个
+     *  坏盘面 A/B 交替确认）在"单值记账+换盘面即重置"的组合下会无限 ping-pong
+     *  （复审 P2 定案）。盘面对比用 FEN 首段（轮次字段不参与，flip 只改轮次）。
+     *  线程安全：onError（OkHttp 线程）与 onBoardConfirmed（worker）并发触达 */
+    private val reprobedSegs = ArrayDeque<String>()
+    private fun reprobedOnce(seg: String): Boolean = synchronized(reprobedSegs) {
+        if (seg in reprobedSegs) true
+        else {
+            reprobedSegs.addLast(seg)
+            if (reprobedSegs.size > 8) reprobedSegs.removeFirst()
+            false
+        }
+    }
     /** canonical 布局 90 子（红恒在 y=9；迷你棋盘视图按 flipped 自行做屏幕朝向映射） */
     @Volatile private var currentPieces: IntArray? = null
     /** 当前确认局面的 canonical 棋盘（手动模式种子用） */
@@ -416,8 +465,9 @@ class ScreenAssistService : Service() {
     private val history = ArrayDeque<HistoryEntry>()
 
     private var windowManager: WindowManager? = null
-    private var overlayPanel: OverlayPanelView? = null
-    private var overlayParams: WindowManager.LayoutParams? = null
+    // main 创建/更新，worker recomputeOcclusion 读（含 View.width）——跨线程可见性
+    @Volatile private var overlayPanel: OverlayPanelView? = null
+    @Volatile private var overlayParams: WindowManager.LayoutParams? = null
 
     /**
      * 悬浮窗遮挡棋盘状态（worker 线程计算，2026-10-01 起按窗拆分）。
@@ -458,8 +508,49 @@ class ScreenAssistService : Service() {
     private class EngMetrics(
         val state: String, val depth: Int, val nodes: Long, val nps: Long, val hashfull: Int)
     @Volatile private var lastMetrics: EngMetrics? = null
-    private var detailView: OverlayDetailView? = null
-    private var detailParams: WindowManager.LayoutParams? = null
+    // 同 overlayPanel：main 写、worker 遮挡计算读
+    @Volatile private var detailView: OverlayDetailView? = null
+    @Volatile private var detailParams: WindowManager.LayoutParams? = null
+
+    // ---- 截屏临时窗口（2026-11-07）：撤 FLAG_SECURE 让系统截屏可拍全屏 ----
+
+    /** 截屏窗口截止时刻（elapsedRealtime 时基；0 = 未开窗）。窗口期间悬浮窗
+     *  不再被录屏剔除：系统截屏能拍到完整屏幕（用户诉求），但 MediaProjection
+     *  帧里出现悬浮窗像素——识别可能产出垃圾局面，由既有保险丝兜底（无效帧
+     *  丢弃 + 确认计数 + 恢复 secure 后下一帧自动回归），短窗口（10s）把污染
+     *  时间压到一次截屏所需 */
+    @Volatile private var screenshotWindowUntilMs = 0L
+    /** 截屏窗口恢复任务（mainHandler 驱动）：恢复 secure + 清截止时刻。
+     *  重复点击重置计时前必须先摘本任务，否则旧任务提前恢复 secure */
+    private val screenshotRestore = Runnable {
+        screenshotWindowUntilMs = 0L
+        applyOverlaySecure(true)
+        RLog.i(TAG, "screenshot window closed (secure restored)")
+    }
+
+    /** 两窗 FLAG_SECURE 统一开关：secure=false 时系统截屏可拍全屏（悬浮窗入
+     *  镜，见截屏窗口字段注释）；true 恢复"悬浮窗永不入镜"恒定前提
+     *  （boardOccluded 雷区注释）。BENCH_DISABLE_SECURE 实验常量为 true 时
+     *  本来就不加 secure，want 恒 false 幂等无副作用。窗口可能已被移除
+     *  （关窗/服务收尾竞态）——runCatching 吞 WindowManager 异常 */
+    private fun applyOverlaySecure(secure: Boolean) {
+        val wm = windowManager ?: return
+        val want = secure && !BENCH_DISABLE_SECURE
+        overlayParams?.let { p ->
+            if ((p.flags and WindowManager.LayoutParams.FLAG_SECURE) != 0 != want) {
+                p.flags = if (want) p.flags or WindowManager.LayoutParams.FLAG_SECURE
+                else p.flags and WindowManager.LayoutParams.FLAG_SECURE.inv()
+                runCatching { wm.updateViewLayout(overlayPanel, p) }
+            }
+        }
+        detailParams?.let { p ->
+            if ((p.flags and WindowManager.LayoutParams.FLAG_SECURE) != 0 != want) {
+                p.flags = if (want) p.flags or WindowManager.LayoutParams.FLAG_SECURE
+                else p.flags and WindowManager.LayoutParams.FLAG_SECURE.inv()
+                runCatching { wm.updateViewLayout(detailView, p) }
+            }
+        }
+    }
     /** 详情窗显隐（主面板"详情"按钮切换；2026-10-29 用户定稿：默认隐藏，手动点开） */
     @Volatile private var detailVisible = false
 
@@ -507,7 +598,7 @@ class ScreenAssistService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        tracker = BoardTracker(config.confirmCount, config.singleMoveRepair)
+        tracker = BoardTracker(config.confirmCount, config.singleMoveRepair, config.singleMoveEarlyConfirm)
         // B1 轮次恢复：注入进程重启前最后上行的局面（2026-10-24）。中局面稳态
         // 错轮次 PC 拦不住（错轮次局面合法），靠端上持久化恢复走子方
         config.lastConfirmedFen.takeIf { it.isNotEmpty() }?.let { tracker.setRestoreHint(it) }
@@ -677,7 +768,7 @@ class ScreenAssistService : Service() {
 
         // 连接电脑端"内阁"（后台准备，不阻塞识别）；未配置地址时状态栏提示
         if (config.serverUrl.isBlank() || config.serverToken.isBlank()) {
-            setStatus("未配置电脑地址/令牌\n请在连线页填写后重试")
+            setStatus(MSG_NO_PEER_CONFIG)
         } else {
             remote = RemoteAnalysisClient(config.serverUrl, config.serverToken, remoteListener,
                 certFingerprint = config.certFingerprint, deviceName = config.deviceName,
@@ -813,7 +904,19 @@ class ScreenAssistService : Service() {
         // 多帧确认由此补齐，走子后不会永远停在"正在识别棋盘…"。
         val img = runCatching { reader.acquireLatestImage() }.getOrNull()
         val frame = if (img != null) {
-            img.use { imageToFrame(it) }
+            // 同一合成帧判重（2026-11-05 性能轮）：快速路径已把该变化帧解码进
+            // lastFrame，burst 期兜底抓帧 acquire 到的还是它（合成器静止不产新帧）
+            // ——时间戳相同即同一帧，直接重放省一次整屏解码（10MB 级拷贝）
+            val ts = runCatching { img.timestamp }.getOrDefault(0L)
+            val cached = lastFrame
+            if (cached != null && cached.srcTs == ts &&
+                cached.width == img.width && cached.height == img.height
+            ) {
+                img.close()
+                cached
+            } else {
+                img.use { imageToFrame(it) }
+            }
         } else {
             lastFrame ?: run { RLog.d(TAG, "forceCapture: nothing to replay"); return }
         }
@@ -943,7 +1046,11 @@ class ScreenAssistService : Service() {
                 // FLAG_SECURE：悬浮窗已从录屏剔除——画面里永远没有悬浮窗，直接
                 // 取帧全程零闪烁；全帧参与变化检测（窗口矩形露出的是真实棋盘）
                 frame = reader.acquireLatestImage()?.use {
-                    if (trackingUnstable || frameChanged(it)) imageToFrame(it) else null
+                    // probeDue（画面静止 6s 兜底重探）直接放行：上方第一道帧差
+                    // 已更新 frameSig，此处 frameChanged 对同一画面恒为 false——
+                    // 只靠它判定时 probe 分支永远取不到帧（2026-11-04 审查修复
+                    // 的死路；probe 抓帧后的推理仍由 handleFrame 入口闸口把关）
+                    if (trackingUnstable || frameChanged(it) || probeDue) imageToFrame(it) else null
                 }
                 lastSlowProbeTs = now
                 if (frame == null) return
@@ -1086,7 +1193,7 @@ class ScreenAssistService : Service() {
                 }
             }
         }
-        return Frame(w, h, px)
+        return Frame(w, h, px, image.timestamp)
     }
 
     /**
@@ -1148,6 +1255,11 @@ class ScreenAssistService : Service() {
 
     private fun handleFrame(frame: Frame) {
         lastFrame = frame // framePixels 为复用缓冲，静止时内容即当前屏幕，供确认饿死重放
+        // 截屏窗口期推理前短路（2026-11-09 体检 H1：窗口 10s 内 pacer 节流下
+        // 约 5-10 次全盘推理跑完才在 afterRecognition 丢帧是纯白烧；入镜污染
+        // 帧结果本就不可信——推理整个跳过，窗口期不碰 pacer/tracker 状态）。
+        // afterRecognition 的守卫保留兜底在途帧
+        if (SystemClock.elapsedRealtime() < screenshotWindowUntilMs) return
         if (manualMode) return
         if (paused) {
             // 悔棋/暂停后的自动恢复：曾出现"暂停后永不复位"被用户当成卡死。
@@ -1202,7 +1314,7 @@ class ScreenAssistService : Service() {
             yoloMissStreak++
             if (yoloMissStreak >= 3) sessionGrid = null
             if (!transient && (yoloMissStreak == 1 || yoloMissStreak % 10 == 0)) {
-                setStatus("正在识别棋盘…\n请让棋盘完整无遮挡")
+                setStatus(MSG_RECOGNIZING_BOARD)
             }
             return
         }
@@ -1234,6 +1346,15 @@ class ScreenAssistService : Service() {
      * 确认新局后上行分析；不稳定时处理裁剪框自锁回退与状态提示。
      */
     private fun afterRecognition(result: RecognitionResult, hadCrop: Boolean) {
+        // 截屏窗口期整帧丢弃（2026-11-08 vc27 事故回归）：窗口内两窗撤了
+        // FLAG_SECURE，悬浮窗像素真实入镜——被面板覆盖的格子会被读成空/错子，
+        // 拼出"结构合法的垃圾局面"照样过 validate，确认上行后 PC 对着缺子盘
+        // 出建议（错误指导），恢复 secure 后盘面变回又触发一轮重析（来回震荡）。
+        // 窗口期不识别不入 tracker，恢复后下一帧自然回归真实局面
+        if (SystemClock.elapsedRealtime() < screenshotWindowUntilMs) {
+            RLog.d(TAG, "截屏窗口期间丢弃识别帧（悬浮窗入镜，结果不可信）")
+            return
+        }
         // 遮挡期保险丝（2026-10-02）：悬浮窗几何遮挡棋盘且识别结果本身无效时丢弃
         // ——个别 ROM 若不把 secure 层剔出录屏，面板像素入镜会拼出垃圾局面，绝不能
         // 上行（PC 会拒收报"识别异常"）。FLAG_SECURE 正常生效时结果有效，不受影响
@@ -1282,6 +1403,19 @@ class ScreenAssistService : Service() {
             }
             BoardTracker.Event.SAME_BOARD -> { invalidStreak = 0 }
         }
+        // 结构门拒绝留痕（2026-11-10 防线配套，置于 onFrame 之后：本帧的拒绝
+        // 本帧落日志）——拒绝在 tracker 内静默（等治愈/服务层自愈重探），这是
+        // "门拦住了坏盘面"的唯一可见信号，变化才记不刷屏
+        if (tracker.lastGateReject != lastLoggedGateReject) {
+            lastLoggedGateReject = tracker.lastGateReject
+            tracker.lastGateReject?.let { RLog.i(TAG, "确认链结构门拦截：$it") }
+        }
+        // 滑行候选提示变化即重绘（"对方走子中…"大字）：UNSTABLE/SAME_BOARD 帧
+        // 不触发 onBoardConfirmed 的渲染链，置位/清零要在这里补一次重绘驱动
+        if (tracker.slidingCandidate != lastRenderedSliding) {
+            lastRenderedSliding = tracker.slidingCandidate
+            mainHandler.post { postRender() }
+        }
     }
 
     /** ONNX 引擎识别一帧：角点定位+全盘分类，产出后走与 YOLO 相同的确认/上行链路 */
@@ -1315,7 +1449,7 @@ class ScreenAssistService : Service() {
                 sessionGrid = null
             }
             if (!transient && (yoloMissStreak == 1 || yoloMissStreak % 10 == 0)) {
-                setStatus("正在识别棋盘…\n请让棋盘完整无遮挡")
+                setStatus(MSG_RECOGNIZING_BOARD)
             }
             return
         }
@@ -1422,7 +1556,7 @@ class ScreenAssistService : Service() {
      * 确认链终点（worker 调用：afterRecognition ← handleFrame/handleFrameOnnx），
      * 把"连续帧置信"转成全局状态的唯一入口。顺序即契约：刷四个快照
      * （canonical/pieces/orientation/FEN，渲染与上行都读）→ 重新武装
-     * lastAutoFlipFen/lastReprobeFen（每局面一次的自动纠正/自愈配额）→
+     * lastAutoFlipFen（每局面一次的自动纠正配额）→
      * 清建议状态 → 入悔棋历史 → 渲染并上行。悔棋（undoOneStep）与手动编辑
      * 的 history 操作同样收敛到本线程串行（B1/B2），但快照更新各自完成、
      * 不经过这里。
@@ -1439,14 +1573,38 @@ class ScreenAssistService : Service() {
         currentCanonical = confirmed.canonical
         currentPieces = flatten(confirmed.canonical)
         currentOrientation = confirmed.orientation
+        // 悔棋还原轮次兜底（2026-11-14 红队第二轮）：undoRestoreSide 只覆盖"出现+
+        // 换色"（吃子还原）；非吃子还原是"消失+出现"，与反向真实走子几何同构，
+        // movedSide 会把复现子当移动方翻错轮次（撤手空窗"轮到对方走"、无箭头，
+        // PC 还按错侧分析）。撤手后的盘面必然等于悔棋 history 中某条已确认盘面
+        // ——按盘面段回查（从新到旧），命中即恢复该条记录的 redGo；真实重复局面
+        // （同盘面同轮次）恢复值与推导值一致，无误伤面。必须在 currentFen 构造
+        // 之前改 redGo，FEN 行棋方字段才与恢复值一致（history 入栈/上行/渲染
+        // 全部消费这个值）。
+        if (!isNewGame) {
+            val boardKey = AssistBoard.toFen(confirmed.canonical, tracker.redGo).substringBefore(' ')
+            val restored = history.lastOrNull { it.fen.substringBefore(' ') == boardKey }
+            if (restored != null && restored.redGo != tracker.redGo) {
+                RLog.i(TAG, "确认盘面命中悔棋历史，按历史条目还原轮次（非吃子撤手形态）")
+                tracker.redGo = restored.redGo
+            }
+        }
         currentFen = AssistBoard.toFen(confirmed.canonical, tracker.redGo)
         // 自愈配额按盘面值记账（2026-10-24 残局震荡 7 秒 3 连发成因治理）：此前
         // 每次确认无条件清零——识别在两个错读之间抖动时 flip↔重探↔确认可循环；
         // 现在只有确认出新盘面才重新武装，同一盘面（含仅轮次字段不同的重读）
         // 终身一次自愈。盘面对比用 FEN 首段（轮次字段不参与，flip 只改轮次）
         val confirmedBoard = currentFen.substringBefore(' ')
-        if (lastReprobeFen?.substringBefore(' ') != confirmedBoard) lastReprobeFen = null
         if (lastAutoFlipFen?.substringBefore(' ') != confirmedBoard) lastAutoFlipFen = null
+        // 终局态恢复清除（2026-11-14 红队第二轮）：gameOverText 原本只在 NEW_GAME
+        // 清——真绝杀后用户在棋盘 App 悔棋，识别确认出新盘面并重新出建议，主大字
+        // 仍钉"对局结束"直到手动干预。确认盘面 ≠ 终局判定盘面 = 假绝杀已过去，
+        // 恢复正常流程；同盘面再确认（含仅轮次差异）保持终局态等用户处置。
+        if (!isNewGame && gameOverText != null && confirmedBoard != lastNoMovesBoard) {
+            RLog.i(TAG, "确认盘面已变化，终局态解除")
+            gameOverText = null
+            lastNoMovesBoard = null
+        }
         resetSuggestionState()
         history.addLast(HistoryEntry(confirmed, tracker.redGo, currentFen))
         if (history.size > 60) history.removeFirst()
@@ -1455,6 +1613,9 @@ class ScreenAssistService : Service() {
             // phone-<开始时刻>-局<N>.log（2026-10-01 用户提议：单日单文件混多局
             // 检索困难，一局一文件）。特征串与 PC 端 phoneGameSplitMarker 保持一致
             RLog.i(TAG, "===== 新局开始 fen=$currentFen =====")
+            // 终局态退出（gameOverText 字段注）：新局即恢复正常流程
+            gameOverText = null
+            lastNoMovesBoard = null
             // 复盘闭环（2026-10-17）：NEW_GAME 后的首条上行带 new_game 标记——
             // PC 端据此生成对局 ID，建议沉淀按局归组。标志在 scheduleAnalysis
             // 消费（worker 串行，置位→消费有序）
@@ -1463,7 +1624,7 @@ class ScreenAssistService : Service() {
             // 也已不消费素材，此处显式清防"确认后上行前进程再死"的窗口）
             config.lastConfirmedFen = ""
         }
-        RLog.i(TAG, "board confirmed: $currentFen")
+        RLog.i(TAG, "board confirmed: $currentFen (path=${tracker.lastConfirmPath})")
         postRender()
         scheduleAnalysis()
     }
@@ -1538,7 +1699,7 @@ class ScreenAssistService : Service() {
      * lastPositionFen 没记，welcome 补发链无从兜底，置位等于永久丢弃该局面
      * （此后局面不变 SameBoard 就再也不发，2026-10-24 排查 B2 缺口）。
      */
-    private fun scheduleAnalysis(force: Boolean = false) {
+    private fun scheduleAnalysis(force: Boolean = false, multiPvOnce: Int = 0) {
         workerHandler.post {
             val fen = currentFen
             if (fen.isEmpty()) return@post
@@ -1565,9 +1726,18 @@ class ScreenAssistService : Service() {
             pendingNewGameFlag = false
             // 我方执色随每帧上报（协议 §4.4 my_red）：PC 控制台走势据此按我方
             // 视角画线——随动取值，换边（朝向翻转）后立刻生效
-            r.sendPosition(fen, force, isNewGameFrame, mySideIsRed())
+            r.sendPosition(fen, force, isNewGameFrame, mySideIsRed(),
+                multiPvOnce = multiPvOnce.takeIf { it > 0 },
+                manual = manualMode)
             if (remoteConnected && tracker.redGo == mySideIsRed()) {
-                mainHandler.post { setStatus("电脑分析中…") }
+                // 单次三变的确认文案在此下发（发送路径唯一出口）：主线程分支若先
+                // 打"单次三变解析中…"会被本行毫秒级覆盖，功能反馈丢失
+                mainHandler.post {
+                    setStatus(
+                        if (multiPvOnce > 0) "单次三变解析中…\n（『路数』档位不变）"
+                        else "电脑分析中…"
+                    )
+                }
             }
         }
     }
@@ -1587,6 +1757,7 @@ class ScreenAssistService : Service() {
                     RemoteAnalysisClient.ConnectionState.CONNECTING -> setStatus("连接电脑中…")
                     RemoteAnalysisClient.ConnectionState.CONNECTED -> {
                         remoteErrorText = null
+                        remoteErrorIsConn = false
                         setStatus("已连接电脑")
                         // 连线页设置的线程档（>0 才下发，0=跟随电脑端）：连接即应用，
                         // 释放皮卡鱼算力（PC 默认只给逻辑核一半，追求极限在此调高）
@@ -1686,6 +1857,7 @@ class ScreenAssistService : Service() {
             // 局面识别异常"会在自愈成功后一直挂着到重连）
             if (remoteErrorText != null) {
                 remoteErrorText = null
+                remoteErrorIsConn = false
                 setStatus("识别已恢复")
             }
             // 云库命中登记（异步补充模式标注链，见 cloudHitByMove 字段注）：过了
@@ -1762,7 +1934,7 @@ class ScreenAssistService : Service() {
             // 翻转合法则先翻）/ no_moves（无着可走——真绝杀，或残局漏子拼出的假
             // 局面）/ bad_frame（将帅缺一等结构非法，比 bad_position 更强的"盘面
             // 拼错"信号，此前零自愈）三类共用重探配额；手动模式全跳过（用户接管）
-            if (!manualMode && (code == "bad_position" || code == "no_moves" || code == "bad_frame")) {
+            if (!manualMode && (code == "bad_position" || code == "bad_frame")) {
                 mainHandler.post {
                     val cur = currentFen
                     if (cur.isEmpty()) return@post
@@ -1770,21 +1942,50 @@ class ScreenAssistService : Service() {
                         RLog.w(TAG, "bad_position: PC 已验证翻转轮次合法，自动纠正走子方重发")
                         flipTurnAndResend()
                         setStatus("已自动纠正走子方\n现${if (tracker.redGo == mySideIsRed()) "轮到我方走" else "轮到对方走"}")
-                    } else if (cur != lastReprobeFen) {
-                        // 自愈重探（每盘面一次）：翻转无效/已翻过仍被拒、无着可走、
-                        // 结构非法——多半是识别瞬态误读（列偏/漏子拼出不可能局面）
-                        // ——回全屏重新定位+识别。同盘面二次仍异常（识别确定性复现
-                        // 或真绝杀）才落错误提示，配额记账防震荡风暴（见 onBoardConfirmed）
-                        RLog.w(TAG, "$code: 触发自愈重探（重新定位+识别）fen=$cur")
-                        lastReprobeFen = cur
+                    } else if (!reprobedOnce(cur.substringBefore(' '))) {
+                        // 重发当前确认盘面（不带 force 走常规链，2026-11-12 断供
+                        // 治理）：PC 结构门对同一 prev 连续第 2 次拒绝时按"识别
+                        // 自愈"放行——但重探重读同屏时 tracker 回 SAME_BOARD 不
+                        // 上行（确认链短路），PC 的放行计数永远凑不齐，建议流断供
+                        // 到手动干预（实测 4.4~27.1s）。此处清 lastSentFen 主动重发
+                        // 一次对账：被拒的盘面本就是当前确认局面，PC 收到即达阈值
+                        // 放行出招。与重探共用段记账（reprobedSegs）：同盘面只组合
+                        // 一次，重发帧再被拒走既有"配额用尽"提示防 ping-pong
+                        RLog.w(TAG, "$code: 重发当前盘面对账+触发自愈重探（重新定位+识别）fen=$cur")
+                        lastSentFen = null
+                        scheduleAnalysis(force = false)
                         setStatus("局面识别异常\n正在重新定位识别…")
                         workerHandler.post {
                             forceFullRelocate()
                         }
                     } else {
                         // 配额用尽：不再自动循环，把手动出口顶到用户眼前
-                        // （真绝杀时核对棋盘即知；识别误读时点『手动』改盘）
+                        // （识别误读时点『手动』改盘）
                         showRemoteError("识别自愈未成功——请核对棋盘，或点『手动』修正")
+                    }
+                }
+                return
+            }
+            // no_moves 终局处理（2026-11-13 移出自愈瀑布）：真绝杀/困毙时重探也
+            // 不会有着法，白付一次重定位成本；且错误此前被归入通用槽渲染成"连接
+            // 异常"误导用户以为断线（连接实际完好）。限一次重发对账（在途旧帧/
+            // 瞬时态排除，兼防识别拼错的假绝杀），同局面第二次 no_moves 即进入
+            // 终局态（gameOverText 渲染），NEW_GAME/更新/手动三处退出
+            if (!manualMode && code == "no_moves") {
+                mainHandler.post {
+                    val cur = currentFen
+                    val board = cur.substringBefore(' ')
+                    if (cur.isEmpty()) return@post
+                    if (board == lastNoMovesBoard) {
+                        RLog.w(TAG, "no_moves: 同局面二次确认，进入终局态")
+                        gameOverText = "无着可走\n已绝杀/困毙，或棋面识别有误\n点『更新』或『手动』继续"
+                        remoteErrorText = null
+                        setStatus("对局结束")
+                    } else {
+                        lastNoMovesBoard = board
+                        RLog.w(TAG, "no_moves: 重发当前盘面对账一次（终局确认）fen=$cur")
+                        lastSentFen = null
+                        scheduleAnalysis(force = false)
                     }
                 }
                 return
@@ -1792,12 +1993,13 @@ class ScreenAssistService : Service() {
             showRemoteError(message)
         }
 
-        /** 普通错误提示：状态条截断展示（40 字符内），供非自动纠正路径复用 */
+        /** 局面提示：状态条截断展示（40 字符内）。非连接类——状态行不显示"连接异常" */
         private fun showRemoteError(message: String) {
             RLog.w(TAG, "remote error: $message")
             if (overlayClosed) return
             val short = if (message.length > 40) message.take(40) + "…" else message
             remoteErrorText = short
+            remoteErrorIsConn = false
             mainHandler.post { setStatus(short) }
         }
 
@@ -1809,6 +2011,7 @@ class ScreenAssistService : Service() {
             RLog.w(TAG, "connect error: $full")
             if (overlayClosed) return
             remoteErrorText = "连接失败：$full"
+            remoteErrorIsConn = true
             mainHandler.post { setStatus("连接电脑失败：$full\n自动重试中…") }
         }
 
@@ -1867,6 +2070,18 @@ class ScreenAssistService : Service() {
         // 识别看到完整棋盘（详见 boardOccluded 字段注释的雷区说明）
         panel.onAction = ::onOverlayAction
         panel.onCellTap = ::onManualCellTap
+        // 连点进度提示（2026-11-17 工效修复）：单候选局面下第 1/2 击换候选无
+        // 可见变化，用户得不到击数反馈；在换候选动作之后回调（setStatus 末次
+        // 写入必胜），多候选局面切换本身可见，此处不弹字避免双重提示
+        panel.onCandidateTapProgress = { taps ->
+            val cands = suggestionAggregator.candidates
+            if (cands.size < 2 && remote != null && remoteConnected) {
+                setStatus(
+                    if (taps == 1) "连点 3 次出临时三变（已点 1 次）"
+                    else "再点 1 次出三变（误触可停手）"
+                )
+            }
+        }
         panel.onDragStateChange = { dragging ->
             panelDragging = dragging
             // 松手即时重算遮挡（否则要等 ≤700ms 下一 tick）：拖动结束瞬间提示
@@ -1877,7 +2092,15 @@ class ScreenAssistService : Service() {
         panel.setDragHandle(params, wm) {
             config.overlayPos = params.x.toFloat() / dm.widthPixels to params.y.toFloat() / dm.heightPixels
         }
-        wm.addView(panel, params)
+        // addView 防护（2026-11-14 红队第二轮）：canDrawOverlays 检查与 addView
+        // 之间权限可被系统回收（窗口 token 已失效）→ BadTokenException 直接崩
+        // 主线程渲染链。包 runCatching 落回 null——与"无权限返回 null"同构走
+        // 既有"HUD 停摆但识别照跑"静默路径，授权恢复后下一次渲染自动重建。
+        val added = runCatching { wm.addView(panel, params) }
+        if (added.isFailure) {
+            RLog.w(TAG, "悬浮窗 addView 失败（权限回收竞态）", added.exceptionOrNull())
+            return null
+        }
         // 入场动效：淡入 + 1.02→1 缩放（150ms；只做出现提示，禁持续动画/循环光效）
         panel.alpha = 0f
         panel.scaleX = 1.02f
@@ -1919,7 +2142,8 @@ class ScreenAssistService : Service() {
         }
     }
 
-    /** 窗口矩形（params 位置 + view 尺寸）与已定位棋盘矩形是否重叠 */
+    /** 窗口矩形（params 位置 + view 尺寸）与已定位棋盘矩形显著重叠（相交面积
+     *  占窗口面积 ≥ [OCCLUSION_AREA_RATIO] 才算挡——擦边不算，见常量注释） */
     private inline fun windowIntersectsBoard(
         params: WindowManager.LayoutParams?,
         size: () -> Pair<Int, Int>,
@@ -1936,7 +2160,15 @@ class ScreenAssistService : Service() {
         val by1 = grid.ny1 * fh
         val px1 = p.x + w
         val py1 = p.y + h
-        return p.x < bx1 && px1 > bx0 && p.y < by1 && py1 > by0
+        // 相交矩形面积占比判定（旧版只判矩形任意相交：一条边也算挡）。
+        // 棋盘矩形来自归一化网格（Double）×帧尺寸，统一升 Double 运算
+        val ix0 = maxOf(p.x.toDouble(), bx0)
+        val iy0 = maxOf(p.y.toDouble(), by0)
+        val ix1 = minOf(px1.toDouble(), bx1)
+        val iy1 = minOf(py1.toDouble(), by1)
+        if (ix0 >= ix1 || iy0 >= iy1) return false
+        val inter = (ix1 - ix0) * (iy1 - iy0)
+        return inter / (w.toDouble() * h) >= OCCLUSION_AREA_RATIO
     }
 
     /**
@@ -2015,6 +2247,22 @@ class ScreenAssistService : Service() {
                 } else removeDetailWindow()
                 postRender()
             }
+            OverlayAction.SCREENSHOT -> {
+                // 截屏临时窗口（2026-11-07 用户反馈"悬浮窗开启时手机无法截屏"）：
+                // 两窗 FLAG_SECURE 在多数 ROM 上连系统截屏一起拦（secure 合成语义
+                // 使然，adb screencap 同样 RC=1，boardOccluded 注释有实测）。点击
+                // 撤 secure 开 10 秒窗口，期间悬浮窗会入镜（识别保险丝兜底），
+                // 到期自动恢复。重复点击只重置计时，无叠加副作用
+                val now = SystemClock.elapsedRealtime()
+                val opening = now >= screenshotWindowUntilMs
+                screenshotWindowUntilMs = now + SCREENSHOT_WINDOW_MS
+                if (opening) applyOverlaySecure(false)
+                mainHandler.removeCallbacks(screenshotRestore)
+                mainHandler.postDelayed(screenshotRestore, SCREENSHOT_WINDOW_MS)
+                RLog.i(TAG, "screenshot window: secure off ${SCREENSHOT_WINDOW_MS / 1000}s")
+                setStatus("截屏模式 10 秒\n请尽快截屏，稍后自动恢复")
+                postRender()
+            }
             OverlayAction.PAUSE -> {
                 if (paused) {
                     paused = false
@@ -2047,14 +2295,44 @@ class ScreenAssistService : Service() {
                 } else {
                     // 单候选的确定性来源：云库/开局库/残局库命中天然单条（调路数
                     // 无效），引擎单线才是"路数 ≥2 可解"——提示如实分述，避免误导调参
+                    // 守卫双口径与 ONE_SHOT_MULTI_PV 分支同理由（remoteConnected 残留）
                     setStatus(
-                        if (remoteConnected) "当前只有单一建议\n云库/开局库/残局库命中即单条\n引擎多线需电脑端『变招路数』≥2"
-                        else "未连接电脑，暂无建议"
+                        if (remote == null || !remoteConnected) "未连接电脑，暂无建议"
+                        else "当前只有单一建议\n云库/开局库/残局库命中即单条\n引擎多线需电脑端『变招路数』≥2"
                     )
                 }
             }
             OverlayAction.UNDO -> undoOneStep()
             OverlayAction.MANUAL -> toggleManualMode()
+            OverlayAction.ONE_SHOT_MULTI_PV -> {
+                // 单次三变解析（2026-11-09；2026-11-15 改连点三次触发、2026-11-20
+                // 连击窗 1s→0.7s，检测在 OverlayPanelView）：
+                // 不动"路数"档位，仅本轮搜索以 multi_pv=3 进引擎（协议 §4.4
+                // position.multi_pv_once，PC 跳过桔库/沉淀直达引擎）。旧 PC 忽略
+                // 该字段=退化为普通重搜（单变，§7 宽容语义）。force=true 同时跳过
+                // 手机端同局面去重（同局面重发必须能发出）。
+                // 守卫用 remote==null || !remoteConnected 双口径：remoteConnected
+                // 在地址清空路径可能残留 true（applyConnection 早退不发
+                // DISCONNECTED），worker 侧 remote 已 null，纯 remoteConnected
+                // 判断会显示一个不会发生的"解析中"
+                if (remote == null || !remoteConnected) {
+                    setStatus("未连接电脑，无法解析")
+                } else if (currentFen.isEmpty()) {
+                    // @Volatile 主线程读（与悔棋/更新按钮读 currentCanonical 同口径）
+                    setStatus("尚无确认局面，无法解析")
+                } else {
+                    // 主选复位（2026-11-17 工效修复）：书库多候选局面下连点前两击
+                    // 会把 selectedCandidate 推到 2，三变结果回填后默认高亮的成了
+                    // 第三线（最弱线）——看起来"三变出的不是最优"。复位后默认
+                    // 展示第一线主选，替代线靠点按/变招查看
+                    selectedCandidate = 0
+                    scheduleAnalysis(force = true, multiPvOnce = 3)
+                    // 成功提示不在此打：会被 worker 发送后下发的"电脑分析中…"
+                    // 毫秒级覆盖（我方回合恒发生）——三变文案由 scheduleAnalysis
+                    // 发送路径按 multiPvOnce>0 下发
+                }
+                postRender()
+            }
             OverlayAction.FLIP_TURN -> {
                 // 更新棋局（原"轮次"）：识别差分偶发失败会让 redGo 卡在旧值（显示"轮到对方走"
                 // 而实际轮到我方），一键翻转并按新轮次重建 FEN、重新上行分析。
@@ -2073,6 +2351,9 @@ class ScreenAssistService : Service() {
     private fun flipTurnAndResend() {
         tracker.redGo = !tracker.redGo
         resetSuggestionState()
+        // 终局态退出（gameOverText 字段注）：用户点『更新』=手动接管继续
+        gameOverText = null
+        lastNoMovesBoard = null
         val canonical = currentCanonical
         if (canonical != null) {
             currentFen = AssistBoard.toFen(canonical, tracker.redGo)
@@ -2191,7 +2472,12 @@ class ScreenAssistService : Service() {
     /** 手动模式：小棋盘点格（canonical x,y）——选子 / 走子 / 删子 */
     private fun onManualCellTap(x: Int, y: Int) {
         if (!manualMode) return
-        val board = currentCanonical ?: return
+        // 深拷贝后编辑（2026-11-14 红队第二轮别名修复）：currentCanonical 与
+        // tracker.confirmed.canonical、悔棋 history 栈顶共享同一数组——原地
+        // 删子/走子会把三处共享状态同步改掉，悔棋恢复出"被编辑过的历史局面"
+        // （编辑一次=悔棋白按一次）。pushManualHistory 的入栈侧本就 clone，
+        // 这里把编辑侧也拷上。
+        val board = AssistBoard.clone(currentCanonical ?: return)
         val sel = manualSelected
         if (sel == null) {
             // 未选中：点有子的格则选中，空格无操作
@@ -2218,6 +2504,14 @@ class ScreenAssistService : Service() {
         val moving = board[sel.second][sel.first]
         manualSelected = null
         if (moving == Piece.EMPTY) {
+            postRender()
+            return
+        }
+        // 目标格归属校验：走到己方子上会静默"吃掉"己方子并翻轮次（识别基线
+        // 被污染成不合法局面）——拦截并提示（2026-11-04 审查修复）
+        val target = board[y][x]
+        if (target != Piece.EMPTY && Piece.isRed(target) == Piece.isRed(moving)) {
+            setStatus("手动模式 · 目标格已有己方棋子")
             postRender()
             return
         }
@@ -2250,6 +2544,9 @@ class ScreenAssistService : Service() {
         // 本 post 先于 scheduleAnalysis 内部的 post 入队，worker 串行保证"入栈→上行"顺序
         workerHandler.post { pushManualHistory(board, tracker.redGo) }
         resetSuggestionState()
+        // 终局态退出（gameOverText 字段注）：用户点『手动』改盘=接管继续
+        gameOverText = null
+        lastNoMovesBoard = null
         postRender()
         scheduleAnalysis()
     }
@@ -2259,6 +2556,17 @@ class ScreenAssistService : Service() {
      * 曾有的『换边』手动覆盖已随按钮一并移除（2026-09-30 用户反馈），策略见 [MySidePolicy]。
      */
     private val mySidePolicy = MySidePolicy()
+
+    /**
+     * 库短名（悬浮窗候选行空间有限，防布局顶破）：按库名关键词映射，
+     * 未识别的库回退"开局库"。完整库名在详情窗来源行不受影响。
+     */
+    private fun bookShortName(name: String): String = when {
+        name.contains("狂刀") -> "狂刀库"
+        name.contains("华弈") -> "华弈库"
+        name.contains("桔") -> "桔库"
+        else -> "开局库"
+    }
 
     private fun mySideIsRed(): Boolean =
         mySidePolicy.mySideIsRed(currentOrientation == Orientation.STANDARD)
@@ -2273,6 +2581,8 @@ class ScreenAssistService : Service() {
             // 关闭悬浮窗后服务可能在绑定下短暂存活：不再往通知栏贴"运行中"通知
             // （stopForeground 已移除的那条不能复活，否则残留一条滑不掉的僵尸通知）
             if (overlayClosed) return@post
+            if (text == lastNotifiedText) return@post
+            lastNotifiedText = text
             runCatching {
                 val nm = getSystemService(NotificationManager::class.java)
                 nm.notify(NOTIF_ID, buildNotification(text))
@@ -2303,6 +2613,9 @@ class ScreenAssistService : Service() {
     }
 
     @Volatile private var lastStatusText = "未启动"
+    // 通知栏最后贴出的状态文本（main 线程读写）：setStatus 高频触发，文本未变
+    // 时 notify 是纯 IPC 白付（2026-11-05 性能轮节流）
+    private var lastNotifiedText: String? = null
 
     /** setStatus 瞬时提示（TTL 覆盖态）：TTL 内所有渲染持续顶住主状态大字，
      *  过期由常规运行文案接管（elapsedTicker 每秒重渲染也不冲掉） */
@@ -2317,7 +2630,11 @@ class ScreenAssistService : Service() {
         // 用户点“关闭”后不重建（直到重新启动服务）
         if (overlayClosed) return
         val panel = ensureOverlay() ?: return
+        // fen 与棋子同拍快照：worker 在两次读之间完成换面会让"局面文字"与
+        // "送子防线判定"各取新旧一拍，单帧错位误报"轮次可能识别有误"
+        //（下次重绘自愈，仍应杜绝）——2026-11-04 审查修复
         val fen = currentFen
+        val fenPieces = currentPieces
         val myRed = mySideIsRed()
         val sug = lastSuggestion
         // 选中候选（变招循环）：主面板与详情窗统一展示同一线的分数/胜率/来源——
@@ -2340,7 +2657,9 @@ class ScreenAssistService : Service() {
         val modeText = when {
             manualMode -> "手动模式"
             paused -> "已停止"
-            remoteErrorText != null -> "连接异常"
+            gameOverText != null -> "对局结束"
+            remoteErrorText != null && remoteErrorIsConn -> "连接异常"
+            remoteErrorText != null -> "局面提示"
             remote == null -> "未连接"
             !remoteConnected -> "连接中"
             !pcEngineReady -> when (pcEngineState) {
@@ -2357,7 +2676,9 @@ class ScreenAssistService : Service() {
             else -> "$modeText · $elapsed"
         }
         val stateKind = when {
-            remoteErrorText != null -> OverlayStateKind.ERROR
+            gameOverText != null -> OverlayStateKind.IDLE
+            remoteErrorText != null && remoteErrorIsConn -> OverlayStateKind.ERROR
+            remoteErrorText != null -> OverlayStateKind.WAITING
             manualMode -> OverlayStateKind.MANUAL
             paused -> OverlayStateKind.IDLE
             !remoteConnected -> OverlayStateKind.WAITING
@@ -2372,15 +2693,15 @@ class ScreenAssistService : Service() {
         val headline = activeOverride ?: when {
             manualMode -> "手动模式"
             paused -> "已停止指导\n点『继续』恢复"
+            gameOverText != null -> gameOverText ?: "对局结束"
             remoteErrorText != null -> remoteErrorText ?: "连接异常"
             !remoteConnected -> if (remote == null) "未配置电脑地址" else "连接电脑中…"
-            !pcEngineReady -> when (pcEngineState) {
-                "error" -> "电脑引擎异常，重试中…"
-                "offline" -> "电脑端未启用引擎"
-                else -> "电脑引擎准备中…"
-            }
-            fen.isEmpty() -> "识别中"
+            !pcEngineReady -> pcEngineHeadline(pcEngineState)
+            fen.isEmpty() -> getString(R.string.recognizing_status)
             myTurn -> "轮到我方走"
+            // 滑行候选等待停稳帧（2026-11-13 发呆期体感治理）：对方长滑走子动画
+            // 期间大字给"走子中"而非静止的"轮到对方走"，消除视觉发呆
+            tracker.slidingCandidate -> "对方走子中…"
             else -> "轮到对方走"
         }
 
@@ -2405,7 +2726,7 @@ class ScreenAssistService : Service() {
 
         // 送子防线：着法起点必须是我方棋子——轮次错乱/幽灵 FEN 时宁可不显示
         fun fromIsOurs(ucci: String): Boolean {
-            val arr = currentPieces ?: return false
+            val arr = fenPieces ?: return false
             if (ucci.length < 4) return false
             val fx = ucci[0] - 'a'
             val fy = 9 - (ucci[1] - '0')
@@ -2441,10 +2762,15 @@ class ScreenAssistService : Service() {
                     // 缓存标记独立于来源：沉淀记录的 source 可能是 "book:<名>"，
                     // 命中缓存时即使走开局库文案分支也要标出（PC 端同款约定）
                     val cacheTag = if (sel.cached) "（缓存）" else ""
-                    // 多候选时库名省略（详情窗有来源行），格式向引擎候选文案对齐；
-                    // 云库单条命中显示 host（去 www. 缩短），与桔库"开局库·名"同语言
+                    // 多候选拼库短名（2026-11-13 用户反馈"狂刀库命中看不到库名"）：
+                    // 此前多候选分支故意省略库名（详情窗有来源行），用户无法在主面板
+                    // 确认"狂刀库生效了"——库来源候选显示"狂刀库 1/5"，引擎候选
+                    // （bookName 空）保持原格式；详情窗来源行完整库名不受影响
                     candidateText = when {
-                        cands.size > 1 -> "候选 ${selectedCandidate + 1}/${cands.size} · $chs ✓$cacheTag"
+                        cands.size > 1 -> {
+                            val lib = if (sel.bookName.isNotEmpty()) "${bookShortName(sel.bookName)} " else ""
+                            "${lib}候选 ${selectedCandidate + 1}/${cands.size} · $chs ✓$cacheTag"
+                        }
                         sel.fromCloud -> "云库·${sel.cloudHost.removePrefix("www.").ifEmpty { "云端" }} $chs ✓$cacheTag"
                         sel.fromEndgame -> "残局库·${sel.endgameHost.removePrefix("www.").ifEmpty { "云端" }} $chs ✓$cacheTag"
                         sel.bookName.isNotEmpty() -> "开局库·${sel.bookName} $chs ✓$cacheTag"
@@ -2454,9 +2780,12 @@ class ScreenAssistService : Service() {
                         sug.fromCloud -> "云端建议 $chs ✓$cacheTag"
                         else -> "建议 $chs ✓$cacheTag"
                     }
+                    // 三次重复判和警示（2026-11-15）：PC 对云库/残局重复着法带
+                    // 警示照发不丢帧（丢弃=静默）——如实缀标，用户可自行变招
+                    if (sel.repRisk) candidateText += " ⚠判和风险"
                     candidateTone = QiTone.GOOD
                 } else {
-                    candidateText = "轮次可能识别有误\n走一步后自动纠正"
+                    candidateText = MSG_TURN_MISMATCH
                     candidateTone = QiTone.WARN
                 }
             }
@@ -2485,6 +2814,10 @@ class ScreenAssistService : Service() {
                     // 后命中信息不丢；host 细节在详情窗。与 sel.cached 天然互斥：
                     // 沉淀命中时 PC 不再走云库补充，二者不会同现
                     if (cloudHitByMove.containsKey(sel.bestMove)) suffix += " · 云库"
+                    // 三次重复判和警示（2026-11-15）：PC 终值着法走着即第三次重复
+                    // 时带警示照发，并已触发一次性 4 线替代重搜——替代着法随后到达
+                    // 会刷新候选（repRisk=false），此标记只在警示帧上短暂可见
+                    if (sel.repRisk) suffix += " ⚠判和风险"
                     if (cands.size > 1) {
                         candIndex = selectedCandidate + 1
                         candCount = cands.size
@@ -2494,16 +2827,12 @@ class ScreenAssistService : Service() {
                     }
                     candidateTone = if (suggestMature) QiTone.GOOD else QiTone.NONE
                 } else if (ucci.isNotEmpty()) {
-                    candidateText = "轮次可能识别有误\n走一步后自动纠正"
+                    candidateText = MSG_TURN_MISMATCH
                     candidateTone = QiTone.WARN
                 }
             }
             myTurn && remoteConnected && !pcEngineReady && fen.isNotEmpty() -> {
-                candidateText = when (pcEngineState) {
-                    "error" -> "电脑引擎异常，重试中…"
-                    "offline" -> "电脑端未启用引擎"
-                    else -> "电脑引擎准备中…"
-                }
+                candidateText = pcEngineHeadline(pcEngineState)
             }
         }
 
@@ -2576,11 +2905,13 @@ class ScreenAssistService : Service() {
      *  未启动录屏）返回 null → 芯片灰显占位 */
     private fun thinkLabel(): String? {
         if (remote == null) return null
-        return if (config.engineMoveTimeMs > 0) {
-            "时间" + moveTimeChipText(config.engineMoveTimeMs)
-        } else {
-            "深度" + config.engineDepth
-        }
+        // 文案统一走 thinkChipText（与 OverlayStepCycleTest 锚定的单一事实源，
+        // 此前内联了同逻辑的另一份实现）
+        return thinkChipText(
+            timeMode = config.engineMoveTimeMs > 0,
+            depth = config.engineDepth,
+            timeMs = config.engineMoveTimeMs,
+        )
     }
 
     /** 状态行"用时"：整数档（2026-10-03 用户要求去小数点）——60s 内显秒、1h 内显分、以上显时；未启动返回空串省略用时 */
@@ -2756,7 +3087,18 @@ class ScreenAssistService : Service() {
         } else "—"
         val nodesV = if (hasMetrics) fmtCount(m!!.nodes) else "—"
         val npsV = if (hasMetrics) "${fmtCount(m!!.nps)}/s" else "—"
-        val hashV = hashShort(config.engineHashMB).uppercase()
+        // 哈希格 = 配置档位 + 引擎实时占用（status.hashfull 千分比 0–1000，协议
+        // §4.6；2026-11-20 补"收到未消费"缺口）：占用 ≥90% 前缀 ⚠ 提示调大——
+        // 置换表打满后引擎效率劣化，只看档位不看占用是盲的。指标缺席（收束帧
+        // 后/引擎未搜索）保持纯档位显示
+        val hashV = hashShort(config.engineHashMB).uppercase().let { base ->
+            if (hasMetrics && m!!.hashfull > 0) {
+                val pct = m.hashfull / 10
+                (if (pct >= 90) "⚠" else "") + base + " · $pct%"
+            } else {
+                base
+            }
+        }
         // 胜率行（协议字段恒为红方视角，2026-10-18 实测修复）：展示层换算成
         // 我方视角——否则我方执黑时"胜 x%"显示的是对手（红方）胜率，与大字
         // 颜色（我方视角着色）自相矛盾，用户读感即"胜率算错"。三字段不全则
@@ -2769,7 +3111,7 @@ class ScreenAssistService : Service() {
             }
         }
         val src = when {
-            sug == null -> "来源 —"
+            sug == null -> getString(R.string.detail_source_none)
             sug.fromBook -> "来源 开局库·${sug.bookName.ifEmpty { "桔库" }}"
             // 残局库建议（2026-11-01）：穷举正解来源优先于云库标注（endgame 帧的
             // 着法也可能同时被云库报过，专属性更强的残局库身份优先显示）
@@ -2797,6 +3139,13 @@ class ScreenAssistService : Service() {
             wdl = wdlText,
             source = src,
         ))
+    }
+
+    /** PC 引擎三态文案：headline 大字与候选行两处共用（2026-11-05 收敛单源） */
+    private fun pcEngineHeadline(state: String?): String = when (state) {
+        "error" -> "电脑引擎异常，重试中…"
+        "offline" -> "电脑端未启用引擎"
+        else -> "电脑引擎准备中…"
     }
 
     /** 数量格式化：M/K 单位缩写（节点/速率显示用，与电脑端控制台同口径） */
@@ -2850,8 +3199,13 @@ class ScreenAssistService : Service() {
         onnxEngine = null
         remote?.stop()
         remote = null
+        // removeView 防护（2026-11-14 红队第二轮）：view 已被系统侧 detach（悬浮窗
+        // 权限回收竞态）时 removeView 抛 IllegalArgumentException——此处是清理链
+        // 首环，异常会跳过下方详情窗移除/接收器注销/线程退出全部收尾（详情窗
+        // 僵尸+接收器泄漏+worker 线程泄漏）。与同文件其余三处 runCatching 口径
+        // 一致（:698/:2267/:3025）。
         overlayPanel?.let { p ->
-            windowManager?.removeView(p)
+            runCatching { windowManager?.removeView(p) }
         }
         overlayPanel = null
         removeDetailWindow()
@@ -2867,6 +3221,10 @@ class ScreenAssistService : Service() {
         frameTickRunner?.let { workerHandler.removeCallbacks(it) }
         frameTickRunner = null
         mainHandler.removeCallbacks(elapsedTicker)
+        // 截屏临时窗口一并收尾：摘恢复任务+复位状态（窗体已移除，无需 applySecure，
+        // 重新启动时窗口按默认 flags 新建，secure 恒恢复）
+        mainHandler.removeCallbacks(screenshotRestore)
+        screenshotWindowUntilMs = 0L
         // matureRecheck 刻意不在此摘：pending 标志+体内早退自清（overlayClosed 时
         // 至多空转一次）。若对称地加 removeCallbacks(matureRecheck)，必须同时置
         // matureRecheckPending=false，否则下次启动 scheduleMatureRecheck 因残留

@@ -32,7 +32,8 @@ class DetailModel(
     val hash: String = "—",
     /** 胜率行（红方视角 胜/和/负）；null 隐藏 */
     val wdl: String? = null,
-    val source: String = "来源 —",
+    /** 来源行（"来源 开局库·桔库"等）；必传无默认——文案单源在调用方 */
+    val source: String,
 )
 
 /**

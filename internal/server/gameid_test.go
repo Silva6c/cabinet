@@ -15,7 +15,27 @@ import (
 // 裸切片在 -race 下是数据竞争（2026-10-18 加固）。
 func TestServer_NewGameID(t *testing.T) {
 	fb := newFakeBridge(engine.StateReady)
-	fb.onRequest = replayNormalSearch
+	// 回放脚本按行棋方选合法着法：h2e2 只对红方行棋的开局盘面合法，黑行棋
+	// 局面（fenB/fenC）用 b9c7——归属守卫（2026-11-14）起终值着法对本局面
+	// 非法不下发不沉淀，固定着法的回放会被正确拦下
+	fb.onRequest = func(fb *fakeBridge, fen string) {
+		redGo := engine.RedGoOf(fen)
+		best := "h2e2"
+		if !redGo {
+			best = "b9c7"
+		}
+		fb.emit(engine.Event{Kind: engine.EventInfo, Fen: fen, Info: &engine.Info{
+			MultiPV: 1, Depth: 8, ScoreCP: 120, PV: []string{best, "h0g2"},
+			Nodes: 50000, NPS: 500000, Hashfull: 12,
+		}})
+		fb.emit(engine.Event{Kind: engine.EventBestmove, Result: &engine.Result{
+			Fen: fen, RedGo: redGo, BestMove: best,
+			Lines: []engine.Info{{
+				MultiPV: 1, Depth: 8, ScoreCP: 120,
+				PV: []string{best, "h0g2"}, Nodes: 50000, NPS: 500000, Hashfull: 12,
+			}},
+		}})
+	}
 	url, _, srv := startTestServerWithBridgeS(t, fb)
 
 	var mu sync.Mutex

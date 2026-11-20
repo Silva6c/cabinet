@@ -36,6 +36,8 @@ class AssistConfig(context: Context) {
      */
     var useNnapi: Boolean
         get() = sp.getBoolean(KEY_USE_NNAPI, false)
+        // 无代码调用方：adb 诊断写入口（实验机 adb shell 手改 shared_prefs
+        // 后冷启动生效），勿因"没人用"删除——2026-11-09 全量体检补注
         set(value) { sp.edit().putBoolean(KEY_USE_NNAPI, value).apply() }
 
     /**
@@ -64,6 +66,7 @@ class AssistConfig(context: Context) {
      */
     var confirmCount: Int
         get() = sp.getInt(KEY_CONFIRM, 2).coerceIn(1, 8)
+        // 无代码调用方：adb 诊断写入口（同 useNnapi 口径）——勿删
         set(value) { sp.edit().putInt(KEY_CONFIRM, value.coerceIn(1, 8)).apply() }
 
     /**
@@ -74,7 +77,21 @@ class AssistConfig(context: Context) {
      */
     var singleMoveRepair: Boolean
         get() = sp.getBoolean(KEY_SINGLE_MOVE_REPAIR, true)
+        // 无代码调用方：adb 诊断写入口（同 useNnapi 口径）——勿删
         set(value) { sp.edit().putBoolean(KEY_SINGLE_MOVE_REPAIR, value).apply() }
+
+    /**
+     * 单步几何提前确认开关（默认开，2026-11-09"停在上一帧"治理）：候选仅 1 帧
+     * 且与上一确认局面构成"唯一单步走子且识别逐格完全一致"（repairBySingleMove
+     * d==0，几何+伪合法双重验证）→ 立即确认——对手 1~3s 回手会击穿
+     * confirmCount=2 的 ~1.6s 确认窗口，我方候选被覆盖、中间局面永失（两步
+     * 合并，日志实测每局 ~9 次、悬浮窗滞后 6~14s）。d==1 残差不提前（单帧+
+     * 残差误确认风险大于收益，仍走 confirmCount 节奏）。
+     */
+    var singleMoveEarlyConfirm: Boolean
+        get() = sp.getBoolean(KEY_SINGLE_MOVE_EARLY_CONFIRM, true)
+        // 无代码调用方：adb 诊断写入口（同 useNnapi 口径）——勿删
+        set(value) { sp.edit().putBoolean(KEY_SINGLE_MOVE_EARLY_CONFIRM, value).apply() }
 
     /**
      * 最近上行局面的持久化（2026-10-24 B1 轮次恢复）：进程重启后 BoardTracker
@@ -209,6 +226,7 @@ class AssistConfig(context: Context) {
         private const val KEY_ENG_MULTI_PV = "engine_multi_pv"
         private const val KEY_ENG_MOVETIME = "engine_movetime_ms"
         private const val KEY_SINGLE_MOVE_REPAIR = "single_move_repair"
+        private const val KEY_SINGLE_MOVE_EARLY_CONFIRM = "single_move_early_confirm"
         private const val KEY_LAST_CONFIRMED_FEN = "last_confirmed_fen"
         private const val KEY_DEVICE_ID = "device_id"
         private const val KEY_DEVICE_NAME = "device_name"

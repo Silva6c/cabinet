@@ -61,6 +61,10 @@ type Store struct {
 	// 桔库未命中的 position 上执行（与 book.Store.stmt 同款口径，见 book.go）。
 	// database/sql 的 Stmt 并发安全，多设备并行查询共用。
 	lookupStmt *sql.Stmt
+	// recentStmt/countTodayStmt 控制台建议流两条轮询查询的常驻预编译
+	// （2026-11-09 内存治理：与 lookupStmt 同口径，语句失败即中止启动）
+	recentStmt     *sql.Stmt
+	countTodayStmt *sql.Stmt
 	// chMu 保护 closed 标志与两条 channel 的 close 动作：向已关闭 channel
 	// 发送会 panic，单靠 select default 防不了关闭态——迟到的 Save（引擎
 	// 异步回调）与 Close 的竞态由此闭环。⚠channel 本身**永不置 nil**：
@@ -119,11 +123,18 @@ func Open(path string, logger *slog.Logger) (*Store, error) {
 	// pragma 走 DSN 落到每条连接：synchronous 是 per-connection 属性，经 Exec
 	// 只落在池里恰好一条连接上（writeLoop 的 Begin 可能取到别的连接→退回 FULL
 	// 多 fsync）；busy_timeout 消除控制台清空与写入并发时的 SQLITE_BUSY。
+	// cache_size 收紧为 1MB（2026-11-09 内存治理：默认 -2000=2MB/连接 ×
+	// 池内每条连接——本库全是点查与 ≤200 行小扫描，1MB 足够，页缓存总量封顶）
 	db, err := sql.Open("sqlite", "file:"+strings.ReplaceAll(abs, "\\", "/")+
-		"?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(5000)")
+		"?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(5000)&_pragma=cache_size(-1000)")
 	if err != nil {
 		return nil, fmt.Errorf("打开沉淀库失败: %w", err)
 	}
+	// 池封顶（2026-11-09 内存治理）：全仓未设过上限——modernc 每连接各带
+	// 页缓存，多设备并发+3 条常驻语句可能钉住多条连接。本库写入走
+	// writeLoop 单 goroutine，读取是低频小查询，2 连接绰绰有余
+	db.SetMaxOpenConns(2)
+	db.SetMaxIdleConns(1)
 	// Exec 兜底保留：老版本驱动或 DSN 参数解析异常时仍保证 WAL
 	if _, err := db.Exec("pragma journal_mode=WAL; pragma synchronous=NORMAL;"); err != nil {
 		_ = db.Close()
@@ -170,6 +181,16 @@ func Open(path string, logger *slog.Logger) (*Store, error) {
 		"select ts,source,fen,best_move,score_cp,score_mate,pv,depth from suggestions where fen = ? order by id desc limit 1"); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("预编译沉淀命中查询失败: %w", err)
+	}
+	if s.recentStmt, err = db.Prepare(
+		"select ts,source,fen,best_move,score_cp,score_mate,pv,depth from suggestions order by id desc limit ?"); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("预编译建议流查询失败: %w", err)
+	}
+	if s.countTodayStmt, err = db.Prepare(
+		"select count(*) from suggestions where ts >= ?"); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("预编译今日条数查询失败: %w", err)
 	}
 	s.wg.Add(1)
 	go s.writeLoop()
@@ -279,6 +300,8 @@ func (s *Store) Close() error {
 	s.chMu.Unlock()
 	s.wg.Wait()
 	_ = s.lookupStmt.Close()
+	_ = s.recentStmt.Close()
+	_ = s.countTodayStmt.Close()
 	return s.db.Close()
 }
 

@@ -2,6 +2,7 @@ package com.cabinet.assist.ui
 
 import android.content.Context
 import android.graphics.drawable.GradientDrawable
+import android.os.SystemClock
 import android.text.SpannableStringBuilder
 import android.text.style.ForegroundColorSpan
 import android.util.AttributeSet
@@ -13,6 +14,7 @@ import android.view.WindowManager
 import android.widget.LinearLayout
 import android.widget.TextView
 import com.cabinet.R
+import com.cabinet.assist.CandidateTapGesture
 import kotlin.math.abs
 
 /** 状态语义档（颜色由当前主题调色板解析，见 QiPalette）：
@@ -33,8 +35,9 @@ class OverlayModel(
     val stateKind: OverlayStateKind = OverlayStateKind.IDLE,
     /** 遮挡提醒行：悬浮窗盖住已定位棋盘时显示；null 隐藏（独立小行，不挤占状态行） */
     val occludedText: String? = null,
-    /** 主状态大字：轮到我方走 / 已停止指导 / 连接异常…（含 setStatus 覆盖文案） */
-    val headlineText: String = "识别中",
+    /** 主状态大字：轮到我方走 / 已停止指导 / 连接异常…（含 setStatus 覆盖文案）。
+     *  必传无默认：文案单源在调用方（xml 首帧用 @string/recognizing_status） */
+    val headlineText: String,
     /** 优势行：红方优势 +0.8；null 隐藏 */
     val advantageText: String? = null,
     val advantageTone: QiTone = QiTone.NONE,
@@ -95,6 +98,14 @@ enum class OverlayAction {
     SWITCH_THINK_MODE,
     /** 详情窗（窗口2）显隐切换 */
     TOGGLE_DETAIL,
+    /** 截屏临时窗口（2026-11-07）：撤两窗 FLAG_SECURE 让系统截屏可拍全屏，
+     *  10 秒后自动恢复（secure 恢复后悬浮窗重新从录屏剔除） */
+    SCREENSHOT,
+    /** 单次三变解析（2026-11-09；2026-11-15 改连点三次触发，2026-11-20 连击窗
+     *  1s→0.7s）——本轮搜索以 multi_pv=3 进引擎（协议 §4.4 position.multi_pv_once），
+     *  不改"路数"档位。前两击已按 CYCLE_CANDIDATE 处理（点击零延迟优先），第三击
+     *  改发本动作且不再换候选 */
+    ONE_SHOT_MULTI_PV,
 }
 
 class OverlayPanelView @JvmOverloads constructor(
@@ -120,6 +131,7 @@ class OverlayPanelView @JvmOverloads constructor(
     private val btnTurn: TextView
     private val btnDetail: TextView
     private val btnMultiPv: TextView
+    private val btnScreenshot: TextView
 
 
     /** 真正的背景层 = XML 里的 overlay_root：悬浮窗 root 的 background 运行期
@@ -138,11 +150,20 @@ class OverlayPanelView @JvmOverloads constructor(
     var onCellTap: ((x: Int, y: Int) -> Unit)? = null
     /** 拖动开始/结束（用于抑制取帧时的面板隐藏动作） */
     var onDragStateChange: ((Boolean) -> Unit)? = null
+    /** 连点手势进度（第 1/2 击的击数，仅手势 CYCLE 触发；"变招"按钮不回调）。
+     *  服务层用于单候选局面下的击数提示——单候选换候选无可见变化，没有这个
+     *  反馈用户不知道"点了几下"（2026-11-17 工效修复，见 CandidateTapGesture） */
+    var onCandidateTapProgress: ((taps: Int) -> Unit)? = null
 
     // 关闭二次确认：误触风险大，首次点按进入待确认态，3 秒内再点才真正关闭
     private var closeArmed = false
     private var closeNormalColor = 0
     private val closeReset = Runnable { resetCloseState() }
+
+    // 小棋盘连点手势（ONE_SHOT_MULTI_PV 触发，2026-11-15 改连点 3 次触发，
+    // 2026-11-20 连击窗 1s→0.7s；见 assist/CandidateTapGesture——前两击照常
+    // 换候选，第三击触发三变）
+    private val chessTaps = CandidateTapGesture()
 
     private fun resetCloseState() {
         closeArmed = false
@@ -182,10 +203,15 @@ class OverlayPanelView @JvmOverloads constructor(
         btnTurn = findViewById(R.id.overlay_btn_turn)
         btnDetail = findViewById(R.id.overlay_btn_detail)
         btnMultiPv = findViewById(R.id.overlay_btn_multipv)
+        btnScreenshot = findViewById(R.id.overlay_btn_screenshot)
         closeNormalColor = btnClose.currentTextColor
 
         btnPause.setOnClickListener { onAction?.invoke(OverlayAction.PAUSE) }
-        btnChange.setOnClickListener { onAction?.invoke(OverlayAction.CYCLE_CANDIDATE) }
+        btnChange.setOnClickListener {
+            // 变招按钮清连点窗：小棋盘点→按钮→小棋盘（0.7 秒内）不应被误判成连点
+            chessTaps.reset()
+            onAction?.invoke(OverlayAction.CYCLE_CANDIDATE)
+        }
         btnUndo.setOnClickListener { onAction?.invoke(OverlayAction.UNDO) }
         btnManual.setOnClickListener { onAction?.invoke(OverlayAction.MANUAL) }
         btnTurn.setOnClickListener { onAction?.invoke(OverlayAction.FLIP_TURN) }
@@ -199,6 +225,7 @@ class OverlayPanelView @JvmOverloads constructor(
         btnHash.setOnClickListener { onAction?.invoke(OverlayAction.CYCLE_HASH) }
         btnMultiPv.setOnClickListener { onAction?.invoke(OverlayAction.CYCLE_MULTI_PV) }
         btnDetail.setOnClickListener { onAction?.invoke(OverlayAction.TOGGLE_DETAIL) }
+        btnScreenshot.setOnClickListener { onAction?.invoke(OverlayAction.SCREENSHOT) }
         btnClose.setOnClickListener {
             if (!closeArmed) {
                 closeArmed = true
@@ -211,7 +238,26 @@ class OverlayPanelView @JvmOverloads constructor(
                 onAction?.invoke(OverlayAction.CLOSE)
             }
         }
-        chess.onNextCandidate = { onAction?.invoke(OverlayAction.CYCLE_CANDIDATE) }
+        chess.onNextCandidate = {
+            // 小棋盘连点三次（逐击续窗：每击间隔 ≤0.7 秒，2026-11-15 用户定稿 +
+            // 2026-11-17 续窗口径、2026-11-20 收紧 1s→0.7s）→ 单次三变解析。
+            // 检测在视图层：
+            // CYCLE_CANDIDATE 同时来自"变招"按钮，服务层按动作名无法区分来源。
+            // 前两击照常轮换候选（点击零延迟优先，不加去抖等待），第三击改发
+            // 单次解析且不再换候选——与击数语义一致。候选列表由聚合器搜索代
+            // 检测重建，选中下标保留（越界有回退兜底），并非"被覆盖清零"。
+            // elapsedRealtime 单调时钟，不受系统时间调整影响
+            when (chessTaps.onTap(SystemClock.elapsedRealtime())) {
+                CandidateTapGesture.Action.ONE_SHOT ->
+                    onAction?.invoke(OverlayAction.ONE_SHOT_MULTI_PV)
+                CandidateTapGesture.Action.CYCLE -> {
+                    onAction?.invoke(OverlayAction.CYCLE_CANDIDATE)
+                    // 进度提示在换候选动作之后（setStatus 末次写入必胜）：多候选
+                    // 局面切换本身就是可见反馈，服务层按候选数决定是否弹字
+                    onCandidateTapProgress?.invoke(chessTaps.taps)
+                }
+            }
+        }
         chess.onCellTap = { x, y -> onCellTap?.invoke(x, y) }
     }
 
@@ -398,6 +444,8 @@ class OverlayPanelView @JvmOverloads constructor(
             MotionEvent.ACTION_MOVE -> {
                 if (!dragging && (abs(ev.rawX - downX) > touchSlop || abs(ev.rawY - downY) > touchSlop)) {
                     dragging = true
+                    // 拖动清连点窗：小棋盘点→拖动面板→0.7 秒内再点不应误判成连点
+                    chessTaps.reset()
                     onDragStateChange?.invoke(true)
                     return true
                 }

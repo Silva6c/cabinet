@@ -163,7 +163,17 @@ func (s *Server) trendAppend(key string, pt TrendPoint) {
 	// 我方执色随点固化：追加时刻该组已知值即该点视角（对局中途换边也能逐点自洽）
 	pt.MyRed = g.myRed
 	pt.MySideKnown = g.mySideOK
-	if n := len(g.pts); n > 0 && pt.Fen != "" && g.pts[n-1].Fen == pt.Fen {
+	// 同局面去重键取盘面段（2026-11-14 红队第二轮）：轮次纠正（PC 重锚回环/
+	// 手机 flipTurn 重发）会产出"同盘面异侧"两帧——按完整 FEN 各自成点，曲线
+	// 在纠正处出现伪跳变（错侧评分→正确侧评分）。合法对局同盘面异轮次不可能
+	// 出现，按盘面段去重无损。
+	fenBoard := func(f string) string {
+		if i := strings.IndexByte(f, ' '); i > 0 {
+			return f[:i]
+		}
+		return f
+	}
+	if n := len(g.pts); n > 0 && pt.Fen != "" && fenBoard(g.pts[n-1].Fen) == fenBoard(pt.Fen) {
 		g.pts[n-1] = pt
 		return
 	}

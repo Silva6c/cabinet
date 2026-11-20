@@ -15,8 +15,9 @@ import "strings"
 // 审查实测：将出九宫/仕出九宫/相过河三类同样秒退）。必须在送引擎前拦截——
 // 手机端收到错误提示后点"更新"重新识别或走一步棋即可自愈。
 //
-// 只做"够拦住皮卡鱼退出条件"级校验，不校验子力数量/马炮兵位置等深层规则
-// （兵到底线皮卡鱼正常接受）。
+// 只做"够拦住皮卡鱼退出条件"级校验，不校验子力数量/马炮位置等深层规则
+// （兵到敌方底线 y=0 皮卡鱼正常接受，实测；不可达兵位见 pieceZonesLegal——
+// 2026-11-14 红队第二轮实测红兵 y=8 同样秒退）。
 func PositionLegal(fen string) bool {
 	parts := strings.Fields(fen)
 	if len(parts) < 2 {
@@ -48,7 +49,8 @@ type boardGrid struct {
 }
 
 // pieceZonesLegal 校验子力区域规则：将/帅在各自九宫（x 3..5，黑 y 0..2、
-// 红 y 7..9），仕/相按点位白名单（advisorSpot/elephantSpot）。皮卡鱼对违反者报
+// 红 y 7..9），仕/相按点位白名单（advisorSpot/elephantSpot），兵/卒站位可达
+// （2026-11-14 补，判据与手机端 AssistBoard.validate 双端同步）。皮卡鱼对违反者报
 // "Unsupported position" 并立即退出（2026-10-01 第二轮审查实测将/仕出九宫、
 // 相过河三类全中；2026-10-27 补刀：仕/相在半场内但不在点位上同样秒退——半天
 // 实战四炸全是这一类，旧版对仕相只查九宫/不过河、对相只查 y 方向，拦不住）。
@@ -78,6 +80,15 @@ func pieceZonesLegal(b *boardGrid) bool {
 				}
 			case 'B': // 红相
 				if !elephantSpot(x, y, true) {
+					return false
+				}
+			case 'P': // 红兵：起始线 y=6 只进不退——y≥7 不可达；未过河
+				// （y=5..6）只能站起始偶数列（横移仅过河后才可能）
+				if y >= 7 || (y >= 5 && x%2 != 0) {
+					return false
+				}
+			case 'p': // 黑卒镜像：起始线 y=3——y≤2 不可达；y=3..4 非偶列
+				if y <= 2 || (y <= 4 && x%2 != 0) {
 					return false
 				}
 			}

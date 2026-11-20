@@ -42,8 +42,13 @@ import javax.net.ssl.X509TrustManager
  * 带外传递（PC 控制台"②连接"区可见）；PC 证书一经生成绝不重建（cert/ 铁律），
  * 重建 = 全部手机需重新配对。
  *
- * 线程模型：OkHttp 回调在其自有线程池，协议帧解析与状态维护经串行 net 线程，
- * 对外回调不做线程保证（调用方 ScreenAssistService 自行 mainHandler 切换）。
+ * 线程模型（2026-11-14 红队第二轮注释纠正，原描述与实现不符）：onMessage 的
+ * 协议帧解析与状态维护直接跑在 OkHttp 读线程（不经 net 线程——该线程仅承担
+ * 心跳/重连调度）；跨线程状态
+ * 依赖 aggregator 的 synchronized + 快照整体替换与 @Volatile 字段，对外回调不
+ * 做线程保证（调用方 ScreenAssistService 自行 mainHandler 切换）。已知窄窗口：
+ * sendPosition 五个 lastPosition* 字段非原子组合写，重连 welcome 补发可读到
+ * 撕裂组合一次（后果一帧、PC 端"最新覆盖"幂等，接受；改动须重验全链线程归属）。
  */
 class RemoteAnalysisClient(
     private val serverUrl: String,
@@ -94,8 +99,9 @@ class RemoteAnalysisClient(
     companion object {
         private const val TAG = "RemoteAnalysis"
 
-        /** 默认 WSS 端口提示（错误文案单点，改端口只改这里） */
-        private const val PORT_HINT = "9527"
+        /** 默认 WSS 端口提示（错误文案单点，改端口只改这里）；
+         *  internal = 主页连接超时提示（AssistActivity）同源引用 */
+        internal const val PORT_HINT = "9527"
         /** 协议 v1 能力集与客户端标识（§3 逐字定死，勿改） */
         private const val PROTO_VERSION = 1
         private const val CLIENT_NAME = "cabinet-phone"
@@ -212,6 +218,13 @@ class RemoteAnalysisClient(
     @Volatile private var lastPositionFen: String? = null
     /** 最后一条 position 的 force 语义（重连/not_ready 恢复补发时保持） */
     @Volatile private var lastPositionForce = false
+    /** 最后一条 position 的单次多线值（2026-11-09 连点小棋盘"单次三变解析"，2026-11-15 触发改连点三次）：
+     *  补发沿用（与 force 同语义，重连不丢"三变"意图）；普通局面发送置 null
+     *  （直接赋值可清，防旧值误补发） */
+    @Volatile private var lastPositionMultiPvOnce: Int? = null
+    /** 最后一条 position 的手动模式标记（2026-11-10 结构防线配套）：PC 端结构
+     *  门对手动编辑帧跳过（编辑增量不受棋理约束）；补发沿用与 force 同语义 */
+    @Volatile private var lastPositionManual = false
     /** 最后一条 position 的我方执色（协议 §4.4 my_red；补发时保持，null=未上报） */
     @Volatile private var lastPositionMyRed: Boolean? = null
     /** 收到 error{not_ready} 后置位；status{state:"ready"} 到达时重发一次并清零。
@@ -318,16 +331,21 @@ class RemoteAnalysisClient(
     fun sendPosition(
         fen: String, force: Boolean = false, newGame: Boolean = false,
         myRed: Boolean? = null,
+        multiPvOnce: Int? = null,
+        manual: Boolean = false,
     ) {
         lastPositionFen = fen
         lastPositionForce = force
+        lastPositionMultiPvOnce = multiPvOnce
+        lastPositionManual = manual
         myRed?.let { lastPositionMyRed = it }
         // 转发完成时刻（真机基准：与 board confirmed、suggestion received 同在
         // logcat 时间轴上，端到端"走子→转发→建议"无需跨设备时钟比对）
-        RLog.i(TAG, "position sent: $fen${if (force) " (force)" else ""}${if (newGame) " (new_game)" else ""}")
+        RLog.i(TAG, "position sent: $fen${if (force) " (force)" else ""}${if (newGame) " (new_game)" else ""}${multiPvOnce?.let { " (multi_pv_once=$it)" } ?: ""}${if (manual) " (manual)" else ""}")
         send(PositionFrame(
             fen = fen, redGo = fenRedGo(fen), history = emptyList(),
-            force = force, newGame = newGame, myRed = myRed,
+            force = force, newGame = newGame, myRed = myRed, multiPvOnce = multiPvOnce,
+            manual = manual,
         ))
     }
 
@@ -361,7 +379,10 @@ class RemoteAnalysisClient(
         } catch (e: IllegalArgumentException) {
             RLog.w(TAG, "serverUrl 无法解析: $serverUrl")
             setState(ConnectionState.DISCONNECTED)
-            listener.onConnectError("电脑地址格式非法（应以 ws:// 或 wss:// 开头）——请检查后重试")
+            // 文案只指 wss（2026-11-14 红队第二轮）：targetSdk 34 起 cleartext
+            // 默认禁用，ws:// 明文地址永不可用——引导用户填 ws:// 会造成"按提示
+            // 配置却永远连不上"的排障死胡同
+            listener.onConnectError("电脑地址格式非法（应以 wss:// 开头，本应用不支持 ws:// 明文连接）——请检查后重试")
             return
         }
         val newWs = client.newWebSocket(req, object : WebSocketListener() {
@@ -486,7 +507,7 @@ class RemoteAnalysisClient(
                 // 心跳是自续链 Runnable：重连成功必须先摘旧链再挂，否则 ping 频率随重连次数成倍增长
                 netHandler.removeCallbacks(pingRunnable)
                 netHandler.post(pingRunnable)
-                lastPositionFen?.let { sendPosition(it, lastPositionForce, myRed = lastPositionMyRed) }
+                lastPositionFen?.let { sendPosition(it, lastPositionForce, myRed = lastPositionMyRed, multiPvOnce = lastPositionMultiPvOnce, manual = lastPositionManual) }
             }
             "suggestion" -> {
                 // 建议回包时刻（真机基准脚本用它对齐"走子→建议刷新"的端到端时间差）
@@ -515,6 +536,10 @@ class RemoteAnalysisClient(
                     // "· 缓存"弱标记且到达即成熟（历史终值无搜索过程）；PC 端
                     // omitempty——字段缺省/旧 PC 不发均 optBoolean 兜底 false
                     cached = m.optBoolean("cached", false),
+                    // 三次重复判和警示（协议 §4.5，2026-11-15 新增可选字段）：主选
+                    // 着法走着即形成第三次重复局面（判和风险），PC 带警示照发由用户
+                    // 决断；候选行缀「⚠判和风险」。旧 PC 无此字段兜底 false
+                    repRisk = m.optBoolean("rep_risk", false),
                 ))
             }
             "status" -> {
@@ -536,7 +561,7 @@ class RemoteAnalysisClient(
                 // §6 not_ready 恢复：仅"not_ready 之后的首个 ready"触发一次重发
                 if (eng?.optString("state") == "ready" && awaitingReady) {
                     awaitingReady = false
-                    lastPositionFen?.let { sendPosition(it, lastPositionForce, myRed = lastPositionMyRed) }
+                    lastPositionFen?.let { sendPosition(it, lastPositionForce, myRed = lastPositionMyRed, multiPvOnce = lastPositionMultiPvOnce, manual = lastPositionManual) }
                 }
             }
             // §4.7：PC 心跳必须原样回 pong
@@ -595,6 +620,11 @@ class RemoteAnalysisClient(
                 // JSON 布尔没有 omitempty 之外的语义，PC 端靠"字段在不在"区分
                 // "旧手机未告知"与"明确执黑"，不能只在 true 时传
                 any.myRed?.let { put("my_red", it) }
+                // 单次多线（2026-11-09 连点小棋盘"单次三变解析"，协议 §4.4）：
+                // 旧 PC 忽略未知字段（§7），退化为普通重搜
+                any.multiPvOnce?.let { put("multi_pv_once", it) }
+                // 手动模式帧（结构防线跳过标记；仅 true 时出现，omitempty 语义）
+                if (any.manual) put("manual", true)
             }
         // 手机诊断日志上行（协议 §4.11）：lines 为端上预格式化行，PC 原样落盘
         is LogFrame -> JSONObject().put("v", PROTO_VERSION).put("t", "log")
@@ -644,6 +674,10 @@ class RemoteSuggestion(
     /** 沉淀库缓存命中（同局面历史终值直接回放，未进引擎现算）；旧 PC 无此字段时为 false。
      *  注意与 fromBook 独立：沉淀记录的 source 可能是 "book:<名>"，不能靠 fromBook 判缓存 */
     val cached: Boolean = false,
+    /** 三次重复判和警示（2026-11-15 新增可选字段）：主选着法走着即形成第三次
+     *  重复局面（判和风险）。PC 引擎路径会随后发起一次性 4 线替代重搜选非重复
+     *  线；云库/残局路径仅警示。旧 PC 无此字段时为 false */
+    val repRisk: Boolean = false,
 ) {
     val fromBook: Boolean get() = source.startsWith("book:")
     val bookName: String get() = if (fromBook) source.removePrefix("book:") else ""
@@ -672,7 +706,14 @@ private data class PositionFrame(
     val newGame: Boolean = false,
     /** 我方执红（2026-10-29 走势视角）：PC 据此把控制台走势换算成我方视角；
      *  null = 不传（旧 PC 忽略未知字段，协议 §7） */
-    val myRed: Boolean? = null)
+    val myRed: Boolean? = null,
+    /** 单次多线（2026-11-09 连点小棋盘"单次三变解析"，协议 §4.4
+     *  multi_pv_once）：本条局面的引擎搜索以该线数执行且仅此一轮，不改"路数"
+     *  档位；PC 跳过桔库/沉淀直达引擎。null = 不传（旧 PC 忽略，退化为普通重搜） */
+    val multiPvOnce: Int? = null,
+    /** 手动模式帧（2026-11-10 结构防线配套，协议 §4.4 manual）：PC 端结构门
+     *  对手动编辑帧跳过（编辑增量不受棋理约束）。缺省 false（旧 PC 忽略 §7） */
+    val manual: Boolean = false)
 private data class SetEngineFrame(
     val depth: Int?, val hashMB: Int?,
     val threads: Int? = null, val multiPV: Int? = null,

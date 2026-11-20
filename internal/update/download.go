@@ -16,10 +16,12 @@ import (
 )
 
 // 下载阶段常量：读空闲超时（30s 无数据判定链路卡死）与解压体积上限
-// （zip bomb 防护；exe 实际 ~56MB，512MB 余量足够宽容）。
+// （zip bomb 防护；exe 实际 ~56MB，512MB 余量足够宽容）；下载总量上限
+// （2026-11-14 红队第二轮：Content-Length 可撒谎，端点异常刷盘在此截断）。
 const (
 	downloadIdleTimeout = 30 * time.Second
 	extractSizeLimit    = 512 << 20
+	downloadTotalLimit  = 1 << 30
 )
 
 // DownloadInstall 确认式下载安装外壳（用户点"下载并安装"即确认，绝不静默
@@ -65,8 +67,9 @@ func (c *Checker) downloadInstallTo(ctx context.Context, dir, exeName string) {
 	if err == nil {
 		err = verifyFileSHA256(zipPath, digest)
 	}
+	var newDigest string
 	if err == nil {
-		err = extractExe(zipPath, dir, exeName)
+		newDigest, err = extractExe(zipPath, dir, exeName)
 	}
 	// zip 无论成败，走完即无存在价值（校验失败/解压失败同样删——垃圾零残留）
 	_ = os.Remove(zipPath)
@@ -77,6 +80,7 @@ func (c *Checker) downloadInstallTo(ctx context.Context, dir, exeName string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.cancel = nil
+	c.newDigest = "" // 默认清空：仅成功路径记录 .new 摘要（换入前 Apply 重验依据）
 	switch {
 	case idle && err != nil:
 		// 空闲超时只在下载确已失败时分类：doDownload 最后一次 Read 成功到
@@ -103,6 +107,7 @@ func (c *Checker) downloadInstallTo(ctx context.Context, dir, exeName string) {
 		c.logger.Info("更新下载/校验失败（静默处理）", "err", err)
 		c.progress = 0
 	default:
+		c.newDigest = newDigest
 		c.state = StateReadyReboot
 		c.message = "更新已就绪，正在重启应用……"
 	}
@@ -158,6 +163,9 @@ func (c *Checker) doDownload(ctx context.Context, cancel context.CancelFunc, ass
 				return fmt.Errorf("写入下载文件失败: %w", werr)
 			}
 			written += int64(n)
+			if written > downloadTotalLimit {
+				return fmt.Errorf("下载体积超上限（%d 字节），已中止", downloadTotalLimit)
+			}
 			if total > 0 {
 				c.mu.Lock()
 				c.progress = float64(written) / float64(total)
@@ -189,6 +197,21 @@ func (c *Checker) takeIdleExpired() bool {
 	return v
 }
 
+// fileSHA256 计算文件 sha256 十六进制串（zip 官方 digest 校验与 .new 自身摘要
+// 共用；.new 摘要随状态机内存传递给 Apply 作换入前重验依据，不落盘）。
+func fileSHA256(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = f.Close() }()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
 // verifyFileSHA256 对照官方 digest（"sha256:<hex>"）校验文件完整性。
 // 无 digest 的资产已被 CanInstall 门禁排除（canInstallLocked 要求 digest 非空；
 // pickUpdateAsset 本身不筛 digest），走到这里 digest 必非空。
@@ -197,29 +220,25 @@ func verifyFileSHA256(path, digest string) error {
 	if !strings.HasPrefix(digest, prefix) {
 		return fmt.Errorf("校验值格式异常: %q", digest)
 	}
-	f, err := os.Open(path)
+	sum, err := fileSHA256(path)
 	if err != nil {
-		return fmt.Errorf("打开升级包失败: %w", err)
-	}
-	defer func() { _ = f.Close() }()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
 		return fmt.Errorf("读取升级包失败: %w", err)
 	}
-	if !strings.EqualFold(hex.EncodeToString(h.Sum(nil)), strings.TrimPrefix(digest, prefix)) {
+	if !strings.EqualFold(sum, strings.TrimPrefix(digest, prefix)) {
 		return fmt.Errorf("sha256 校验不匹配（升级包可能损坏）")
 	}
 	return nil
 }
 
 // extractExe 从升级 zip 解出 cabinet.exe 写成 <exeName>.new（目标文件名固定，
-// 不按 zip 内路径落盘——zip slip 无落脚点）。校验非空 + MZ 头（PE 标识）。
-// zip 内按 basename 匹配（现行 portable-pack 产物在 zip 根；带目录前缀的条目
-// 同样兼容）。
-func extractExe(zipPath, dir, exeName string) error {
+// 不按 zip 内路径落盘——zip slip 无落脚点）。校验非空 + 实际字节数与声明一致
+// （2026-11-14 红队第二轮：截断条目此前只挡空文件）+ MZ 头（PE 标识）。
+// 返回 .new 自身 sha256 十六进制串（Apply 换入前重验依据）。zip 内按 basename
+// 匹配（现行 portable-pack 产物在 zip 根；带目录前缀的条目同样兼容）。
+func extractExe(zipPath, dir, exeName string) (string, error) {
 	r, err := zip.OpenReader(zipPath)
 	if err != nil {
-		return fmt.Errorf("打开升级包失败: %w", err)
+		return "", fmt.Errorf("打开升级包失败: %w", err)
 	}
 	defer func() { _ = r.Close() }()
 	for _, f := range r.File {
@@ -227,39 +246,50 @@ func extractExe(zipPath, dir, exeName string) error {
 			continue
 		}
 		if f.UncompressedSize64 > extractSizeLimit {
-			return fmt.Errorf("升级包内文件异常过大（%d 字节）", f.UncompressedSize64)
+			return "", fmt.Errorf("升级包内文件异常过大（%d 字节）", f.UncompressedSize64)
 		}
 		rc, err := f.Open()
 		if err != nil {
-			return fmt.Errorf("读取升级包内 %s 失败: %w", f.Name, err)
+			return "", fmt.Errorf("读取升级包内 %s 失败: %w", f.Name, err)
 		}
 		defer func() { _ = rc.Close() }()
 		newPath := filepath.Join(dir, exeName+exeNewSuffix)
 		out, err := os.Create(newPath)
 		if err != nil {
-			return fmt.Errorf("写入新程序失败: %w", err)
+			return "", fmt.Errorf("写入新程序失败: %w", err)
 		}
 		n, cerr := io.Copy(out, io.LimitReader(rc, extractSizeLimit))
 		closeErr := out.Close()
 		if cerr != nil {
 			_ = os.Remove(newPath)
-			return fmt.Errorf("解压新程序失败: %w", cerr)
+			return "", fmt.Errorf("解压新程序失败: %w", cerr)
 		}
 		if closeErr != nil {
 			_ = os.Remove(newPath)
-			return fmt.Errorf("保存新程序失败: %w", closeErr)
+			return "", fmt.Errorf("保存新程序失败: %w", closeErr)
 		}
 		if n == 0 {
 			_ = os.Remove(newPath)
-			return fmt.Errorf("升级包内 %s 为空", f.Name)
+			return "", fmt.Errorf("升级包内 %s 为空", f.Name)
+		}
+		// 实际解压字节数与声明不符 = 条目被截断/损坏（官方 digest 校验的是
+		// zip 全文件，此处兜住"zip 完整但条目数据区与目录声明不一致"的形态）
+		if n != int64(f.UncompressedSize64) {
+			_ = os.Remove(newPath)
+			return "", fmt.Errorf("升级包内 %s 解压字节数与声明不符（升级包损坏）", f.Name)
 		}
 		if err := verifyMZ(newPath); err != nil {
 			_ = os.Remove(newPath)
-			return err
+			return "", err
 		}
-		return nil
+		sum, err := fileSHA256(newPath)
+		if err != nil {
+			_ = os.Remove(newPath)
+			return "", fmt.Errorf("计算新程序摘要失败: %w", err)
+		}
+		return sum, nil
 	}
-	return fmt.Errorf("升级包内未找到 %s", exeName)
+	return "", fmt.Errorf("升级包内未找到 %s", exeName)
 }
 
 // verifyMZ 校验文件以 PE 头（MZ）开始——防解压出错装上残缺二进制。

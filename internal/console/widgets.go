@@ -28,6 +28,24 @@ func qiSize(name fyne.ThemeSizeName) float32 {
 	return fyne.CurrentApp().Settings().Theme().Size(name)
 }
 
+// unfocusWidget 控件交还键盘焦点（2026-11-09 用户反馈"勾选框光晕点击后挪开
+// 鼠标不消失"）：光晕即 fyne 焦点环（主题 focus 色的圆角描边，指示键盘输入
+// 目标）——焦点不随鼠标转移，只随"点击别的可聚焦控件"或窗口失焦转移，勾选
+// 框/下拉点完就一直挂着。在控件回调里主动 Unfocus 即消。
+// 约束：调用方必须放在 busy 抑制守卫之后——刷新回写（SetChecked/SetSelected
+// 触发的 OnChanged）走的是程序化路径，若也失焦会周期性偷走用户正在输入的
+// 焦点（refreshLoop 1.5s 轮询回写）。无 app/画布环境（单测）安全降级 no-op。
+// 代价：键盘用户空格切换后焦点环立即消失（Tab 导航不受影响）。
+func unfocusWidget(w fyne.CanvasObject) {
+	app := fyne.CurrentApp()
+	if app == nil || w == nil {
+		return
+	}
+	if cv := app.Driver().CanvasForObject(w); cv != nil {
+		cv.Unfocus()
+	}
+}
+
 // qiText 构造 canvas.Text（字色/字号/等宽显式给出）
 func qiText(text string, size float32, col color.Color, mono, bold bool) *canvas.Text {
 	t := canvas.NewText(text, col)
@@ -671,8 +689,12 @@ func (r *bookRow) set(pos int, row BookRow, selected bool) {
 		r.content.StrokeColor = stroke
 	}
 
-	// 状态三态着色（2026-11-02 用户定稿：启用绿 / 禁用红 / 坏库红）
+	// 状态三态着色（2026-11-02 用户定稿：启用绿 / 禁用红 / 坏库红）。
+	// ⚠ 后缀 = 打开时探测到格式警示（无索引等，全文见日志；查询照常进行）
 	status := "启用"
+	if row.Warn != "" {
+		status = "启用 ⚠"
+	}
 	st := qiJade
 	switch {
 	case row.Status != "":

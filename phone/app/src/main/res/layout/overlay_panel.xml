@@ -62,7 +62,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="4dp"
-            android:text="识别中" />
+            android:text="@string/recognizing_status" />
 
         <!-- 优势行：红方优势 +0.8（我方视角：占优玉 / 劣势警示红） -->
         <TextView
@@ -212,6 +212,17 @@
             android:layout_height="23dp"
             android:layout_marginTop="2dp"
             android:text="详情" />
+
+        <!-- 截屏（2026-11-07）：临时撤两窗 FLAG_SECURE 让系统截屏可拍全屏，
+             10 秒后自动恢复——右列加按钮后总高 171dp 仍矮于棋盘 185dp，
+             面板整体高度不变 -->
+        <TextView
+            android:id="@+id/overlay_btn_screenshot"
+            style="@style/OverlayAction"
+            android:layout_width="match_parent"
+            android:layout_height="23dp"
+            android:layout_marginTop="2dp"
+            android:text="截屏" />
 
     </LinearLayout>
 </LinearLayout>

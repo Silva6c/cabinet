@@ -274,3 +274,65 @@ func TestSmartWarmupExempt(t *testing.T) {
 		t.Fatalf("warmup 未豁免早停（首条 stop 在第 2 次 position 之前）: %v", cmds)
 	}
 }
+
+// TestSmartEarlyStopFlag 早停标记透出（2026-11-13 沉淀过滤依据）：早停收束的
+// Result.EarlyStopped=true（自然收束/超时强停为 false）——enginePump 据此跳过
+// 沉淀写入，浅终值不再固化成"历史最优"复播。
+func TestSmartEarlyStopFlag(t *testing.T) {
+	e, fe, events := newTestEngine(t, false)
+	e.searchTimeout = smartTestTimeout
+	smartRun(t, e)
+	e.SetSmart(true)
+	fe.goScript = func(goCmd string, nth int32) {
+		smartStableStream(fe, 10, 15, 120, false)
+		fe.write("bestmove " + smartScriptBest)
+	}
+	waitState(t, e, events, StateReady)
+	smartWaitWarmup(t, fe)
+	e.Request(smartStableFEN)
+	res := smartResult(t, events, smartStableFEN)
+	if res.BestMove != smartStopBest {
+		t.Fatalf("早停应命中: %s", res.BestMove)
+	}
+	if !res.EarlyStopped {
+		t.Fatal("早停收束的 Result.EarlyStopped 应为 true")
+	}
+}
+
+// TestSmartMultiPVExempt 单次三变豁免早停（2026-11-13：早停判据对 MultiPV=3
+// 的 info 流第 1 线照样命中，三变被收束在 depth 11-12——用户显式要的多线
+// 解析必须跑满深度）+ 多线请求永不复用 TT（每轮强制清表保证新鲜搜索，
+// 消"缓存秒回同果"）。同稳定脚本下三变请求不应发出 stop，bestmove=脚本
+// 尾包自然收束着法，且本轮带 Clear Hash。
+func TestSmartMultiPVExempt(t *testing.T) {
+	e, fe, events := newTestEngine(t, false)
+	e.searchTimeout = smartTestTimeout
+	smartRun(t, e)
+	e.SetSmart(true)
+	fe.goScript = func(goCmd string, nth int32) {
+		smartStableStream(fe, 10, 15, 120, false)
+		fe.write("bestmove " + smartScriptBest)
+	}
+	waitState(t, e, events, StateReady)
+	smartWaitWarmup(t, fe)
+	before := smartCmdCount(fe, "setoption name Clear Hash")
+	e.RequestMultiPV(smartStableFEN, 3)
+	res := smartResult(t, events, smartStableFEN)
+	if res.BestMove != smartScriptBest {
+		t.Fatalf("三变应豁免早停（自然收束尾包）: %s", res.BestMove)
+	}
+	if res.EarlyStopped {
+		t.Fatal("三变请求不得置 EarlyStopped")
+	}
+	// 豁免后跑满脚本层到 15（早停会在 depth 10-12 拦下）——脚本尾包 bestmove
+	// 前收到过 depth 15 的 info 即为跑满的间接证据：fake 收到的 go depth 与
+	// info 序列无法直接对账，用 stop 数量兜底（豁免请求全程 0 stop）
+	if n := smartCmdCount(fe, "stop"); n != 0 {
+		t.Fatalf("三变全程不应发出 stop（早停豁免）, got %d", n)
+	}
+	// 强制清表：本轮应带一次 Clear Hash
+	after := smartCmdCount(fe, "setoption name Clear Hash")
+	if after != before+1 {
+		t.Fatalf("多线请求应强制清 TT（Clear Hash %d→%d）", before, after)
+	}
+}

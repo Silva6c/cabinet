@@ -58,8 +58,15 @@ class SuggestionAggregator(private val maxCandidates: Int = 5) {
             // 同槽覆盖=旧着法掉出当前排名即淘汰；时间戳随新帧刷新
             slots[rank] = sug to now
             val sorted = slots.entries.sortedBy { it.key }
-            candidates = sorted.map { it.value.first }
-            arrivedList = sorted.map { it.value.second }
+            // bestMove 去重（2026-11-14 红队第二轮，修正"按 bestMove 去重"注释
+            // 与实现不符）：异步云库/残局迟到帧（序号缺省落槽 1）可能与引擎某线
+            // 同着法——不去重会占两个槽，"变招"在两条相同着法间空转，无分帧还令
+            // 优势行在"有分/无分"间闪烁。按序号升序保留先到（高排名=实力序权威），
+            // 重复着法淘汰。
+            val seen = HashSet<String>()
+            val deduped = sorted.filter { seen.add(it.value.first.bestMove) }
+            candidates = deduped.map { it.value.first }
+            arrivedList = deduped.map { it.value.second }
         }
     }
 

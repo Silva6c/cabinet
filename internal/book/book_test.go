@@ -102,8 +102,12 @@ func TestHashVectors(t *testing.T) {
 	}
 }
 
-// TestQueryVectors 查询结果一致性：Go 查库的命中/最佳着法/候选序列/评分
-// 必须与 Java 端向量完全一致（桔库缺失时 Skip）。
+// TestQueryVectors 查询结果一致性：Go 原键单查（rawQuery+正序解码，即
+// Java BHOpenBook 的逐字语义）的命中/最佳着法/候选序列/评分必须与 Java 端
+// 向量完全一致（桔库缺失时 Skip）。
+// 注：生产 Query 自 2026-11-04 起为双键并查+形态择优（原键行优先+镜像键
+// 同构建议兜底），命中面是向量语义的超集——向量锚定职责收窄到"原键行集"
+// 与 Java 对表，拼库新语义由 moveswap_test.go 独立锚定。
 func TestQueryVectors(t *testing.T) {
 	paths := bookPaths(t)
 	vectors := loadVectors(t)
@@ -118,26 +122,32 @@ func TestQueryVectors(t *testing.T) {
 
 	for _, v := range vectors {
 		t.Run(v.Case, func(t *testing.T) {
-			res, _, err := store.Query(v.Hash)
-			if err != nil {
-				t.Fatal(err)
+			// FEN 形态防呆（向量 FEN 刻意含非法局面，解析失败即向量/解析器失真）
+			if _, _, err := ParseFEN(v.FEN); err != nil {
+				t.Fatalf("FEN 解析失败: %v", err)
 			}
-			if res.Hit != v.Hit {
-				t.Fatalf("命中不一致: got %v want %v", res.Hit, v.Hit)
+			// 原键单查：Java 向量的权威语义（正序位义、无过滤）
+			raws := store.books[0].rawQuery(v.Hash, false)
+			hit := len(raws) > 0
+			if hit != v.Hit {
+				t.Fatalf("命中不一致: got %v want %v", hit, v.Hit)
 			}
 			if !v.Hit {
 				return
 			}
-			if res.BestMove != v.BestMove {
-				t.Fatalf("最佳着法不一致: got %q want %q", res.BestMove, v.BestMove)
-			}
-			if len(res.Moves) != len(v.Moves) {
-				t.Fatalf("候选数不一致: got %d want %d", len(res.Moves), len(v.Moves))
+			if len(raws) != len(v.Moves) {
+				t.Fatalf("候选数不一致: got %d want %d", len(raws), len(v.Moves))
 			}
 			for i, m := range v.Moves {
-				g := res.Moves[i]
+				g := MoveRec{
+					Move:    VmoveToUcci(raws[i].vmove),
+					Score:   raws[i].score,
+					WinRate: raws[i].winRate,
+					Draw:    int(raws[i].draw),
+					Lost:    int(raws[i].lost),
+				}
 				if g.Move != m.Move || g.Score != m.Score || g.Draw != m.Draw || g.Lost != m.Lost {
-					t.Fatalf("候选[%d]不一致:\n got %+v\nwant %+v", i, g, m)
+					t.Fatalf("候选[%d]不一致: got %+v want %+v", i, g, m)
 				}
 				// 胜率浮点：Java double 与 SQLite REAL 双精度同源，精确比较即可
 				if g.WinRate != m.WinRate {
@@ -171,11 +181,11 @@ func TestMissNotError(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	hash, _, err := FENHash("4k4/9/9/9/9/9/9/9/9/4K4 w - - 0 1")
+	hash, bd, redGo, err := FENHash("4k4/9/9/9/9/9/9/9/9/4K4 w - - 0 1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, name, err := store.Query(hash)
+	res, name, err := store.Query(hash, bd, redGo)
 	if err != nil {
 		t.Fatalf("未命中不应返回错误: %v", err)
 	}
@@ -205,11 +215,11 @@ func TestMultiBookPriority(t *testing.T) {
 	}
 
 	// 光帅局面：第一库（桔库）未命中 → 回退第二库命中
-	hash, _, err := FENHash("4k4/9/9/9/9/9/9/9/9/4K4 w - - 0 1")
+	hash, bd, redGo, err := FENHash("4k4/9/9/9/9/9/9/9/9/4K4 w - - 0 1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, name, err := store.Query(hash)
+	res, name, err := store.Query(hash, bd, redGo)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,8 +231,8 @@ func TestMultiBookPriority(t *testing.T) {
 	}
 
 	// 起始局面：两库都可能命中 → 必须取第一库（桔库）结果
-	hash2, _, _ := FENHash("rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1")
-	_, name2, err := store.Query(hash2)
+	hash2, bd2, redGo2, _ := FENHash("rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1")
+	_, name2, err := store.Query(hash2, bd2, redGo2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,12 +265,13 @@ func makeMiniBook(t *testing.T, path string) {
                    [vindex] INTEGER)`); err != nil {
 		t.Fatal(err)
 	}
-	hash, _, err := FENHash("4k4/9/9/9/9/9/9/9/9/4K4 w - - 0 1")
+	hash, _, _, err := FENHash("4k4/9/9/9/9/9/9/9/9/4K4 w - - 0 1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	// vmove：h9e9（帅五平四式旁着，编码仅验证解码链路；值任意合法即可）
-	vmove := c90Of("e9")<<8 | c90Of("h9")
+	// vmove：e0f0（红帅五平四，真实合法着法——2026-11-03 起点过滤生效后，
+	// 起点非行棋方棋子的行会被当脏行丢弃，测试数据必须可走）
+	vmove := c90Of("f0")<<8 | c90Of("e0")
 	if _, err := db.Exec(
 		"insert into bhobk(vkey, vmove, vscore, vwin, vdraw, vlost, vvalid) values(?,?,?,?,?,?,1)",
 		hash, vmove, 10, 0.62, 3, 1); err != nil {
@@ -293,10 +304,10 @@ func TestParseFEN_RowWidth(t *testing.T) {
 // FENHash 测试专用入口：FEN → 查询键，不做合法性校验。Zobrist 哈希向量的
 // 用例刻意包含两将照面等非法局面（与 Java 端逐字比对），不能走 Validated
 // 版——此函数只服务于本文件，不进生产构建（生产一律 FENHashValidated）。
-func FENHash(fen string) (int64, bool, error) {
+func FENHash(fen string) (int64, Board, bool, error) {
 	b, redGo, err := ParseFEN(fen)
 	if err != nil {
-		return 0, false, err
+		return 0, Board{}, false, err
 	}
-	return GetZobrist(b, redGo), redGo, nil
+	return GetZobrist(b, redGo), b, redGo, nil
 }

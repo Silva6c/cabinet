@@ -55,6 +55,9 @@ class AssistActivity : AppCompatActivity() {
     companion object {
         /** 自定义主页背景文件（filesDir 下；存在即启用，删除即恢复默认） */
         private const val BG_FILE = "home_background.jpg"
+        /** 证书指纹入口两态的公共前缀（尾缀 ⌄/› 区分展开收起；xml 首帧收起态
+         *  走 @string/fp_entry_collapsed） */
+        private const val FP_ENTRY = "证书指纹（可选，扫码自动填入）"
     }
 
     private var captureIntentCode = -1
@@ -133,17 +136,31 @@ class AssistActivity : AppCompatActivity() {
         ActivityResultContracts.GetContent()
     ) { uri ->
         if (uri == null) return@registerForActivityResult
-        try {
-            saveScaledBackground(uri)
-            applyBackground()
-            Toast.makeText(this, "主页背景已更新", Toast.LENGTH_SHORT).show()
-        } catch (t: Throwable) {
-            android.util.Log.w("AssistActivity", "bg pick failed uri=$uri", t)
-            Toast.makeText(this, "背景设置失败：${t.javaClass.simpleName}: ${t.message}", Toast.LENGTH_LONG).show()
-        }
+        // 解码/裁剪/JPEG 写盘全在后台线程（大图压缩主线程会卡秒级），结果提示
+        // 回主线程；applyBackground 内部另起线程贴图，保存成功与背景浮现异步完成
+        Thread {
+            try {
+                saveScaledBackground(uri)
+                applyBackground()
+                runOnUiThread {
+                    Toast.makeText(this, "主页背景已更新", Toast.LENGTH_SHORT).show()
+                }
+            } catch (t: Throwable) {
+                android.util.Log.w("AssistActivity", "bg pick failed uri=$uri", t)
+                runOnUiThread {
+                    Toast.makeText(this, "背景设置失败：${t.javaClass.simpleName}: ${t.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }.start()
     }
 
-    /** 应用内扫码连接：扫电脑端"连接二维码"（cabinet://connect?u=…&k=…&f=…）自动填入连接参数 */
+    /** 应用内扫码连接：扫电脑端"连接二维码"（cabinet://connect?u=…&k=…&f=…）
+     *  自动填入连接参数。免确认直导入（2026-11-15 用户拍板"秒命中"）：用户主动
+     *  开相机对准自家电脑控制台二维码，属可信入口——vc59 红队加的确认框对两
+     *  入口一律弹出，实测体感"扫码费劲"。唯一例外 = 二维码不带指纹（f 空）而
+     *  本地已存非空指纹：静默导入会无告警地清掉指纹锁定（安全降级），此形态
+     *  弹一次确认。深链入口不受影响（exported 可被任意应用/网页伪造，确认框
+     *  保留，见 maybeHandleConnectIntent）。 */
     private val scanLauncher = registerForActivityResult(ScanContract()) { result ->
         val text = result.contents?.trim().orEmpty()
         if (text.isEmpty()) return@registerForActivityResult  // 用户取消扫码
@@ -152,7 +169,13 @@ class AssistActivity : AppCompatActivity() {
             Toast.makeText(this, "不是有效的内阁连接二维码", Toast.LENGTH_LONG).show()
             return@registerForActivityResult
         }
-        applyConnectParams(params)
+        val fpDowngrade = params.fingerprint.isEmpty() &&
+            etServerFingerprint.text.toString().trim().isNotEmpty()
+        if (fpDowngrade) {
+            confirmConnectParams(params)
+        } else {
+            applyConnectParams(params)
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -180,8 +203,7 @@ class AssistActivity : AppCompatActivity() {
         fpToggle.setOnClickListener {
             val show = etServerFingerprint.visibility != View.VISIBLE
             etServerFingerprint.visibility = if (show) View.VISIBLE else View.GONE
-            fpToggle.text = if (show) "证书指纹（可选，扫码自动填入）⌄"
-                           else "证书指纹（可选，扫码自动填入）›"
+            fpToggle.text = if (show) "${FP_ENTRY}⌄" else "${FP_ENTRY}›"
         }
 
         // 主页背景自定义：图库选图 / 恢复默认（应用内私有文件持久化，无需存储权限）
@@ -280,8 +302,10 @@ class AssistActivity : AppCompatActivity() {
         findViewById<Button>(R.id.btn_scan_connect).setOnClickListener {
             val opts = ScanOptions()
             opts.setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-            opts.setPrompt("对准电脑端控制台显示的连接二维码")
-            opts.setBeepEnabled(false)
+            opts.setPrompt("靠近些（20-30cm）、正对屏幕扫连接二维码\n命中会提示音并自动返回")
+            // 命中提示音（2026-11-17 扫码五件套）：扫码期间无声无震动，用户
+            // 无法区分"没对准"和"已在解码"——命中音是"扫没扫上"的唯一即时反馈
+            opts.setBeepEnabled(true)
             opts.setOrientationLocked(true)
             // 自定义扫码页：TRY_HARDER + 仅 QR + 连续对焦——扫电脑屏幕二维码
             // （远距/小码/斜角）默认参数单帧识别率低，识别明显偏慢
@@ -292,7 +316,10 @@ class AssistActivity : AppCompatActivity() {
         // 关于：功能说明/连接提示/使用步骤/合规声明（原主页小字收纳于此）
         findViewById<TextView>(R.id.btn_about).setOnClickListener { showAbout() }
 
-        bindService(Intent(this, ScreenAssistService::class.java), connection, Context.BIND_AUTO_CREATE)
+        // bindService 返回值即置位：onDestroy 早于 onServiceConnected 时
+        // （快速进出主页）bound 若仍 false 会漏 unbind，ServiceConnection 泄漏
+        // 直至进程死（2026-11-04 审查修复）
+        bound = bindService(Intent(this, ScreenAssistService::class.java), connection, Context.BIND_AUTO_CREATE)
 
         // 扫码配对：系统相机扫 PC 端"连接二维码"后点链接（cabinet:// 深链）进入本页
         maybeHandleConnectIntent(intent)
@@ -322,7 +349,7 @@ class AssistActivity : AppCompatActivity() {
             return
         }
         // 二维码是配对权威来源：不带 f = PC 端未启用锁定，清空本地旧指纹
-        applyConnectParams(ConnectParams(url, token, data.getQueryParameter("f")?.trim().orEmpty()))
+        confirmConnectParams(ConnectParams(url, token, data.getQueryParameter("f")?.trim().orEmpty()))
     }
 
     /** 连接二维码解析结果：地址 + 令牌 + 证书指纹（空 = 不锁定）。 */
@@ -337,6 +364,32 @@ class AssistActivity : AppCompatActivity() {
         val token = uri.getQueryParameter("k")?.trim().orEmpty()
         if (url.isEmpty() || token.isEmpty()) return null
         return ConnectParams(url, token, uri.getQueryParameter("f")?.trim().orEmpty())
+    }
+
+    /**
+     * 导入连接参数前确认（2026-11-14 红队第二轮）：AssistActivity exported +
+     * BROWSABLE 深链——本地任意应用或网页链接可直接拉起 cabinet://connect
+     * 静默改写服务器地址/令牌/指纹并自动重连（release 的 TLS 指纹锁拦不住
+     * 配置被破坏，用户需重新扫码）。应用前弹确认：展示目标地址与指纹状态，
+     * 取消即丢弃参数。2026-11-15 起仅深链入口必弹；应用内扫码只在"二维码
+     * 不带指纹而本地已锁指纹"的降级形态弹（见 scanLauncher）——用户主动扫
+     * 自家电脑属可信入口，秒命中优先。
+     */
+    private fun confirmConnectParams(p: ConnectParams) {
+        val fp = p.fingerprint.ifEmpty { "未锁定（电脑端未启用指纹校验）" }
+        AlertDialog.Builder(this)
+            .setTitle("导入连接参数")
+            .setMessage(
+                "即将把连接目标改为：\n${p.url}\n\n" +
+                    "证书指纹：$fp\n\n确认导入？导入后当前连接配置将被覆盖。"
+            )
+            .setCancelable(true)
+            .setPositiveButton("导入") { d, _ ->
+                d.dismiss()
+                applyConnectParams(p)
+            }
+            .setNegativeButton("取消") { d, _ -> d.dismiss() }
+            .show()
     }
 
     /** 填入连接参数（输入即持久化的 TextWatcher 负责保存）；fingerprint 为空=不锁定。 */
@@ -415,7 +468,8 @@ class AssistActivity : AppCompatActivity() {
     }
 
     private val testTimeoutRunnable = Runnable { finishTest(
-        "连接超时：电脑 IP 不可达，或电脑端防火墙未放行 9527（电脑端运行 allow-9527.bat 放行）",
+        "连接超时：电脑 IP 不可达，或电脑端防火墙未放行 " +
+            "${RemoteAnalysisClient.PORT_HINT}（电脑端运行 allow-9527.bat 放行）",
         ok = false) }
 
     // ==================== 免责声明 / 关于 ====================
@@ -465,17 +519,25 @@ class AssistActivity : AppCompatActivity() {
      * 应用主页背景：filesDir 下存在自定义图则用之（统一压暗保证可读），
      * 否则用默认"墨底 + 26dp 细网格"（QiGridDrawable，自绘零图片资产）。
      * 图已按屏幕比例预裁剪（保存时做），这里直接拉伸即可铺满不失真。
+     * 解码与压暗在后台线程（大图 decodeFile + 全图 scrim 重绘会卡主线程首帧），
+     * 回填回主线程碰 View（isFinishing/isDestroyed 防销毁后触碰）。
      */
     private fun applyBackground() {
-        val f = File(filesDir, BG_FILE)
-        val bmp = if (f.exists()) BitmapFactory.decodeFile(f.absolutePath) else null
-        if (bmp != null) {
-            bgScroll.background = BitmapDrawable(resources, withScrim(bmp))
-            setChip(tvChipBg, "自定义图", ChipTone.JADE)
-        } else {
-            bgScroll.background = QiGridDrawable(this)
-            setChip(tvChipBg, "默认棋韵", ChipTone.DIM)
-        }
+        Thread {
+            val f = File(filesDir, BG_FILE)
+            val bmp = if (f.exists()) BitmapFactory.decodeFile(f.absolutePath) else null
+            val scrimmed = bmp?.let { withScrim(it) }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                if (scrimmed != null) {
+                    bgScroll.background = BitmapDrawable(resources, scrimmed)
+                    setChip(tvChipBg, "自定义图", ChipTone.JADE)
+                } else {
+                    bgScroll.background = QiGridDrawable(this)
+                    setChip(tvChipBg, "默认棋韵", ChipTone.DIM)
+                }
+            }
+        }.start()
     }
 
     /**
@@ -549,6 +611,14 @@ class AssistActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        // 测试连接残留清理（2026-11-14 红队第二轮）：10s 超时 Runnable 持本
+        // Activity 引用、testClient 未停——销毁时同步收尾（finishTest 的 UI
+        // 触碰经 btnTestConnect?. 空安全，此处不走它以免销毁后弹 Toast）
+        statusHandler.removeCallbacks(testTimeoutRunnable)
+        testClient?.let { c ->
+            testClient = null
+            runCatching { c.stop() }
+        }
         if (bound) unbindService(connection)
         super.onDestroy()
         // 服务继续运行（前台服务），仅解绑

@@ -71,10 +71,32 @@ func (s *Server) handleSetEngine(c *Conn, m *SetEngine) {
 		// 不以最近局面重搜（无谓重搜是纯算力浪费）
 		return
 	}
-	c.log.Info("远程调节引擎算力", "fields", len(fields),
-		"req_depth", m.Depth, "req_hash_mb", m.HashMB,
-		"req_threads", m.Threads, "req_multi_pv", m.MultiPV)
+	// 请求字段键值（2026-11-09 日志规范修复）：从已解包的 fields 拼键——
+	// 此前直接传 m.Depth 等协议指针字段，slog 对 *int 渲染成指针地址
+	//（实测 req_depth=0x40d6580e080），排障时读不出用户调的档值；指针
+	// nil（未传字段）也不该出现假键。键名保持旧口径（日志检索连续性）
+	args := make([]any, 0, 2+2*len(fields))
+	args = append(args, "fields", len(fields))
+	for _, f := range fields {
+		args = append(args, tuneReqKey(f.kind), f.v)
+	}
+	c.log.Info("远程调节引擎算力", args...)
 	s.reSearchLatest()
+}
+
+// tuneReqKey 请求字段 → 日志键名（与历史日志键对齐：hash/multipv 的
+// 协议字段名与日志键名不同源）。
+func tuneReqKey(kind string) string {
+	switch kind {
+	case "movetime":
+		return "req_movetime_ms"
+	case "hash":
+		return "req_hash_mb"
+	case "multipv":
+		return "req_multi_pv"
+	default:
+		return "req_" + kind
+	}
 }
 
 // TuneEngine 桌面面板调节引擎算力：与协议 §4.10 完全同一条路（校验→应用→
@@ -121,8 +143,12 @@ func (s *Server) validateTune(kind string, v int) string {
 			return fmt.Sprintf("movetime_ms=%d 超出范围（0=按深度，或 500–20000）", v)
 		}
 	case "hash":
-		if v != 0 && (v < 32 || v > 32768) {
-			return fmt.Sprintf("hash_mb=%d 超出范围（0=自动，或 32–32768）", v)
+		// 上限 10240=产品档（控制台面板"10GB 封顶"2026-10-01 用户钉死、手机端
+		// AssistConfig 同 10240）：协议历史口径 32–32768 比产品档宽 3.2 倍，
+		// 一帧 hash_mb=32768 即 32GB 置换表分配——readyok 超时看门狗重启循环且
+		// 值已落盘持久化（2026-11-14 红队第二轮实锤）。服务端统一钳回产品档。
+		if v != 0 && (v < 32 || v > 10240) {
+			return fmt.Sprintf("hash_mb=%d 超出范围（0=自动，或 32–10240）", v)
 		}
 	case "threads":
 		if v != 0 && (v < 1 || v > 64) {
@@ -204,5 +230,8 @@ func (s *Server) reSearchLatest() {
 		s.log.Warn("最近局面引擎不安全，跳过重放（等新局面覆盖）", "fen", want)
 		return
 	}
-	s.eng.Request(want)
+	// 历史随行按能力下发（防三次重复判和）：按局面归属会话取历史链——
+	// 重放的局面就是该会话攒出的序列末端；无归属（PC 重启后）走快照制式
+	id, _ := s.ownerSession.Load().(string)
+	s.requestEngineHistory(want, id, 0)
 }

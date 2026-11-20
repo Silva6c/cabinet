@@ -18,6 +18,7 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -26,8 +27,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
-
-	"cabinet/internal/config"
 )
 
 type cloudEntry struct {
@@ -90,8 +89,7 @@ func (s *Server) cloudLookupFirst(fen string, gen uint64, fallback func()) bool 
 	if !s.cloudEnable.Load() || !s.cloudFirst.Load() {
 		return false // 总开关或优先开关未开：完全现状行为
 	}
-	cb := s.cfg.CloudBook
-	if cb.Endpoint == "" {
+	if s.cloudEndpoint == "" {
 		return false
 	}
 	if e, ok := s.cloudCached(fen); ok {
@@ -101,7 +99,7 @@ func (s *Server) cloudLookupFirst(fen string, gen uint64, fallback func()) bool 
 			// owner。过期命中静默丢弃且维持返回 true（过期局面不再起引擎
 			// 白搜；新局面自会走自己的链）
 			if s.stillCurrent(fen, gen) {
-				s.cloudDeliver(cb, fen, e)
+				s.cloudDeliver(s.cloudEndpoint, fen, e)
 			}
 			return true
 		}
@@ -112,13 +110,13 @@ func (s *Server) cloudLookupFirst(fen string, gen uint64, fallback func()) bool 
 		return false
 	}
 	go func() {
-		e, err := s.cloudQuery(cb, fen)
+		e, err := s.cloudQuery(s.cloudEndpoint, s.cloudAPIKey, fen)
 		if err != nil {
 			// 查询失败（网络抖动/限流/5xx）≠ 端点答"没有"：失败不入缓存——
 			// 入了就是把该 FEN 永久钉死为未命中（缓存 512 条才整表清空），
 			// 网络恢复后也不再查，功能静默退化。防打爆由限流承担，失败
 			// 不缓存没有副作用。
-			s.log.Info("云库查询失败（静默，回落常规链）", "err", err)
+			s.log.Info("云库查询失败（静默，回落常规链）", "err", cloudLogErr(err))
 			if s.stillCurrent(fen, gen) {
 				fallback()
 			}
@@ -130,7 +128,7 @@ func (s *Server) cloudLookupFirst(fen string, gen uint64, fallback func()) bool 
 			// 则放弃下发（新局面自会走自己的链，过期建议只会误导）。代次
 			// 校验（posGen）在 lastFen 之上再拦一道同 FEN 重发的旧帧
 			if s.stillCurrent(fen, gen) {
-				s.cloudDeliver(cb, fen, e)
+				s.cloudDeliver(s.cloudEndpoint, fen, e)
 			}
 			return
 		}
@@ -147,15 +145,14 @@ func (s *Server) cloudLookupAsync(fen string, gen uint64) {
 	if !s.cloudEnable.Load() {
 		return // 运行时开关（PC 面板切换）：查询热路径只读原子位，不碰 cfg
 	}
-	cb := s.cfg.CloudBook
-	if cb.Endpoint == "" {
+	if s.cloudEndpoint == "" {
 		return
 	}
 	if e, ok := s.cloudCached(fen); ok {
 		// 缓存命中（含未命中）直接消费，不限流；下发同样过 stillCurrent
 		// （缓存只是跳过网络，不跳过"最新覆盖"复查——与异步回调对齐）
 		if s.stillCurrent(fen, gen) {
-			s.cloudDeliver(cb, fen, e)
+			s.cloudDeliver(s.cloudEndpoint, fen, e)
 		}
 		return
 	}
@@ -164,10 +161,10 @@ func (s *Server) cloudLookupAsync(fen string, gen uint64) {
 		return // 限流窗口内放弃本次（下一局面再试）
 	}
 	go func() {
-		e, err := s.cloudQuery(cb, fen)
+		e, err := s.cloudQuery(s.cloudEndpoint, s.cloudAPIKey, fen)
 		if err != nil {
 			// 失败不入缓存（理由见 cloudLookupFirst：失败≠端点答"没有"）
-			s.log.Info("云库查询失败（静默）", "err", err)
+			s.log.Info("云库查询失败（静默）", "err", cloudLogErr(err))
 			return
 		}
 		s.cloudStore(fen, e)
@@ -175,7 +172,7 @@ func (s *Server) cloudLookupAsync(fen string, gen uint64) {
 		// 下发，与 cloudLookupFirst 的"最新覆盖"复查对齐（miss 本就被
 		// cloudDeliver 拦下，一起包住无碍）
 		if s.stillCurrent(fen, gen) {
-			s.cloudDeliver(cb, fen, e)
+			s.cloudDeliver(s.cloudEndpoint, fen, e)
 		}
 	}()
 }
@@ -190,14 +187,13 @@ func (s *Server) endgameLookupAsync(fen string, gen uint64) {
 	if !s.endgameEnable.Load() {
 		return // 运行时开关（PC 面板切换）：查询热路径只读原子位，不碰 cfg
 	}
-	cb := s.cfg.CloudBook
-	if cb.Endpoint == "" {
+	if s.cloudEndpoint == "" {
 		return
 	}
 	if e, ok := s.cloudCachedEndgame(fen); ok {
 		// 缓存命中直接消费，不限流；下发过 stillCurrent（与云库缓存路径同口径）
 		if s.stillCurrent(fen, gen) {
-			s.endgameDeliver(cb, fen, e)
+			s.endgameDeliver(s.cloudEndpoint, fen, e)
 		}
 		return
 	}
@@ -206,21 +202,21 @@ func (s *Server) endgameLookupAsync(fen string, gen uint64) {
 		return // 限流窗口内放弃本次（下一局面再试）
 	}
 	go func() {
-		e, err := s.endgameQuery(cb, fen)
+		e, err := s.endgameQuery(s.cloudEndpoint, s.cloudAPIKey, fen)
 		if err != nil {
 			// 失败不入缓存（理由见 cloudLookupFirst：失败≠端点答"没有"）
-			s.log.Info("残局库查询失败（静默）", "err", err)
+			s.log.Info("残局库查询失败（静默）", "err", cloudLogErr(err))
 			return
 		}
 		s.cloudStoreEndgame(fen, e)
 		if s.stillCurrent(fen, gen) {
-			s.endgameDeliver(cb, fen, e)
+			s.endgameDeliver(s.cloudEndpoint, fen, e)
 		}
 	}()
 }
 
 // stillCurrent 局面仍最新判定（云库/残局异步回调的统一下发闸）：代次未变
-// 且 lastFen 未变。lastFen 单独拦"换局面"；代次在 lastFex 之上再拦一道
+// 且 lastFen 未变。lastFen 单独拦"换局面"；代次在 lastFen 之上再拦一道
 // "同 FEN 重发"（force 重分析）——旧局面已在途的异步帧不得追认到新一轮。
 func (s *Server) stillCurrent(fen string, gen uint64) bool {
 	if s.posGen.Load() != gen {
@@ -228,6 +224,22 @@ func (s *Server) stillCurrent(fen string, gen uint64) bool {
 	}
 	want, _ := s.lastFen.Load().(string)
 	return want == fen
+}
+
+// cloudLogErr 云库查询错误脱敏（2026-11-14 红队第二轮）：*url.Error 的
+// Error() 含完整 URL——查询串带 key=<api_key> 与 board=<对局 FEN>，原样进
+// 日志等于把凭据与对局隐私长期落盘（日志滚动压缩后仍保留）。解包取底层错误
+// 并只保留 host。
+func cloudLogErr(err error) string {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		msg := ue.Err.Error()
+		if u, perr := url.Parse(ue.URL); perr == nil && u.Host != "" {
+			msg = u.Host + ": " + msg
+		}
+		return msg
+	}
+	return err.Error()
 }
 
 // tryThrottle 限流窗口占位：CAS 循环实现原子的 check-then-set。直接
@@ -250,12 +262,27 @@ func (s *Server) tryThrottle(last *atomic.Int64, now int64) bool {
 // cloudDeliver 命中下发：走 sendSuggestionToOwner（与引擎建议同一条最新覆盖路由）。
 // 调用方须先校验 lastFen == fen（异步查询窗可达数秒，局面可能已被新 position
 // 取代）——PC 侧不主动发过期局面，不依赖手机端迟到过滤兜底。
-func (s *Server) cloudDeliver(cb config.CloudBookConfig, fen string, e cloudEntry) {
+func (s *Server) cloudDeliver(endpoint, fen string, e cloudEntry) {
 	if !e.hit || e.move == "" || e.move == "null" {
 		return
 	}
-	host := cb.Endpoint
-	if u, err := url.Parse(cb.Endpoint); err == nil && u.Host != "" {
+	// 着法合法性闸（2026-11-14 红队第二轮）：云端响应此前零校验，坏端点返回的
+	// 着法可能对本局面根本走不到——绿箭头直显会误导走子。拦下丢弃（缓存里
+	// 仍是 hit，同局面不重复打外网），见 deliverableMove。
+	if !deliverableMove(fen, e.move) {
+		s.log.Warn("云库命中着法对本局面非法，丢弃", "fen", fen, "best", e.move)
+		return
+	}
+	// 三次重复警示（2026-11-15 实战七问，红队致命项修订）：命中着法走着即
+	// 第三次重复判和时**带 rep_risk 照发而非丢弃**——cloud_first 命中即终、
+	// 没有回落路径，丢弃=该步零建议（复刻 16:05 静默）；循环切断由引擎路径
+	// 的替代重搜接管（engine_pump.go repAvoid），本帧仅如实警示
+	repRisk := false
+	if sid, _ := s.ownerSession.Load().(string); sid != "" && s.moveCausesTripleRep(sid, fen, e.move) {
+		repRisk = true
+	}
+	host := endpoint
+	if u, err := url.Parse(endpoint); err == nil && u.Host != "" {
 		host = u.Host
 	}
 	s.sendSuggestionToOwner(Suggestion{
@@ -264,7 +291,11 @@ func (s *Server) cloudDeliver(cb config.CloudBookConfig, fen string, e cloudEntr
 		Fen:       fen,
 		BestMove:  e.move,
 		Multipv:   1,
+		RepRisk:   repRisk,
 	})
+	if repRisk {
+		s.log.Info("云库命中着法将三次重复判和，带警示照发", "endpoint", host, "fen", fen, "best", e.move)
+	}
 	s.log.Info("云库命中", "endpoint", host, "fen", fen, "best", e.move)
 }
 
@@ -272,12 +303,25 @@ func (s *Server) cloudDeliver(cb config.CloudBookConfig, fen string, e cloudEntr
 // 2026-11-01 登记）。帧形态与 cloud 帧同口径（无 score/pv/depth、multipv 1、
 // fen 恒带）；旧手机 APP 不识别该前缀会落"暂定"分支白等收束帧——手机端
 // fromEndgame 判定必须随本功能同步发版。
-func (s *Server) endgameDeliver(cb config.CloudBookConfig, fen string, e cloudEntry) {
+func (s *Server) endgameDeliver(endpoint, fen string, e cloudEntry) {
 	if !e.hit || e.move == "" || e.move == "null" {
 		return
 	}
-	host := cb.Endpoint
-	if u, err := url.Parse(cb.Endpoint); err == nil && u.Host != "" {
+	// 着法合法性闸（2026-11-14 红队第二轮）：与 cloudDeliver 同口径，见
+	// deliverableMove——残局库是穷举正解风险低，但坏端点/解析错位仍可产出
+	// 走不到的着法，闸下零误伤（正解必合法）。
+	if !deliverableMove(fen, e.move) {
+		s.log.Warn("残局库命中着法对本局面非法，丢弃", "fen", fen, "best", e.move)
+		return
+	}
+	// 三次重复警示（2026-11-15 实战七问）：与 cloudDeliver 同口径——重复正解
+	// 带警示照发不丢弃（丢弃=静默），引擎规避重搜接管循环切断
+	repRisk := false
+	if sid, _ := s.ownerSession.Load().(string); sid != "" && s.moveCausesTripleRep(sid, fen, e.move) {
+		repRisk = true
+	}
+	host := endpoint
+	if u, err := url.Parse(endpoint); err == nil && u.Host != "" {
 		host = u.Host
 	}
 	s.sendSuggestionToOwner(Suggestion{
@@ -286,26 +330,48 @@ func (s *Server) endgameDeliver(cb config.CloudBookConfig, fen string, e cloudEn
 		Fen:       fen,
 		BestMove:  e.move,
 		Multipv:   1,
+		RepRisk:   repRisk,
 	})
+	if repRisk {
+		s.log.Info("残局库命中着法将三次重复判和，带警示照发", "endpoint", host, "fen", fen, "best", e.move)
+	}
 	s.log.Info("残局库命中", "endpoint", host, "fen", fen, "best", e.move)
+}
+
+// trimControl 剥离响应串中的控制字符（含 NUL）与空白。2026-11-07 用户实测：
+// chessdb 残局端点命中响应着法尾部带 \x00（CGI 风格 C 字符串尾缀）——
+// TrimSpace 只认空白不认 NUL，脏字符随帧下发后着法 5 字节，手机端
+// ucciToCells 虽取前 4 字符侥幸可用，但任何字符串等值比对（候选行 suffix、
+// 去重）恒不等，"残局库"文案与琥珀箭头全失灵。源头清洗，两端零防御依赖。
+func trimControl(s string) string {
+	// 先 TrimSpace（保留旧实现剥尾部空白的能力——如 "move: h2e2" 冒号后
+	// 空格），再剥 C0 控制区与 DEL：\x00 尾缀场景 TrimSpace 被 NUL 挡住
+	// 剥不到尾部，故两段叠加
+	s = strings.TrimSpace(s)
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f { // C0 控制区 + DEL：着法词法合法字符最小 '0'
+			return -1
+		}
+		return r
+	}, s)
 }
 
 // cloudQuery 请求端点并解析 queryall 形状的响应：管道分隔的多条
 // "move:xxx,score:n,winrate:f,note:..." 记录取 score 最高者；
 // unknown/error 等无 move 形态一律视为未命中。
-func (s *Server) cloudQuery(cb config.CloudBookConfig, fen string) (cloudEntry, error) {
+func (s *Server) cloudQuery(endpoint, apiKey, fen string) (cloudEntry, error) {
 	// Endpoint 先 Parse 再 Query().Set 组参：字符串拼接在端点自带查询串时
 	// 会拼出 "...?a=b?action=queryall" 的畸形 URL；Parse+Set 对已有参数是
 	// 合并语义，带不带查询串的端点写法都成立
-	u, err := url.Parse(cb.Endpoint)
+	u, err := url.Parse(endpoint)
 	if err != nil {
 		return cloudEntry{}, fmt.Errorf("端点 URL 解析失败: %w", err)
 	}
 	q := u.Query()
 	q.Set("action", "queryall")
 	q.Set("board", fen)
-	if cb.APIKey != "" {
-		q.Set("key", cb.APIKey)
+	if apiKey != "" {
+		q.Set("key", apiKey)
 	}
 	u.RawQuery = q.Encode()
 	resp, err := cloudHTTPClient.Get(u.String())
@@ -333,7 +399,7 @@ func (s *Server) cloudQuery(cb config.CloudBookConfig, fen string) (cloudEntry, 
 			}
 			switch p[0] {
 			case "move":
-				mv = strings.TrimSpace(p[1])
+				mv = trimControl(p[1])
 			case "score":
 				if n, err := strconv.Atoi(strings.TrimSpace(p[1])); err == nil {
 					sc, hasScore = n, true
@@ -357,8 +423,8 @@ func (s *Server) cloudQuery(cb config.CloudBookConfig, fen string) (cloudEntry, 
 // 响应形态：命中为 "egtb:<着法>"（可管道分隔多条，取首条——残局库每局面
 // 一条正解）；unknown / checkmate / stalemate / error 等无 egtb: 形态一律
 // 视为未命中（checkmate/stalemate 是局面状态说明，无着法可下发）。
-func (s *Server) endgameQuery(cb config.CloudBookConfig, fen string) (cloudEntry, error) {
-	u, err := url.Parse(cb.Endpoint)
+func (s *Server) endgameQuery(endpoint, apiKey, fen string) (cloudEntry, error) {
+	u, err := url.Parse(endpoint)
 	if err != nil {
 		return cloudEntry{}, fmt.Errorf("端点 URL 解析失败: %w", err)
 	}
@@ -367,8 +433,8 @@ func (s *Server) endgameQuery(cb config.CloudBookConfig, fen string) (cloudEntry
 	q.Set("endgame", "1")
 	q.Set("egtbmetric", "dtm")
 	q.Set("board", fen)
-	if cb.APIKey != "" {
-		q.Set("key", cb.APIKey)
+	if apiKey != "" {
+		q.Set("key", apiKey)
 	}
 	u.RawQuery = q.Encode()
 	resp, err := cloudHTTPClient.Get(u.String())
@@ -386,7 +452,7 @@ func (s *Server) endgameQuery(cb config.CloudBookConfig, fen string) (cloudEntry
 	for _, rec := range strings.Split(string(body), "|") {
 		rec = strings.TrimSpace(rec)
 		if mv, ok := strings.CutPrefix(rec, "egtb:"); ok {
-			mv = strings.TrimSpace(mv)
+			mv = trimControl(mv)
 			if mv != "" && mv != "null" {
 				return cloudEntry{hit: true, move: mv}, nil
 			}

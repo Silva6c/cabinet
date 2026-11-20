@@ -1,11 +1,14 @@
 package server
 
 import (
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -16,6 +19,7 @@ import (
 
 	"cabinet/internal/config"
 	"cabinet/internal/engine"
+	"cabinet/internal/xq"
 )
 
 // TestCloudQueryParse queryall 形状解析：多记录取 score 最高者；unknown
@@ -25,6 +29,9 @@ func TestCloudQueryParse(t *testing.T) {
 		switch r.URL.Query().Get("board") {
 		case "FEN_A":
 			_, _ = w.Write([]byte("move:h2e2,score:25,winrate:54.08|move:b2e2,score:60,winrate:51.0"))
+		case "FEN_NUL":
+			// 云库端点同源 CGI：着法同样可能带 NUL 尾缀，解析侧统一清洗
+			_, _ = w.Write([]byte("move:h2e2\x00,score:25"))
 		case "FEN_B":
 			_, _ = w.Write([]byte("unknown:unknown"))
 		default:
@@ -35,15 +42,19 @@ func TestCloudQueryParse(t *testing.T) {
 	s := &Server{log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	cb := config.CloudBookConfig{Enable: true, Endpoint: srv.URL}
 
-	e, err := s.cloudQuery(cb, "FEN_A")
+	e, err := s.cloudQuery(cb.Endpoint, cb.APIKey, "FEN_A")
 	if err != nil || !e.hit || e.move != "b2e2" {
 		t.Fatalf("多记录应取最高分 b2e2, got %+v err=%v", e, err)
 	}
-	if e, err = s.cloudQuery(cb, "FEN_B"); err != nil || e.hit {
+	if e, err = s.cloudQuery(cb.Endpoint, cb.APIKey, "FEN_B"); err != nil || e.hit {
 		t.Fatalf("unknown 应为未命中, got %+v err=%v", e, err)
 	}
-	if e, err = s.cloudQuery(cb, "FEN_C"); err != nil || e.hit {
+	if e, err = s.cloudQuery(cb.Endpoint, cb.APIKey, "FEN_C"); err != nil || e.hit {
 		t.Fatalf("error 形态应为未命中, got %+v err=%v", e, err)
+	}
+	// NUL 尾缀着法（2026-11-07 用户对局实测）必须清洗为 4 字符干净着法
+	if e, err = s.cloudQuery(cb.Endpoint, cb.APIKey, "FEN_NUL"); err != nil || !e.hit || e.move != "h2e2" {
+		t.Fatalf("NUL 尾缀应清洗为 h2e2, got %+v err=%v", e, err)
 	}
 }
 
@@ -61,7 +72,7 @@ func TestCloudLookupEndToEnd(t *testing.T) {
 	fb.onRequest = replayNormalSearch
 	url, cleanup, srv := startTestServerWithBridgeS(t, fb)
 	defer cleanup()
-	srv.cfg.CloudBook = config.CloudBookConfig{Enable: true, Endpoint: cloud.URL}
+	srv.cloudEndpoint = cloud.URL
 	srv.SetCloudBookEnable(true) // 运行时开关与 cfg 解耦（PC 面板可热切，2026-10-29）
 
 	ws := dialWS(t, url)
@@ -117,7 +128,7 @@ func TestCloudToggleOff(t *testing.T) {
 	fb.onRequest = replayNormalSearch
 	url, cleanup, srv := startTestServerWithBridgeS(t, fb)
 	defer cleanup()
-	srv.cfg.CloudBook = config.CloudBookConfig{Enable: true, Endpoint: cloud.URL}
+	srv.cloudEndpoint = cloud.URL
 	// 不 SetCloudBookEnable(true)：开关保持关
 
 	ws := dialWS(t, url)
@@ -179,7 +190,7 @@ func TestCloudFirstHit(t *testing.T) {
 	}
 	url, cleanup, srv := startTestServerWithBridgeS(t, fb)
 	defer cleanup()
-	srv.cfg.CloudBook = config.CloudBookConfig{Enable: true, Endpoint: cloud.URL}
+	srv.cloudEndpoint = cloud.URL
 	srv.SetCloudBookEnable(true)
 	srv.SetCloudFirst(true)
 
@@ -228,7 +239,7 @@ func TestCloudFirstMiss(t *testing.T) {
 	fb.onRequest = replayNormalSearch
 	url, cleanup, srv := startTestServerWithBridgeS(t, fb)
 	defer cleanup()
-	srv.cfg.CloudBook = config.CloudBookConfig{Enable: true, Endpoint: cloud.URL}
+	srv.cloudEndpoint = cloud.URL
 	srv.SetCloudBookEnable(true)
 	srv.SetCloudFirst(true)
 
@@ -273,7 +284,7 @@ func TestCloudFirstOff(t *testing.T) {
 	fb.onRequest = replayNormalSearch
 	url, cleanup, srv := startTestServerWithBridgeS(t, fb)
 	defer cleanup()
-	srv.cfg.CloudBook = config.CloudBookConfig{Enable: true, Endpoint: cloud.URL}
+	srv.cloudEndpoint = cloud.URL
 	srv.SetCloudBookEnable(true)
 	// 不 SetCloudFirst(true)：保持默认关
 
@@ -328,8 +339,15 @@ func TestEndgameQueryParse(t *testing.T) {
 		switch q.Get("board") {
 		case "FEN_EG":
 			_, _ = w.Write([]byte("egtb:h2e2"))
+		case "FEN_NUL":
+			// 2026-11-07 用户对局实测：命中响应着法尾部带 NUL（CGI C 字符串
+			// 尾缀）——解析必须剥净，否则脏着法下发后手机端比对全失灵
+			_, _ = w.Write([]byte("egtb:e7e1\x00"))
 		case "FEN_MATE":
 			_, _ = w.Write([]byte("checkmate"))
+		case "FEN_EMPTY":
+			// 空响应体（2026-11-07 实测：chessdb 残局端点对中局重子局面
+			// 回空而非 unknown），模拟之
 		default:
 			_, _ = w.Write([]byte("unknown:unknown"))
 		}
@@ -338,18 +356,27 @@ func TestEndgameQueryParse(t *testing.T) {
 	s := &Server{log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	cb := config.CloudBookConfig{Enable: true, Endpoint: srv.URL}
 
-	e, err := s.endgameQuery(cb, "FEN_EG")
+	e, err := s.endgameQuery(cb.Endpoint, cb.APIKey, "FEN_EG")
 	if err != nil || !e.hit || e.move != "h2e2" {
 		t.Fatalf("egtb: 形态应命中 h2e2, got %+v err=%v", e, err)
 	}
 	if gotAction != "query" || gotEndgame != "1" || gotMetric != "dtm" {
 		t.Fatalf("请求参数不符: action=%s endgame=%s metric=%s", gotAction, gotEndgame, gotMetric)
 	}
-	if e, err = s.endgameQuery(cb, "FEN_MATE"); err != nil || e.hit {
+	if e, err = s.endgameQuery(cb.Endpoint, cb.APIKey, "FEN_MATE"); err != nil || e.hit {
 		t.Fatalf("checkmate（局面状态说明）应为未命中, got %+v err=%v", e, err)
 	}
-	if e, err = s.endgameQuery(cb, "FEN_UNK"); err != nil || e.hit {
+	if e, err = s.endgameQuery(cb.Endpoint, cb.APIKey, "FEN_UNK"); err != nil || e.hit {
 		t.Fatalf("unknown 应为未命中, got %+v err=%v", e, err)
+	}
+	// 空响应体（2026-11-07 实测：chessdb 残局端点对中局重子局面回空而非
+	// unknown）——无 egtb: 形态一律未命中，不得报错。
+	if e, err = s.endgameQuery(cb.Endpoint, cb.APIKey, "FEN_EMPTY"); err != nil || e.hit {
+		t.Fatalf("空响应应为未命中, got %+v err=%v", e, err)
+	}
+	// NUL 尾缀着法（2026-11-07 用户对局实测）必须清洗为 4 字符干净着法
+	if e, err = s.endgameQuery(cb.Endpoint, cb.APIKey, "FEN_NUL"); err != nil || !e.hit || e.move != "e7e1" {
+		t.Fatalf("NUL 尾缀应清洗为 e7e1, got %+v err=%v", e, err)
 	}
 }
 
@@ -367,7 +394,7 @@ func TestEndgameLookupEndToEnd(t *testing.T) {
 	fb.onRequest = replayNormalSearch
 	url, cleanup, srv := startTestServerWithBridgeS(t, fb)
 	defer cleanup()
-	srv.cfg.CloudBook = config.CloudBookConfig{Endpoint: eg.URL}
+	srv.cloudEndpoint = eg.URL
 	srv.SetEndgameEnable(true) // 残局开关独立于云库开关：Enable 关也查残局
 
 	ws := dialWS(t, url)
@@ -415,7 +442,7 @@ func TestEndgameToggleOff(t *testing.T) {
 	fb.onRequest = replayNormalSearch
 	url, cleanup, srv := startTestServerWithBridgeS(t, fb)
 	defer cleanup()
-	srv.cfg.CloudBook = config.CloudBookConfig{Endpoint: eg.URL}
+	srv.cloudEndpoint = eg.URL
 	// 不 SetEndgameEnable(true)：开关保持关
 
 	ws := dialWS(t, url)
@@ -448,7 +475,7 @@ func TestStaleGenDropsCloudFrame(t *testing.T) {
 	fb.onRequest = replayNormalSearch
 	url, cleanup, srv := startTestServerWithBridgeS(t, fb)
 	defer cleanup()
-	srv.cfg.CloudBook = config.CloudBookConfig{Enable: true, Endpoint: cloud.URL}
+	srv.cloudEndpoint = cloud.URL
 	srv.SetCloudBookEnable(true)
 
 	ws := dialWS(t, url)
@@ -502,7 +529,7 @@ func TestCloudFailNotCached(t *testing.T) {
 	defer fail.Close()
 
 	s := &Server{log: slog.New(slog.NewTextHandler(io.Discard, nil)), cfg: &config.Config{}}
-	s.cfg.CloudBook = config.CloudBookConfig{Enable: true, Endpoint: fail.URL}
+	s.cloudEndpoint = fail.URL
 	s.cloudEnable.Store(true)
 	s.posGen.Store(1)
 	s.lastFen.Store("FEN_X")
@@ -533,4 +560,226 @@ func TestCloudFailNotCached(t *testing.T) {
 	s.lastCloudMs.Store(time.Now().UnixMilli() - cloudThrottleMs - 1)
 	s.cloudLookupAsync("FEN_X", 1)
 	waitHit(2)
+}
+
+// TestCloudFirstHitDoesNotQueryEndgame cloud_first 命中即终时不查残局
+// （2026-11-01 口径：残局是补充语义，不参与"命中即终"的抢占——cloudbook.go
+// endgameLookupAsync 注释）。此前该口径无测试锚定。
+func TestCloudFirstHitDoesNotQueryEndgame(t *testing.T) {
+	egHits := make(chan struct{}, 8)
+	eg := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		egHits <- struct{}{}
+		_, _ = w.Write([]byte("egtb:h2e2"))
+	}))
+	defer eg.Close()
+	cloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("move:h2e2,score:25"))
+	}))
+	defer cloud.Close()
+
+	fb := newFakeBridge(engine.StateReady)
+	engineRequests := 0
+	fb.onRequest = func(fb *fakeBridge, fen string) {
+		engineRequests++
+		replayNormalSearch(fb, fen)
+	}
+	url, cleanup, srv := startTestServerWithBridgeS(t, fb)
+	defer cleanup()
+	srv.cloudEndpoint = cloud.URL
+	// 残局端点用另一地址：若被请求必然打到 eg 而非 cloud
+	srv.SetCloudBookEnable(true)
+	srv.SetCloudFirst(true)
+	srv.SetEndgameEnable(true)
+
+	ws := dialWS(t, url)
+	defer ws.Close()
+	handshakeClient(t, ws)
+
+	fen := "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1"
+	_ = ws.WriteJSON(Position{frameBase: frame(TypePosition), Fen: fen, RedGo: true})
+
+	_ = ws.SetReadDeadline(time.Now().Add(3 * time.Second))
+	defer ws.SetReadDeadline(time.Time{})
+	for {
+		m := recvLoop(t, ws, &[]string{})
+		sug, ok := m.(*Suggestion)
+		if !ok {
+			continue
+		}
+		if sug.Source == "cloud:"+srvURLHost(cloud.URL) {
+			break
+		}
+		t.Fatalf("cloud_first 命中时不应有其他来源建议先到：%s", sug.Source)
+	}
+	// 残局端点与引擎都必须零请求（留足异步窗：任何并发路径的残局查询都会到达）
+	time.Sleep(800 * time.Millisecond)
+	select {
+	case <-egHits:
+		t.Fatal("cloud_first 命中即终时残局端点不应被请求")
+	default:
+	}
+	if engineRequests != 0 {
+		t.Fatalf("云库命中后引擎不应被请求，实际 %d 次", engineRequests)
+	}
+}
+
+// TestTryThrottleConcurrent 限流占位的并发原子性：N goroutine 同窗口并发
+// 抢占，恰 1 个成功——CAS 循环若退化为 Load+Store 两段式会被并发绕过。
+func TestTryThrottleConcurrent(t *testing.T) {
+	s := &Server{}
+	now := time.Now().UnixMilli()
+	const n = 32
+	var success atomic.Int32
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if s.tryThrottle(&s.lastCloudMs, now) {
+				success.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	if success.Load() != 1 {
+		t.Fatalf("同窗口并发 %d 次限流抢占应恰 1 次成功，实际 %d 次", n, success.Load())
+	}
+}
+
+// TestCloudDeliverIllegalMoveDropped 着法合法性闸回归（2026-11-14 红队第二轮）：
+// 云端响应此前零校验——坏端点返回对本局面走不到的着法（a9a8 黑车着法，红行棋
+// 开局）必须拦下不下发（绿箭头直显会误导走子）。合法命中链路回归见
+// TestCloudLookupEndToEnd。
+func TestCloudDeliverIllegalMoveDropped(t *testing.T) {
+	cloudHits := make(chan struct{}, 8)
+	cloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cloudHits <- struct{}{}
+		_, _ = w.Write([]byte("move:a9a8,score:25"))
+	}))
+	defer cloud.Close()
+
+	fb := newFakeBridge(engine.StateReady)
+	fb.onRequest = replayNormalSearch
+	url, cleanup, srv := startTestServerWithBridgeS(t, fb)
+	defer cleanup()
+	srv.cloudEndpoint = cloud.URL
+	srv.SetCloudBookEnable(true)
+
+	ws := dialWS(t, url)
+	defer ws.Close()
+	authClient(t, ws)
+
+	fen := "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1"
+	_ = ws.WriteJSON(Position{frameBase: frame(TypePosition), Fen: fen, RedGo: true})
+
+	select {
+	case <-cloudHits:
+	case <-time.After(2 * time.Second):
+		t.Fatal("云库端点从未被请求")
+	}
+	// 引擎建议（source=engine）会正常到达；cloud 前缀帧绝不允许出现
+	_ = ws.SetReadDeadline(time.Now().Add(1500 * time.Millisecond))
+	for {
+		_, data, err := ws.ReadMessage()
+		if err != nil {
+			return // 超时退出：窗口内无 cloud 建议，通过
+		}
+		if m, perr := ParseFrame(data); perr == nil {
+			if sug, ok := m.(*Suggestion); ok && strings.HasPrefix(sug.Source, "cloud:") {
+				t.Fatalf("非法云库着法被下发: %s", data)
+			}
+		}
+	}
+}
+
+// TestCloudLogErrSanitized 错误脱敏单测（2026-11-14 红队第二轮）：*url.Error
+// 的完整 URL 含 key=<api_key> 与 board=<对局 FEN>，脱敏后只剩底层错误+host。
+func TestCloudLogErrSanitized(t *testing.T) {
+	ue := &url.Error{Op: "Get", URL: "https://cloud.example.com/query?board=SECRET_FEN&key=SECRET123",
+		Err: errors.New("context deadline exceeded")}
+	got := cloudLogErr(ue)
+	if strings.Contains(got, "SECRET123") || strings.Contains(got, "key=") || strings.Contains(got, "SECRET_FEN") {
+		t.Fatalf("脱敏失败，凭据/局面外泄: %s", got)
+	}
+	if !strings.Contains(got, "cloud.example.com") || !strings.Contains(got, "context deadline exceeded") {
+		t.Fatalf("脱敏应保留 host 与底层错误: %s", got)
+	}
+	// 非 url.Error 原样透传
+	plain := errors.New("plain failure")
+	if cloudLogErr(plain) != "plain failure" {
+		t.Fatalf("非 url.Error 应原样: %s", cloudLogErr(plain))
+	}
+}
+
+// TestCloudDeliverRepRiskDelivered 云库命中三次重复带警示照发（2026-11-15
+// 实战七问，红队致命项修订）：重复着法**不丢弃**——cloud_first 命中即终无
+// 回落路径，丢弃=该步零建议（复刻 16:05 静默）；带 rep_risk 照发由用户
+// 决断，循环切断由引擎路径替代重搜接管。
+func TestCloudDeliverRepRiskDelivered(t *testing.T) {
+	seeded := make(chan struct{})
+	var hits atomic.Int32
+	cloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		<-seeded // 等测试注入 occ 后再应答：occ 注入晚于 handlePosition 建账、
+		// 早于异步云库响应消费——确定性布景
+		_, _ = w.Write([]byte("move:h2e2,score:25"))
+	}))
+	defer cloud.Close()
+
+	fb := newFakeBridge(engine.StateReady)
+	fb.onRequest = replayNormalSearch
+	url, cleanup, srv := startTestServerWithBridgeS(t, fb)
+	defer cleanup()
+	srv.cloudEndpoint = cloud.URL
+	srv.SetCloudBookEnable(true)
+
+	ws := dialWS(t, url)
+	defer ws.Close()
+	handshakeClient(t, ws)
+
+	fen := "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1"
+	_ = ws.WriteJSON(Position{frameBase: frame(TypePosition), Fen: fen, RedGo: true})
+	// 等云库端点被请求（会话历史已建账），注入 occ 使 h2e2 落局面二现
+	deadline := time.After(2 * time.Second)
+	for hits.Load() == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("云库端点从未被请求")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	Q1, ok := xq.FenAfter(fen, "h2e2")
+	if !ok {
+		t.Fatal("h2e2 推演失败")
+	}
+	srv.histMu.Lock()
+	for id, h := range srv.hist {
+		srv.hist[id] = &sessionHistory{fens: h.fens, moves: h.moves, occ: []string{Q1, fen, Q1}}
+	}
+	srv.histMu.Unlock()
+	close(seeded)
+
+	// 扫描帧流：cloud 前缀建议必须到达且带 rep_risk（引擎建议帧穿插跳过）
+	_ = ws.SetReadDeadline(time.Now().Add(3 * time.Second))
+	found := false
+	for {
+		_, data, err := ws.ReadMessage()
+		if err != nil {
+			t.Fatalf("未收到云库建议帧: %v", err)
+		}
+		m, perr := ParseFrame(data)
+		if perr != nil {
+			continue
+		}
+		if sug, ok := m.(*Suggestion); ok && strings.HasPrefix(sug.Source, "cloud:") {
+			if sug.BestMove != "h2e2" || !sug.RepRisk {
+				t.Fatalf("云库重复着法应带 rep_risk 照发: %s", data)
+			}
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("云库重复着法被丢弃（应照发）")
+	}
 }

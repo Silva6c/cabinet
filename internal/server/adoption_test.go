@@ -1,6 +1,8 @@
 package server
 
 import (
+	"io"
+	"log/slog"
 	"sync"
 	"testing"
 	"time"
@@ -121,7 +123,8 @@ func TestEvaluateAdoption_ResendAndInvalid(t *testing.T) {
 // TestSendSuggestionAnchor 锚点维护：多帧累加、局面切换重建、rank 缺省按 1、
 // 副选帧不覆盖主选分数快照。
 func TestSendSuggestionAnchor(t *testing.T) {
-	srv := &Server{}
+	// 下发路径带"建议下发"留痕日志（2026-11-15 观测补齐），测试桩需给 logger
+	srv := &Server{log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	mk := func(fen, mv string, multipv int) Suggestion {
 		return Suggestion{frameBase: frame(TypeSuggestion), Source: "engine",
 			Fen: fen, BestMove: mv, Multipv: multipv}

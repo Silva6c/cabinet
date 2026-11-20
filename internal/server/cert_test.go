@@ -140,3 +140,50 @@ func TestCertificateFingerprint(t *testing.T) {
 		t.Fatal("空证书链应报错")
 	}
 }
+
+// TestSanHostnamesFixed SAN 固定形态（2026-11-08 用户拍板，业界主流：SAN
+// 与部署环境解耦）——任何主机名/语言/字符集的电脑都不再可能触发 IA5String
+// 编码失败（历史教训：中文电脑名"无序"原样进 SAN 曾致首次启动即退）。
+func TestSanHostnamesFixed(t *testing.T) {
+	got := sanHostnames()
+	if !equalStrings(got, []string{"localhost", certServiceDNS}) {
+		t.Fatalf("SAN 应恒为固定服务名: %v", got)
+	}
+}
+
+// TestGenerateSelfSignedSANFixed 端到端回归：签发结果与主机名无关，SAN
+// 恰为固定服务名（本机主机名无论是什么——ASCII 或中文——都不得混入），
+// 指纹/TLS 链路完全可用。外部用户中文电脑名"无序"的真实故障场景回归。
+func TestGenerateSelfSignedSANFixed(t *testing.T) {
+	dir := t.TempDir()
+	if err := generateSelfSigned(
+		filepath.Join(dir, certFileName), filepath.Join(dir, keyFileName)); err != nil {
+		t.Fatalf("签发失败: %v", err)
+	}
+	cert, err := tls.LoadX509KeyPair(filepath.Join(dir, certFileName), filepath.Join(dir, keyFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !equalStrings(leaf.DNSNames, []string{"localhost", certServiceDNS}) {
+		t.Fatalf("签发证书 SAN 应恒为固定服务名: %v", leaf.DNSNames)
+	}
+	if _, err := CertificateFingerprint(cert); err != nil {
+		t.Fatalf("指纹计算失败: %v", err)
+	}
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}

@@ -24,6 +24,9 @@ max_size_mb = 10
 max_backups = 5
 
 [engine]
+# 实测推荐档（2026-11-11，非默认）：hash_mb=1024 + depth=20 + multi_pv=1；
+# threads 按机器留余量（20 线程机器取 16）；推荐≠默认，默认仍 256/20/1，
+# 受算力红线保护（internal/config/config.go EngineConfig 注释）。
 # 引擎桥开关；关闭时服务退化为无引擎模式（position 回 not_ready）
 enable = true
 # 皮卡鱼可执行文件（官方 universal 构建自带 CPU 特性分发）
@@ -31,7 +34,7 @@ path = "library/engine/pikafish.exe"
 # NNUE 权重（EvalFile）。相对路径按"资源根"解析（exe 目录；便携包为 appdata\），
 # 绝对路径原样使用；资源根解析见 internal/config/root.go
 nnue = "library/nnue/pikafish.nnue"
-# 引擎线程数；0 = 引擎自定（占满物理核）
+# 引擎线程数；0 = 自动（逻辑处理器数的一半，留一半核给系统）
 threads = 0
 # 哈希表大小（MB）；悬浮窗/面板切换后 PC 自动落盘回写本文件（重启保持）
 hash_mb = 256

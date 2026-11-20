@@ -141,6 +141,17 @@ type Position struct {
 	// 每条 position 携带。指针是为了区分"旧手机未告知"（nil）与"明确执黑"（false）
 	// ——语义与 engine/suggestion 的红方视角无关，只给控制台走势面板做展示层换算。
 	MyRed *bool `json:"my_red,omitempty"`
+	// MultiPVOnce 单次多线解析（2026-11-09 双击小棋盘"单次三变解析"）：本条
+	// 局面的引擎搜索以该线数执行且仅此一轮（1–5），不改引擎配置档位（"路数"
+	// 持久值不受扰）。指针区分"未传"与零值；越界值按缺省处理不拦帧。缺省/
+	// 旧 PC 忽略（§7，降级为普通重搜）。语义上隐含 force（跳过桔库/沉淀直达
+	// 引擎——库命中多为单条主选，拿不到引擎多线候选）。
+	MultiPVOnce *int `json:"multi_pv_once,omitempty"`
+	// Manual 手动模式帧（2026-11-10 结构防线配套）：手机端处于紧急手动模式
+	// （用户逐格编辑局面）时置位——编辑增量不受"回合结构"棋理约束（单格
+	// 增删/任意重排都是合法操作），PC 端结构门（PlausiblePair）对本帧跳过。
+	// 缺省/旧 PC 忽略（§7）。
+	Manual bool `json:"manual,omitempty"`
 }
 
 // Score 红方统一视角的评分：CP 与 Mate 只出现其一（协议 §4.5）。
@@ -178,6 +189,13 @@ type Suggestion struct {
 	// 注意：保持 omitempty 形态，TestSuggestionGoldenByteExact 的逐字节
 	// golden 锚样本中本字段恒为零值，锚不变。
 	Cached bool `json:"cached,omitempty"`
+	// RepRisk 主选着法走着即形成第三次重复局面（判和风险）。2026-11-15 实战
+	// 七问新增：引擎/云库/残局路径的三次重复规避不再丢帧（丢弃=静默无指导，
+	// 16:08 实锤复刻），改带本警示照发由用户决断，同时 PC 侧触发一次性 4 线
+	// 替代重搜（engine_pump.go repAvoid 状态机）——选出的替代着法不含本标记。
+	// 可选字段，旧端自动忽略（协议 §7）；omitempty 形态，golden 锚样本恒零值
+	// 锚不变。
+	RepRisk bool `json:"rep_risk,omitempty"`
 }
 
 // ScoreCP 取厘兵分（红方视角；无则 nil）。
@@ -246,8 +264,9 @@ type Bye struct {
 // SetEngine 远程调节引擎算力帧（手机→PC，协议 §4.10）。
 // 全部字段可选（只改要改的字段），指针类型区分"未传"与零值——threads=0
 // 是合法值（自动档）。范围校验（depth 1–40、movetime_ms 0/500–20000、
-// hash_mb 0/32–32768、threads 0/1–64、multi_pv 1–5）在 server.handleSetEngine
-// 做，任一字段越界整帧拒绝。旧端忽略新增字段（协议 §7，无需升版本）。
+// hash_mb 0/32–10240（产品档，2026-11-14 由 32768 钳回）、threads 0/1–64、
+// multi_pv 1–5）在 server.handleSetEngine 做，任一字段越界整帧拒绝。
+// 旧端忽略新增字段（协议 §7，无需升版本）。
 type SetEngine struct {
 	frameBase
 	Depth      *int `json:"depth,omitempty"`
@@ -330,10 +349,11 @@ func ParseFrame(data []byte) (any, error) {
 	}
 	m := newMsg()
 	if err := json.Unmarshal(raw, m); err != nil {
-		// 帧头合法但帧体损坏（非法 JSON 值/字段类型不匹配）时包一层
-		// ErrBadJSON：errorFrameFor 据此落协议 §5 的 bad_json 码，裸错误会
-		// 被误报成 internal
-		return nil, fmt.Errorf("%w: %v", ErrBadJSON, err)
+		// 帧体类型不匹配 → ErrBadFrame（2026-11-14 红队第二轮按协议 §5 修正）：
+		// 外层 json.Unmarshal 已在 DecodeFrame 成功，能走到这里的失败只剩字段
+		// 类型/形状不符——§5 定义"类型错=bad_frame"（手机端 bad_frame 触发自愈
+		// 重探，bad_json 只记日志继续），此前误包 ErrBadJSON 使类型错帧错过自愈
+		return nil, fmt.Errorf("%w: %v", ErrBadFrame, err)
 	}
 	return m, nil
 }

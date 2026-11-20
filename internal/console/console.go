@@ -14,6 +14,7 @@ import (
 	"math"
 	"os"
 	"os/exec"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -22,6 +23,7 @@ import (
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/driver"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
@@ -87,6 +89,8 @@ type BookRow struct {
 	Enabled bool
 	// Status 非空 = 打开失败原因（坏库警示：点击行弹完整原因）
 	Status string
+	// Warn 非空 = 打开时探测到的格式警示（无索引等，全文见日志；查询照常）
+	Warn string
 }
 
 // SugRow 建议流一行快照。
@@ -245,6 +249,14 @@ type Options struct {
 	// UpdateAutoCheckSet 修改启动自检开关（实现侧持久化 console-state.json），
 	// 返回错误消息（空串 = 成功）
 	UpdateAutoCheckSet func(on bool) string
+	// ── 窗口位置记忆（2026-11-20；LoadWindowPos==nil = 功能缺席）──
+	// 只记位置不记尺寸：宽 1020 是设计定稿、高随内容自适应（foldedHeight/
+	// expandedHeight 会覆盖），用户手动拉高的尺寸本来就无法稳定恢复。
+	// LoadWindowPos 读上次保存的主窗位置；ok=false = 无记忆（首启用系统默认位）
+	LoadWindowPos func() (x, y float32, ok bool)
+	// SaveWindowPos 保存主窗位置（刷新循环判位置变化才调用；实现侧落盘
+	// console-state.json，小 JSON 写盘在 fyne 主 goroutine 可承受）
+	SaveWindowPos func(x, y float32)
 }
 
 // console 单例：Run 后由托盘侧经 Show/Quit 访问。
@@ -256,7 +268,28 @@ type Console struct {
 	app  fyne.App
 	win  fyne.Window
 
+	// qrDialog/lastAuthed 连接二维码应用内对话框与配对跳变记忆（2026-11-18
+	// 用户拍板回归主窗内 Dialog 并单例化，见 qr.go）：仅 fyne 主 goroutine
+	// 访问（ShowQR 经 fyne.Do、refresh 由 refreshLoop 经 fyne.Do 投递），无
+	// 并发访问。qrDialog 非 nil = 二维码弹窗开着（单例：已开再点无操作）；
+	// lastAuthed 供 pairingWatch 判认证会话数 0→1 跳变（配对成功自动关窗）
+	qrDialog   dialog.Dialog
+	lastAuthed int
+
 	running atomic.Bool
+	// hidden 主窗口隐藏态（SetCloseIntercept 置位/Show·ShowQR 清零，刷新
+	// goroutine 读——2026-11-09 隐藏降频，见 refreshLoop）
+	hidden atomic.Bool
+
+	// ── 窗口位置记忆（2026-11-20；原生读写实现见 winpos_windows.go）──
+	// fyne v2.8 Window 接口无位置 API（编译期实查），读写走 RunNative+HWND；
+	// RunNative 回调在驱动 goroutine 执行，winPos* 状态跨 goroutine 访问经 mu。
+	// winPosSaved=false = 尚无基线（首次读位置必写盘）；恢复路径会把恢复值
+	// 登记为基线，首轮刷新判重不再重复写盘
+	winPosMu     sync.Mutex
+	winPosSaved  bool
+	winPosSavedX float32
+	winPosSavedY float32
 
 	// 引擎区单元格：普通 kv 格与大数字格统一为 setter 映射（刷新时按 key 回填）；
 	// 大数字格另带后缀小字 setter（"/24"、"n/s"）
@@ -279,6 +312,7 @@ type Console struct {
 	logRich   *widget.RichText // 日志尾部（紧凑渲染：时间+级别着色，见 refreshLog）
 	logSig    string           // 日志文件 size+mtime 签名（refreshLog 防抖：没动整段跳过）
 	logScroll *container.Scroll
+	memSet    func(string) // 内存计量小字 setter（2026-11-07 计量表，见 memwatch 包头）
 	// 库管理（2026-11-01 便当盒重做，仿 03 连接：卡片行点选 + 操作区）
 	bookRowsBox  *fyne.Container // 库数据行列表容器（refreshBooks 重建）
 	stackBooks   *fyne.Container // 列表区（Stack：tapCatcher + fixedTable）
@@ -290,11 +324,8 @@ type Console struct {
 	bookTglBtn   *widget.Button
 	bookDelBtn   *widget.Button // 删除选中库（悬停变红的危险按钮底层，2026-11-02）
 	// 云库开关行（tileBooks 内；CloudBookGet==nil 时不创建）
-	cloudChk  *widget.Check
-	cloudBusy atomic.Bool // 刷新回写 SetChecked 时抑制 OnChanged 回环（fyne SetChecked 会回调）
-	// 云库说明小字（tileBooks caption）：随 cloud_first 切换措辞（cloudLookupFirst
-	// 语义矩阵的 UI 面）——静态文案会在开关切换后失真
-	cloudHintSet   func(string)
+	cloudChk       *widget.Check
+	cloudBusy      atomic.Bool   // 刷新回写 SetChecked 时抑制 OnChanged 回环（fyne SetChecked 会回调）
 	cloudFirstChk  *widget.Check // "默认走云库"（高级面板→开局库；CloudFirstGet==nil 时不创建）
 	cloudFirstBusy atomic.Bool   // 同款回环抑制
 	skipBooksChk   *widget.Check // "不走任何库"（高级面板→开局库；SkipBooksGet==nil 时不创建）
@@ -309,7 +340,6 @@ type Console struct {
 	// 调参区（引擎桥可调时才有）
 	tunerSelects  map[string]*widget.Select // kind → 下拉框
 	tunerBaseOpts map[string][]string       // kind → 基础快捷档（refreshTuner 档外值并入回显用）
-	tunerHint     *widget.Label             // 调参面板提示行（refreshTuner 追加当前思考模式）
 	tunerBusy     atomic.Bool               // 刷新回写 Selected 时抑制 OnChanged 回环
 	smartChk      *widget.Check             // "智能思考"开关（2026-11-02，仅 PC 端；refreshTuner 回写）
 	smartBusy     atomic.Bool               // 回写勾选态时抑制 OnChanged 回环（cloudBusy 同款）
@@ -332,11 +362,20 @@ type Console struct {
 	lastWinSize fyne.Size // 上一次目标尺寸（动画插值起点）
 
 	// 开局库 tile（折叠态常显：收录局面大数字 + 今日命中率 + 明细；均为 canvas.Text setter）
-	bookHeadSet  func(string)  // tile 头部右侧（库名 · 热加载）
+	bookHeadSet  func(string)  // tile 头部右侧（第一库名）
 	bookTotalSet func(string)  // 收录局面大数字
 	bookRateSet  func(string)  // 今日命中率数值（"38%"；无样本 "—"）
-	bookSubSet   func(string)  // 最近更新
 	bookBarSet   func(float32) // 命中率细条取值（0–1）
+	// 命中率查询缓存（2026-11-08 内存排查 S1：每 1.5s 的 Recent(200) 是刷新
+	// 路径最重分配源，降为 10s 一次，见 todayBookRateCached）
+	bookRateVal float32
+	bookRateOK  bool
+	bookRateAt  time.Time
+	// 建议流取数缓存（2026-11-09 内存治理：Recent(50)+CountToday 空载分配
+	// 主导项降为 5s 一次，见 sugCached；清空沉淀时穿透）
+	sugCacheRows  []SugRow
+	sugCacheToday string
+	sugCacheAt    time.Time
 
 	// 检查更新面板（main 接线后才有；控件在 sectionUpdate 构建）
 	updateText      *widget.Label       // 状态结果行（文案由 Checker 生成）
@@ -410,9 +449,18 @@ func Run(opts Options) {
 	// 折叠态窗口：高度按内容实测自适应（foldedHeight），基础区常显无余量空白
 	c.win.Resize(fyne.NewSize(winSizeFolded.Width, c.foldedHeight()))
 	c.lastWinSize = fyne.NewSize(winSizeFolded.Width, c.foldedHeight())
-	// 点 × 隐藏回托盘，不退出（退出只能走托盘菜单）
-	c.win.SetCloseIntercept(func() { c.win.Hide() })
+	// 点 × 隐藏回托盘，不退出（退出只能走托盘菜单）。hidden 供 refreshLoop
+	// 隐藏降频读（2026-11-09 内存治理：隐藏期整套刷新取数 ×6.7 降频）——
+	// atomic 而非 win.Hidden()：后者是 fyne 普通字段，跨 goroutine 读=竞争
+	c.win.SetCloseIntercept(func() {
+		c.hidden.Store(true)
+		c.win.Hide()
+	})
 	c.win.Show() // 服务启动时窗口即显示
+	// 恢复上次窗口位置（2026-11-20 窗口位置记忆）：必须 Show 之后——fyne 建
+	// 窗早期 RunNative 拿不到 HWND（applyDarkTitleBar 雷区实测同款）；恢复值
+	// 同时登记为判重基线，首轮刷新不重复写盘
+	c.restoreWindowPos()
 	// 标题栏随应用主题暗色（不依赖系统浅/深模式）。必须在 Show 之后：fyne 建窗
 	// 时 GL viewport 尚未创建，RunNative 回调拿到 HWND=0 静默空过（雷区实测见
 	// console_windows.go——这也是 vc94 后白条带复现的根因）
@@ -432,8 +480,11 @@ func Show() {
 		return
 	}
 	fyne.Do(func() {
+		c.hidden.Store(false) // 隐藏降频解除（见 refreshLoop）
 		c.win.Show()
 		c.win.RequestFocus()
+		c.refresh() // 隐藏→唤出立即刷新：下个 tick 可能还在 10s 隐藏档上，
+		// 不补这次 refresh 面板最长挂 10s 陈旧数据（2026-11-09 体检 B1）
 	})
 }
 
@@ -446,35 +497,151 @@ func Quit() {
 	fyne.Do(func() { c.app.Quit() })
 }
 
-// ShowQR 显示并聚焦主窗口、弹出连接二维码（托盘"连接二维码"菜单；
-// 跨 goroutine 安全，未运行时空操作）。
+// ShowQR 显示并聚焦主窗口、弹出连接二维码应用内对话框（托盘"连接二维码"
+// 菜单；跨 goroutine 安全，未运行时空操作）。
 func ShowQR() {
 	c := inst
 	if c == nil || !c.running.Load() {
 		return
 	}
 	fyne.Do(func() {
+		c.hidden.Store(false)
 		c.win.Show()
 		c.win.RequestFocus()
 		c.showQRDialog()
+		c.refresh() // 同 Show（体检 B1：隐藏→唤出立即刷新）
 	})
 }
 
-// refreshLoop 定时刷新（1.5s）；取数回调均为只读内存操作，不阻塞 UI。
+// ShowAbout 关于对话框（托盘"关于内阁"菜单；跨 goroutine 安全，未运行时空
+// 操作）。先唤出主窗再弹：dialog 挂在主窗上，窗口隐藏时弹框无宿主可见。
+// 文案口径与 README 一致：只读屏幕只做提示的三条合规红线如实陈述。
+func ShowAbout() {
+	c := inst
+	if c == nil || !c.running.Load() {
+		return
+	}
+	fyne.Do(func() {
+		c.hidden.Store(false)
+		c.win.Show()
+		c.win.RequestFocus()
+		dialog.NewInformation("关于内阁 cabinet",
+			fmt.Sprintf("%s\n\n手机做\"眼睛\"（录屏识别棋盘局面），电脑做\"脑子\""+
+				"（皮卡鱼引擎实时分析），建议经加密链路推回手机悬浮窗。\n"+
+				"开源地址：github.com/Silva6c/cabinet\n许可：GPL-3.0（见随包 LICENSE）。\n\n"+
+				"本项目只读屏幕、只做提示：无自动走子、无点击注入、无无障碍服务。",
+				c.opts.Version), c.win).Show()
+	})
+}
+
+// ── 窗口位置记忆（2026-11-20）：fyne v2.8 Window 接口无位置 API（编译期实查），
+// 读写走 RunNative 拿 HWND 调 user32（Windows 实现见 winpos_windows.go，非
+// Windows 空存根）。只记位置不记尺寸：宽 1020 是设计定稿、高随内容自适应。
+
+// restoreWindowPos 启动恢复上次窗口位置（Run 内 Show 之后调；有记忆时把恢复
+// 值登记为判重基线，首轮 pollWindowPosSave 不重复写盘）。
+func (c *Console) restoreWindowPos() {
+	if c.opts.LoadWindowPos == nil {
+		return
+	}
+	x, y, ok := c.opts.LoadWindowPos()
+	if !ok {
+		return
+	}
+	c.winPosMu.Lock()
+	c.winPosSaved = true
+	c.winPosSavedX, c.winPosSavedY = x, y
+	c.winPosMu.Unlock()
+	c.moveWindowXY(x, y)
+}
+
+// pollWindowPosSave 异步读当前窗口位置，变化才落盘（刷新循环每 1.5s 调用：
+// 位置没动零 IO，拖动后的下一轮捕获）。GetWindowRect、判重与写盘在 RunNative
+// 回调内串行完成——回调在驱动 goroutine 执行，winPos* 状态经 winPosMu 保护。
+func (c *Console) pollWindowPosSave() {
+	if c.opts.SaveWindowPos == nil {
+		return
+	}
+	c.withNativeWindow(func(hwnd uintptr) {
+		x, y, ok := getWindowRectPos(hwnd)
+		if !ok {
+			return
+		}
+		fx, fy := float32(x), float32(y)
+		c.winPosMu.Lock()
+		if c.winPosSaved && fx == c.winPosSavedX && fy == c.winPosSavedY {
+			c.winPosMu.Unlock()
+			return
+		}
+		c.winPosSaved = true
+		c.winPosSavedX, c.winPosSavedY = fx, fy
+		c.winPosMu.Unlock()
+		c.opts.SaveWindowPos(fx, fy) // 小 JSON 写盘（<1ms），回调内可承受
+	})
+}
+
+// moveWindowXY 仅移动主窗位置（恢复路径；Windows 侧 SWP_NOSIZE 不动尺寸）。
+func (c *Console) moveWindowXY(x, y float32) {
+	c.withNativeWindow(func(hwnd uintptr) {
+		setWindowXY(hwnd, int32(x), int32(y))
+	})
+}
+
+// withNativeWindow RunNative 包装：拿主窗 HWND 执行 fn。非原生窗口（fyne
+// 测试渲染）与非 Windows 上下文静默跳过——与 topMostMainWindow 同款容错
+// （qr.go），也是 applyDarkTitleBar 的 Show 后时序雷区的既定处理。
+func (c *Console) withNativeWindow(fn func(hwnd uintptr)) {
+	nw, ok := c.win.(driver.NativeWindow)
+	if !ok {
+		return
+	}
+	nw.RunNative(func(ctx any) {
+		hc, ok := ctx.(driver.WindowsWindowContext)
+		if !ok || hc.HWND == 0 {
+			return
+		}
+		fn(hc.HWND)
+	})
+}
+
+// refreshLoop 定时刷新（可见 1.5s / 隐藏 10s，2026-11-09 内存治理：隐藏后
+// 全套 SQLite 查询/Stat/Sprintf/ReadMemStats 白跑，降频 ×6.7）；取数回调均
+// 为只读内存操作，不阻塞 UI。
 // ticker 跑在后台 goroutine，直接调 refresh 会违反 fyne 单线程 UI 约束；
 // fyne.Do 把 refresh 投递到 fyne 主 goroutine 串行执行（v2.6+ 唯一安全的
 // 跨 goroutine UI 入口），refresh 及其内部全部 setter 因此无需再加锁。
-// 1.5s：状态变化肉眼可感知与空转开销的折中。
+// 1.5s：状态变化肉眼可感知与空转开销的折中。隐藏切换的当期 Reset 目标
+// 间隔——**隐藏→唤出方向的下一个 tick 是 10s 档**（Reset 只影响后续），
+// 唤出立即刷新由 Show/ShowQR 里的 c.refresh() 补（2026-11-09 体检 B1）。
 func (c *Console) refreshLoop() {
-	t := time.NewTicker(1500 * time.Millisecond)
+	t := time.NewTicker(refreshIntervalVisible)
 	defer t.Stop()
+	wasHidden := false
 	for range t.C {
 		if !c.running.Load() {
 			return
 		}
+		hid := c.hidden.Load()
+		if hid != wasHidden {
+			wasHidden = hid
+			if hid {
+				t.Reset(refreshIntervalHidden)
+				continue
+			}
+			t.Reset(refreshIntervalVisible)
+		}
+		if hid {
+			continue
+		}
 		fyne.Do(c.refresh)
 	}
 }
+
+// 刷新间隔（可见/隐藏两档，见 refreshLoop）。
+const (
+	refreshIntervalVisible = 1500 * time.Millisecond
+	refreshIntervalHidden  = 10 * time.Second
+)
 
 // build 组装各分区（便当盒布局，棋韵 §5.3）：
 // 两列 bento（01 引擎 tile——含三枚状态 chip / 02 开局库 tile）→ 03 连接 tile

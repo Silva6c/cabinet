@@ -323,8 +323,11 @@ class OnnxBoardRecognizer(
 
     private fun detectCorners(frame: Frame): FloatArray? {
         val m = poseAffine(frame.width.toFloat(), frame.height.toFloat())
+        // 逆矩阵提前求一次：下方 warp 与角点还原（warp 空间→原图）共用同一份
+        // inv——2026-11-05 前是 warpAffineInto 内部与 :349 各求一次（同矩阵双求逆）
+        val inv = OnnxGeom.invertAffine(m)
         var t = if (profiling) System.nanoTime() else 0L
-        OnnxGeom.warpAffineInto(frame.argb, frame.width, frame.height, m, POSE_INPUT, POSE_INPUT, poseWarpOut)
+        OnnxGeom.warpAffineIntoInv(frame.argb, frame.width, frame.height, inv, POSE_INPUT, POSE_INPUT, poseWarpOut)
         OnnxGeom.normalizeChwInto(poseWarpOut, poseInputArr)
         if (profiling) tPoseWarp += System.nanoTime() - t
         t = if (profiling) System.nanoTime() else 0L
@@ -345,8 +348,7 @@ class OnnxBoardRecognizer(
                 val arrX = drain(tx.floatBuffer, simccX); simccX = arrX
                 val arrY = drain(ty.floatBuffer, simccY); simccY = arrY
                 val kps = OnnxGeom.simccKeypoints(arrX, arrY, 4, POSE_INPUT)
-                // warp 空间坐标逐点逆仿射回原图
-                val inv = OnnxGeom.invertAffine(m)
+                // warp 空间坐标逐点逆仿射回原图（inv 与上方 warp 共用）
                 val out = FloatArray(8)
                 for (i in 0 until 4) {
                     val p = OnnxGeom.applyAffine(inv, kps[2 * i], kps[2 * i + 1])

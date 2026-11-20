@@ -144,6 +144,8 @@ type BookInfo struct {
 	Enabled bool
 	// Status 非空 = 打开失败原因（坏库警示：该库不进查询链，控制台显示）
 	Status string
+	// Warn 非空 = 打开时探测到的格式警示（无索引等；查询照常，全文见日志）
+	Warn string
 }
 
 // Close 关闭当前库集合并置空（进程收尾用）。Store() 此后返回 nil——
@@ -170,9 +172,11 @@ func (m *Manager) Books() []BookInfo {
 
 	entries := map[string]int{}
 	failed := map[string]string{}
+	warns := map[string]string{}
 	if st := m.Store(); st != nil {
 		for _, s := range st.Stats() {
 			entries[s.Name] = s.Entries
+			warns[s.Name] = s.Warn
 		}
 		for _, e := range st.Errors() {
 			failed[e.Name] = e.Err
@@ -197,6 +201,7 @@ func (m *Manager) Books() []BookInfo {
 			Entries: entries[name],
 			Enabled: !disabled[name],
 			Status:  failed[name],
+			Warn:    warns[name],
 		}
 		if fi, err := os.Stat(p); err == nil {
 			info.ModTime = fi.ModTime()
@@ -414,13 +419,26 @@ func (m *Manager) unzipIfNeeded(zipPath string) error {
 	return unzip(zipPath, m.dir)
 }
 
-// unzip 解压 zip 到 dir（只取其中的 SQLite 条目，跳过 macOS 垃圾目录）。
+// unzip 解压预算（2026-11-14 红队第二轮）：zip 无声明上限时的解压炸弹/海量
+// 条目防护——单条与累计解压字节、条目数三重上限。真库体量：桔库 474 万行
+// SQLite 数百 MB，上限留足余量；炸弹在此截断报错。
+const (
+	unzipMaxEntryBytes = 2 << 30 // 单条解压后 2GB
+	unzipMaxTotalBytes = 4 << 30 // 累计解压 4GB
+	unzipMaxEntries    = 32
+)
+
+// unzip 解压 zip 到 dir（只取其中的 .obk 库条目，跳过 macOS 垃圾目录与
+// 其他文件——2026-11-14 红队第二轮收紧：非库条目落进 books 目录只会制造
+// 垃圾，同名覆盖 .obk 更是劫持面）。
 func unzip(zipPath, dir string) error {
 	r, err := zip.OpenReader(zipPath)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = r.Close() }()
+	extracted := int64(0)
+	entries := 0
 	for _, f := range r.File {
 		// 拒绝路径穿越（条目按裸名落盘）；macOS 垃圾目录整族跳过——必须判
 		// 全路径前缀而非 Base：__MACOSX/real.obk 的 Base 是 real.obk，会与
@@ -431,6 +449,17 @@ func unzip(zipPath, dir string) error {
 		name := filepath.Base(f.Name)
 		if name == "" || strings.HasPrefix(name, ".") {
 			continue
+		}
+		if !strings.EqualFold(filepath.Ext(name), ".obk") {
+			continue
+		}
+		// 条目声明大小预检（超限不开流）；LimitReader 防声明与实际不符
+		if f.UncompressedSize64 > unzipMaxEntryBytes {
+			return fmt.Errorf("zip 条目 %q 解压后 %d 字节超单条上限", f.Name, f.UncompressedSize64)
+		}
+		entries++
+		if entries > unzipMaxEntries {
+			return fmt.Errorf("zip 条目数超上限 %d", unzipMaxEntries)
 		}
 		// 显式边界复核（防穿越第二道闸）：目标路径相对目标目录不得带 .. 前缀。
 		// 上方 Base 净化已保证落盘恒在 dir 内，这道闸是纵深——未来有人把
@@ -451,12 +480,20 @@ func unzip(zipPath, dir string) error {
 			_ = rc.Close()
 			return err
 		}
-		_, err = io.Copy(out, rc)
+		// 多读 1 字节判超限：声明小于实际（炸弹伪装小声明）时 LimitReader 兜底
+		n, err := io.Copy(out, io.LimitReader(rc, unzipMaxEntryBytes+1))
 		// 中间清理路径的 Close 错误无从上报（主错误以 io.Copy 为准），显式忽略
 		_ = rc.Close()
 		_ = out.Close()
 		if err != nil {
 			return err
+		}
+		if n > unzipMaxEntryBytes {
+			return fmt.Errorf("zip 条目 %q 解压字节超单条上限", f.Name)
+		}
+		extracted += n
+		if extracted > unzipMaxTotalBytes {
+			return fmt.Errorf("zip 累计解压字节超上限 %d", unzipMaxTotalBytes)
 		}
 	}
 	return nil

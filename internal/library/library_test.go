@@ -4,8 +4,10 @@ import (
 	"archive/zip"
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -174,20 +176,20 @@ func TestOrderingAndDisable(t *testing.T) {
 	}
 }
 
-// TestBadBookStatus 坏库上报：列序不符的假桔库打开失败——Books() 显示
-// Status（原因可读）、不进查询链，其余库照常可用。
+// TestBadBookStatus 坏库上报：缺必需列（vkey/vmove）的假开局库打开失败——
+// Books() 显示 Status（原因可读）、不进查询链，其余库照常可用。
+// 注：列序换位曾是坏库（select * 位置扫描整行错位），2026-11-05 兼容层改按
+// 列名取列后成为合法变体，坏库判据随之收窄为"无含必需列的兼容表"。
 func TestBadBookStatus(t *testing.T) {
 	dir := t.TempDir()
 	makeBook(t, filepath.Join(dir, "good.obk"))
-	// 坏库：vkey/vmove 两列换位（列名齐全但顺序错，Scan 会整行错位的那类）
+	// 坏库：表名像开局库但没有 vkey/vmove 列（自造残库/未来不兼容格式）
 	db, err := sql.Open("sqlite", filepath.Join(dir, "bad.obk"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`CREATE TABLE bhobk (
-		id INTEGER PRIMARY KEY, vmove INTEGER, vkey INTEGER, vscore INTEGER,
-		vwin INTEGER, vdraw INTEGER, vlost INTEGER, vvalid INTEGER,
-		vmemo BLOB, vindex INTEGER)`); err != nil {
+		id INTEGER PRIMARY KEY, foo INTEGER, bar INTEGER)`); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
@@ -385,5 +387,34 @@ func TestBookNameCaseInsensitive(t *testing.T) {
 	}
 	if byName["X"] == "" || byName["plain"] == "" {
 		t.Fatalf("后缀剥离应大小写不敏感（X 而非 X.OBK）: %+v", books)
+	}
+}
+
+// TestUnzipObkOnlyAndBudget 解压收紧回归（2026-11-14 红队第二轮）：非 .obk
+// 条目不再落盘；条目数超上限报错（解压炸弹/海量条目防护）。
+func TestUnzipObkOnlyAndBudget(t *testing.T) {
+	dir := t.TempDir()
+	zipPath := filepath.Join(dir, "lib.obk.zip")
+	entries := map[string][]byte{
+		"real.obk":   []byte("real-content"),
+		"readme.txt": []byte("should-not-land"),
+		"other.db":   []byte("should-not-land"),
+	}
+	for i := 0; i < unzipMaxEntries; i++ { // 恰好越限：32 条 .obk + 1
+		entries[fmt.Sprintf("book%02d.obk", i)] = []byte("x")
+	}
+	makeZip(t, zipPath, entries)
+	err := unzip(zipPath, dir)
+	if err == nil || !strings.Contains(err.Error(), "条目数超上限") {
+		t.Fatalf("条目数超限应报错: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "readme.txt")); err == nil {
+		t.Fatal("非 .obk 条目不应落盘")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "other.db")); err == nil {
+		t.Fatal("非 .obk 条目不应落盘")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "real.obk")); err != nil {
+		t.Fatalf("真库条目应照常解出: %v", err)
 	}
 }

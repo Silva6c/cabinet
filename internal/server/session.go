@@ -26,6 +26,8 @@ var devidRegexp = regexp.MustCompile(`^[0-9a-fA-F]{16,32}$`)
 
 // sanitizeName 设备昵称规整（协议 §4.1）：trim、去控制字符、限长 24 字符。
 // 昵称直进控制台设备列表与手机日志落盘，防御性规整不信任对端自报值。
+// Cc 之外补充 Cf（2026-11-14 红队第二轮）：U+202E（RTL 覆写）/零宽字符等
+// 格式控制符不被 unicode.IsControl 命中，却能视觉重排伪装设备名与日志 tag。
 func sanitizeName(s string) string {
 	s = strings.TrimFunc(s, unicode.IsSpace)
 	runes := make([]rune, 0, 24)
@@ -33,9 +35,10 @@ func sanitizeName(s string) string {
 		if len(runes) >= 24 {
 			break
 		}
-		if !unicode.IsControl(r) {
-			runes = append(runes, r)
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			continue
 		}
+		runes = append(runes, r)
 	}
 	return string(runes)
 }
@@ -59,6 +62,13 @@ func (s *Server) serveWS(w http.ResponseWriter, r *http.Request) {
 		if id, _ := s.ownerSession.Load().(string); id == c.ID {
 			s.ownerSession.Store("")
 		}
+		// 手机日志落盘条目同步清（2026-11-07 按会话分卷重构）：长跑进程的
+		// 会话 ID 只增不减，不清则 phoneLogs 表无限增长
+		s.phoneLogMu.Lock()
+		delete(s.phoneLogs, c.ID)
+		s.phoneLogMu.Unlock()
+		// 局面历史同步清（2026-11-07 防三次重复判和引入，同泄漏考量）
+		s.dropHistory(c.ID)
 		// ownerDev（走势焦点设备键）**故意不清**：它与连接无关（设备键 devKeyOf），
 		// 同一设备重连是新会话但同设备——焦点保留则曲线默认视图无缝续看；焦点
 		// 只随下一条 position 切换（trend.go 分组模型）。走势组本身也不删。
@@ -139,9 +149,15 @@ func (s *Server) handshake(c *Conn, ws *websocket.Conn) bool {
 				} else if m.Devid != "" {
 					c.log.Debug("hello devid 非法（应为 16~32 hex），忽略", "devid", m.Devid)
 				}
+				// 只在首帧 hello 记 Info（2026-11-14 红队第二轮日志收敛）：
+				// 10s 鉴权窗内可无限重发 hello，逐帧 Info 可刷掉真实日志。
+				// 重复 hello 仍按协议覆盖身份，仅不再落日志
+				first := c.Identity().Client == ""
 				c.SetIdentity(id)
-				c.log.Info("客户端 hello", "client", m.Client, "ver", m.Ver,
-					"devid", id.Devid, "name", id.Name, "caps", m.Caps)
+				if first {
+					c.log.Info("客户端 hello", "client", m.Client, "ver", m.Ver,
+						"devid", id.Devid, "name", id.Name, "caps", m.Caps)
+				}
 			}
 		case *Auth:
 			if !ValidateToken(m.Token, s.cfg.Token) {

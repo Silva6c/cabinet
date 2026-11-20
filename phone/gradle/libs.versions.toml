@@ -12,15 +12,21 @@ tensorflowLite = "2.14.0"
 onnxruntimeAndroid = "1.31.1"
 junit = "4.13.2"
 ktlintPlugin = "12.1.0"
+# Android org.json 的 Apache-2.0 拷贝（API 与 Android 侧 org.json 一致），仅测试用
+androidJson = "0.0.20131108.vaadin1"
 
 [libraries]
 androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "coreKtx" }
 androidx-appcompat = { module = "androidx.appcompat:appcompat", version.ref = "appcompat" }
 androidx-activity-ktx = { module = "androidx.activity:activity-ktx", version.ref = "activityKtx" }
 okhttp = { module = "com.squareup.okhttp3:okhttp", version.ref = "okhttp" }
-# 协议层 JVM 测试挂账（2026-10-27）：客户端线程模型（HandlerThread 贯穿构造与
-# 收发）在纯 JVM 单测不可 mock（android.jar stub 抛 not mocked），MockWebServer
-# 全链路测试需 Robolectric 或等 ScreenAssistService 架构拆分批注入线程后再接
+# 协议层 JVM 测试（2026-10-27 挂账、2026-11-04 落地）：mockwebserver/okhttp-tls 与
+# 主 okhttp 同 version.ref 严格同版；HandlerThread/Handler 的 android.jar stub 靠
+# app 模块 testOptions.isReturnDefaultValues 退化为空操作（无真实定时器），org.json
+# stub 由下方 android-json 以真实实现遮蔽——组合见 RemoteAnalysisClientProtocolTest
+okhttp-mockwebserver = { module = "com.squareup.okhttp3:mockwebserver", version.ref = "okhttp" }
+okhttp-tls = { module = "com.squareup.okhttp3:okhttp-tls", version.ref = "okhttp" }
+android-json = { module = "com.vaadin.external.google:android-json", version.ref = "androidJson" }
 zxing-android-embedded = { module = "com.journeyapps:zxing-android-embedded", version.ref = "zxingEmbedded" }
 tensorflow-lite = { module = "org.tensorflow:tensorflow-lite", version.ref = "tensorflowLite" }
 onnxruntime-android = { module = "com.microsoft.onnxruntime:onnxruntime-android", version.ref = "onnxruntimeAndroid" }

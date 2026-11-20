@@ -61,6 +61,7 @@ type Snapshot struct {
 	ReleaseURL string  // Release 页地址（"打开 Release 页"按钮用）
 	Progress   float64 // 下载进度 0–1（非下载态为 0）
 	CanInstall bool    // 当前是否允许"下载并安装"（有新版本且资产带官方校验值）
+	NewDigest  string  // 已解出 .new 的自身 sha256 十六进制串（Apply 换入前重验依据，2026-11-14；非就绪态为空）
 }
 
 // ghRelease / ghAsset 为 GitHub releases API 响应的裁剪结构（只取用到的字段，
@@ -124,6 +125,7 @@ type Checker struct {
 	assetDigest string
 	assetSize   int64
 	progress    float64
+	newDigest   string // 已解出 .new 自身 sha256（2026-11-14 红队第二轮：Apply 换入前重验依据，非就绪态恒空）
 
 	ownerRepo    string
 	apiBase      string // 默认 https://api.github.com；测试注入 httptest 地址
@@ -176,6 +178,7 @@ func (c *Checker) Snapshot() Snapshot {
 		ReleaseURL: c.releaseURL,
 		Progress:   c.progress,
 		CanInstall: c.canInstallLocked(),
+		NewDigest:  c.newDigest,
 	}
 }
 

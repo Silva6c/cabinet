@@ -115,7 +115,127 @@ object AssistBoard {
      * null，轮次卡旧值→悬浮窗一直显示"轮到对方走"且无箭头（用户被迫点"更新"）。
      * 移除兜底同理只数"真移除"（有子→空），目标格误读成另一色子的格不算移除。
      */
+    /**
+     * 回合结构防线（2026-11-10 优势崩塌归因，与 Go 端 xq.PlausiblePair 同源对表）：
+     * 上一确认局面到候选局面必须能被棋理解释——实测崩塌帧：兑子两回合被合成一帧
+     * 但已离场子残留（2 格差="吃自家子"伪非法形状）、三子无落点蒸发（3 格差、
+     * 子数 -3）被确认上行后电脑照常出招。返回 null=通过，非空=拒绝原因。
+     * 无侧并集判据（确认时轮次未定，Go 端为带侧严格版）：
+     *   0 格=同盘（调用方先行相等短路）；1 格=单格残差（目的地漏检/幽灵清理）
+     *   放行；2 格=三形态之一（非吃子 消失+出现 / 吃子 消失+换色 / 悔棋还原
+     *   出现+换色，pseudoMoves 验证——吃自家子在此穿帮）+同型兑子合并帧（双
+     *   消失异色——吃子方+回吃方出发子，接触格 old==new 不产生 diff，兑车最高
+     *   频合法形态）；≥3 格=子数差 ≤0 且 ≤格数-1（c 个被吃子对应 c 个互异出发
+     *   格+至少 1 个共享落子格），子数增加不可能。
+     */
+    fun plausiblePair(old: Array<IntArray>, new: Array<IntArray>): String? {
+        val vanish = mutableListOf<Pair<Int, Int>>()
+        val fill = mutableListOf<Pair<Int, Int>>()
+        val swap = mutableListOf<Pair<Int, Int>>()
+        for (y in 0 until H) for (x in 0 until W) {
+            val o = old[y][x]
+            val n = new[y][x]
+            if (o == n) continue
+            when {
+                o != Piece.EMPTY && n == Piece.EMPTY -> vanish.add(x to y)
+                o == Piece.EMPTY && n != Piece.EMPTY -> fill.add(x to y)
+                else -> swap.add(x to y)
+            }
+        }
+        val cells = vanish.size + fill.size + swap.size
+        if (cells >= 3) {
+            val delta = fill.size - vanish.size // 子数差（负=净减少）
+            if (delta > 0) return "子数 +$delta 不可能（子不会凭空复原）"
+            // 每个被吃子对应一个互异的移动方出发格，落子格可共享（兑子回吃全落
+            // 同一格）→ cells ≥ 被吃子数 + 1。⚠上界是 cells-1 而非 cells-2：
+            // 兑子合并帧（cells=3、子数差 -2）是最高频合法形态，上界错一档会
+            // 整批误拒（与 Go 端 PlausiblePair 同源对表）
+            if (-delta > cells - 1) return "子数差 $delta 超出 $cells 格变化的上限"
+            return null
+        }
+        if (cells == 2) {
+            // 同型兑子合并帧（Go 端带侧严格版同侧 2 格放行形态的无侧镜像）：
+            // 双消失异色=吃子方+回吃方出发子（接触格 old==new 不产生 diff）
+            if (vanish.size == 2 && fill.isEmpty() && swap.isEmpty() &&
+                Piece.isRed(old[vanish[0].second][vanish[0].first]) !=
+                Piece.isRed(old[vanish[1].second][vanish[1].first])) {
+                return null
+            }
+            val from: Pair<Int, Int>
+            val to: Pair<Int, Int>
+            when {
+                vanish.size == 1 && fill.size == 1 -> { from = vanish[0]; to = fill[0] } // 非吃子
+                vanish.size == 1 && swap.size == 1 -> { from = vanish[0]; to = swap[0] } // 吃子
+                fill.size == 1 && swap.size == 1 -> { from = swap[0]; to = fill[0] }     // 悔棋还原
+                else -> return "2 格差非走子形状（消${vanish.size} 增${fill.size} 换${swap.size}）"
+            }
+            // 子型同一性：出发格消失的子必须与落子格出现的子同型（车消失马出现
+            // = 子型置换幻影）
+            if (new[to.second][to.first] != old[from.second][from.first]) {
+                return "2 格差子型置换（出发子与落子不一致）"
+            }
+            // 隐含走子必须伪合法。⚠pseudoMoves 会把阻挡格也列为目标（含自家子），
+            // 吃自家子=幻影帧穿帮点（实测崩塌帧），必须显式验证被吃/还原子与移动方异色
+            if (pseudoMoves(old, from.first, from.second).none { it == to }) {
+                return "2 格差不构成伪合法走子（疑似幻影/错位）"
+            }
+            val moverRed = Piece.isRed(old[from.second][from.first])
+            val victim: Int = when {
+                vanish.size == 1 && swap.size == 1 -> old[to.second][to.first]   // 吃子：被吃子
+                fill.size == 1 && swap.size == 1 -> new[swap[0].second][swap[0].first] // 还原：复原子
+                else -> Piece.EMPTY                                              // 非吃子：无被吃子
+            }
+            if (victim != Piece.EMPTY && Piece.isRed(victim) == moverRed) {
+                return "吃/还原同色子（幻影帧穿帮形状）"
+            }
+            return null
+        }
+        return null // cells == 1 / 0：单格残差与同盘放行（既有语义，与 PC 门对齐）
+    }
+
+    /**
+     * 应用侧悔棋/还原帧的轮次推导（2026-11-10 结构防线配套）：2 格差恰为
+     * "出现+换色、无消失"= 撤销形态（真实走子必含出发格消失）——撤销后由
+     * 回撤子重新行棋，轮次=回撤子颜色。非还原形态返回 null（走 movedSide
+     * 既有推导）。应用内悔棋是真实用户流：此前还原帧轮次卡旧值（红黑同时
+     * 新增 → movedSide null），上行同侧被 PC 结构门拒，重探落 SAME_BOARD
+     * 不重发，建议悬置到下一手。
+     */
+    fun undoRestoreSide(old: Array<IntArray>, new: Array<IntArray>): Boolean? {
+        var fill: Pair<Int, Int>? = null
+        var swap: Pair<Int, Int>? = null
+        for (y in 0 until H) for (x in 0 until W) {
+            val o = old[y][x]
+            val n = new[y][x]
+            if (o == n) continue
+            when {
+                o == Piece.EMPTY && n != Piece.EMPTY ->
+                    if (fill != null) return null else fill = x to y
+                o != Piece.EMPTY && n != Piece.EMPTY && o != n ->
+                    if (swap != null) return null else swap = x to y
+                else -> return null // 任何消失格=非纯还原形态
+            }
+        }
+        if (fill == null || swap == null) return null
+        return Piece.isRed(old[swap.second][swap.first])
+    }
+
     fun movedSide(old: Array<IntArray>, new: Array<IntArray>): Int? {
+        // 纯 fill 守卫（2026-11-13 轮次事故 03:17:43 根治）：真实走子必含出发格
+        // 消失——"空→有子"且无任何消失格的变化（识别漏检子复现）不构成走子证据，
+        // 按新增子颜色翻轮次会把漏检恢复误判成"对方走子"（实测：缺兵盘面被确认后
+        // 兵复现成 1 格纯 fill，movedSide 判红翻 b，错轮次持续 95.5s 到手动更新）。
+        // fill+swap 的悔棋还原形态已在调用点由 undoRestoreSide 先行分流；手动增删
+        // 走 manual 显式翻轮次，均不受扰。
+        var hasFill = false
+        var hasVanish = false
+        for (y in 0 until H) for (x in 0 until W) {
+            val o = old[y][x]
+            val n = new[y][x]
+            if (o == Piece.EMPTY && n != Piece.EMPTY) hasFill = true
+            if (o != Piece.EMPTY && n == Piece.EMPTY) hasVanish = true
+        }
+        if (hasFill && !hasVanish) return null
         var addedSide: Int? = null
         for (y in 0 until H) for (x in 0 until W) {
             val o = old[y][x]
@@ -301,6 +421,22 @@ object AssistBoard {
         var total = 0
         for (c in counts) total += c
         if (total > 32) issues.add("总子数超限:$total")
+        // 兵/卒可达性（2026-11-14 红队第二轮，与 PC fenlegal.go 双端同步）：皮卡鱼
+        // 对不可达兵位直接 CRITICAL 退出进程（实测红兵 y=8 秒崩→看门狗重启循环）。
+        // 触发面：识别把象/车误判成兵（兵数≤5 过数量门）、手动模式倒摆兵。真实
+        // 对局恒满足，零误伤。
+        // 红兵起始线 y=6 只进不退：y≥7 不可达；未过河（y=5..6）只能站起始偶数列
+        //（横移仅过河后才可能）。黑卒镜像：起始线 y=3；y≤2 不可达；y=3..4 非偶列。
+        for (y in 0 until H) for (x in 0 until W) {
+            when (pieces[y][x]) {
+                Piece.WBING -> if (y >= 7 || (y >= 5 && x % 2 != 0)) {
+                    issues.add("红兵位置不可达:($x,$y)")
+                }
+                Piece.BZU -> if (y <= 2 || (y <= 4 && x % 2 != 0)) {
+                    issues.add("黑卒位置不可达:($x,$y)")
+                }
+            }
+        }
         // 两将(帅)照面:同列且中间无子——象棋根本规则。误识别常产出此类非法局面
         // (如把主菜单按钮认成将/帅),此前只被 PC 端拒收,本地却已确认+上行,
         // 状态栏反而报"连接异常"。本地先拦,让 tracker 走不稳定自愈。
@@ -336,11 +472,14 @@ object AssistBoard {
 
     /**
      * NEW_GAME 的开局相似判定（BoardTracker 专用）：完美开局（32/32 逐格一致），
-     * 或恰一格差异且该格恰是开局红车位 (9,7) 被识别成红马——后者覆盖当前
-     * 识别引擎的顽固 (9,7) R→N 错位（历史遗留错位模式）。
+     * 或恰一格差异且该格是开局红车位（y=9 的 x=0/x=8）被识别成红马——覆盖识别
+     * 引擎历史遗留的"红车 R→N 错位"模式。2026-11-14 红队第二轮修正：旧判据写死
+     * 差异格 (x=7,y=9) 并要求该格为红马——开局该格本就是红马，"该格有差异"与
+     * "该格为红马"恒不可同时成立，条件恒假（死分支），承诺的容错从未生效过；
+     * 真实错位格是红车位。
      *
      * ⚠不能放宽成"允许任意一格差异"（count==31 && total==32）：单格置换
-     * （有子格被另一有子格覆盖，如"车平移吃自己的兵位"）与 (9,7) 错位在
+     * （有子格被另一有子格覆盖，如"车平移吃自己的兵位"）与红车错位在
      * 计数上不可区分，BoardTrackerTest 吃子步用例实证会误判新局。精准钉死
      * 差异格位置与子型是唯一安全的容错方式；错位格被训练修复后应整体删除
      * 此特例。
@@ -351,7 +490,7 @@ object AssistBoard {
         if (count != 31) return false
         for (y in 0 until H) for (x in 0 until W) {
             if (pieces[y][x] != startBoard[y][x]) {
-                return y == 9 && x == 7 && pieces[y][x] == Piece.WMA
+                return y == 9 && (x == 0 || x == 8) && pieces[y][x] == Piece.WMA
             }
         }
         return false

@@ -107,7 +107,7 @@ func startTestServerWithS(t *testing.T) (string, func(), *Server) {
 // 用开局局面（合法可过 handlePosition 入口校验；光帅照面局面会被拒）。
 func TestServer_BookMultiCandidates(t *testing.T) {
 	fen := "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1"
-	vkey, _, err := book.FENHashValidated(fen)
+	vkey, _, _, err := book.FENHashValidated(fen)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +175,7 @@ func TestServer_SkipBooks(t *testing.T) {
 		replayNormalSearch(fb, fen)
 	}
 	fen := "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1"
-	vkey, _, err := book.FENHashValidated(fen)
+	vkey, _, _, err := book.FENHashValidated(fen)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,4 +233,66 @@ func TestServer_SkipBooks(t *testing.T) {
 		}
 		break
 	}
+}
+
+// TestServer_BookIllegalCandidateDropped 桔库着法合法性闸回归（2026-11-14 红队
+// 第二轮）：库行脏数据——起点是行棋方子但几何走不到（未过河红兵 e6 横移 d6）——
+// 不得下发不沉淀。vmove 归属判据（book.movePlausible 只查起点归属+终点非行棋
+// 方子）拦不住这类行，deliverableMove 伪合法闸兜住。
+func TestServer_BookIllegalCandidateDropped(t *testing.T) {
+	fen := "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1"
+	vkey, bd, redGo, err := book.FENHashValidated(fen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bookPath := filepath.Join(t.TempDir(), "dirty-book.obk")
+	// 脏行构造：红兵 e6（格子编码 0x33+4+6*16=0x97）→ d6（0x33+3+6*16=0x96）
+	// ——未过河兵横移，伪非法（过河前只进）。起点是行棋方子、终点非行棋方子，
+	// movePlausible 归属判据放行；格子码取 y≤6 保证两段都落在 8 位内。
+	// 表结构逐字同 makeMultiCandBook。
+	db, err := sql.Open("sqlite", bookPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE bhobk([id] INTEGER PRIMARY KEY AUTOINCREMENT,
+                   [vkey] INTEGER,
+                   [vmove] INTEGER,
+                   [vscore] INTEGER,
+                   [vwin] INTEGER,
+                   [vdraw] INTEGER,
+                   [vlost] INTEGER,
+                   [vvalid] INTEGER,
+                   [vmemo] BLOB,
+                   [vindex] INTEGER)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(
+		"insert into bhobk(vkey, vmove, vscore, vwin, vdraw, vlost, vvalid) values(?,?,?,?,?,?,1)",
+		vkey, 0x96<<8|0x97, 30, 0.6, 3, 1); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+
+	store, err := book.OpenStore(slog.New(slog.NewTextHandler(os.Stderr, nil)), bookPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	// 夹具自检：Query 必须命中这条脏行（否则测试空转，守卫未被触及）
+	res, _, qerr := store.Query(vkey, bd, redGo)
+	if qerr != nil || !res.Hit {
+		t.Fatalf("脏行夹具应命中: hit=%v err=%v", res.Hit, qerr)
+	}
+
+	url, cleanup, srv := startTestServerWithS(t)
+	defer cleanup()
+	srv.SetBook(store)
+
+	ws := dialWS(t, url)
+	defer ws.Close()
+	authClient(t, ws)
+	_ = ws.WriteJSON(Position{frameBase: frame(TypePosition), Fen: fen, RedGo: true})
+
+	// 命中链路走到了下发点，但脏行被守卫拦下——窗口内无任何 suggestion
+	assertNoSuggestion(t, ws, time.Second)
 }

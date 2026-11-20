@@ -28,9 +28,12 @@ object RLog {
     /** 因队列满被丢弃的行数累计（发送方经 [takeDropped] 取走补报，让 PC 端知道有缺口） */
     private var droppedCount = 0L
 
-    // SimpleDateFormat 非线程安全：format 固定在 queue 锁内（见 log 体内），
-    // 共享单实例免每线程/每条日志新建格式化器的分配开销
-    private val tsFormat = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
+    // SimpleDateFormat 非线程安全：每线程一个实例（ThreadLocal），格式化在
+    // queue 锁外完成——2026-11-05 前是共享单例 + 锁内 format，临界区含格式化
+    // 是日志热路径的锁竞争点；线程本地后锁内只剩队列增删
+    private val tsFormat = object : ThreadLocal<SimpleDateFormat>() {
+        override fun initialValue() = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
+    }
 
     /**
      * debug 级日志，release 构建下纯短路：logcat 零写入、上行队列零污染
@@ -73,11 +76,11 @@ object RLog {
             Log.WARN -> "W"; else -> "E"
         }
         val full = if (tr != null) "$msg | ${tr.javaClass.simpleName}: ${tr.message}" else msg
+        // 时间戳格式化在锁外：SimpleDateFormat 非线程安全（JVM 明文档），log 被
+        // worker/OkHttp/主线程并发调用——线程本地实例各格式化各的，串行化只留给
+        // 队列操作
+        val line = "${tsFormat.get()!!.format(Date())} $level/$tag: $full"
         synchronized(queue) {
-            // 时间戳格式化必须在锁内：SimpleDateFormat 非线程安全（JVM 明文档），
-            // log 被 worker/OkHttp/主线程并发调用，锁外 format 会损坏内部 Calendar
-            // 状态——轻则时间戳错乱，重则抛异常打断调用方的帧处理链
-            val line = "${tsFormat.format(Date())} $level/$tag: $full"
             if (queue.size >= MAX_QUEUE) {
                 queue.removeFirst()
                 droppedCount++

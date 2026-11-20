@@ -55,6 +55,8 @@ type Options struct {
 	OnActivate func()
 	// OnShowQR "连接二维码"菜单（弹出扫码配对窗口；nil 隐藏该菜单项）
 	OnShowQR func()
+	// OnAbout "关于内阁"菜单（弹出版本与许可信息；nil 隐藏该菜单项）
+	OnAbout func()
 }
 
 // Run 阻塞运行托盘直至退出（systray 内部消息循环）。
@@ -117,6 +119,10 @@ func Run(opts Options) {
 		if opts.OnShowQR != nil {
 			mQR = systray.AddMenuItem("连接二维码", "扫码把连接参数填入手机端")
 		}
+		var mAbout *systray.MenuItem
+		if opts.OnAbout != nil {
+			mAbout = systray.AddMenuItem("关于内阁", "版本与许可信息")
+		}
 		systray.AddSeparator()
 		mQuit := systray.AddMenuItem("退出", "优雅停止服务")
 		go func() {
@@ -137,6 +143,18 @@ func Run(opts Options) {
 					select {
 					case <-mQR.ClickedCh:
 						opts.OnShowQR()
+					case <-stop:
+						return
+					}
+				}
+			}()
+		}
+		if mAbout != nil {
+			go func() {
+				for {
+					select {
+					case <-mAbout.ClickedCh:
+						opts.OnAbout()
 					case <-stop:
 						return
 					}

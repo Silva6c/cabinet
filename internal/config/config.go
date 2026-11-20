@@ -99,6 +99,7 @@ type StoreConfig struct {
 // **2026-10-18 默认 hash_mb=256（最低档）**——用户跑大模型期间内存紧张，
 // 且悬浮窗/面板切换算力时会落盘回写（SetTunePersist 链路），默认值只影响
 // 首次部署与"切换前的起点"，用户改过一次后以落盘值为准。
+// 2026-11-11 用户实测推荐档 hash_mb=1024 + depth=20（仅推荐，不设默认）。
 type EngineConfig struct {
 	// Enable 是否启动引擎桥；false 时服务器退化为 M0 echo 行为
 	Enable bool `toml:"enable"`
@@ -165,6 +166,11 @@ type LogConfig struct {
 	MaxSizeMB int `toml:"max_size_mb"`
 	// MaxBackups 保留的历史日志文件个数
 	MaxBackups int `toml:"max_backups"`
+	// MaxAgeDays 滚动产物保留天数（2026-11-07 用户定"只保留 3 天"：日志
+	// 堆积影响观感）。零值/负值 = 未配置回默认 3 天（与 MaxSizeMB/MaxBackups
+	// 的"零值即默认"口径一致）；要长期保留写大值如 3650。与 MaxBackups
+	// 双闸，lumberjack 命中任一即删
+	MaxAgeDays int `toml:"max_age_days"`
 }
 
 // DefaultBind 默认 WSS 监听地址（单一定义点；allow-9527.bat 的防火墙规则
@@ -181,6 +187,7 @@ func Default() *Config {
 			File:       "logs/cabinet.log",
 			MaxSizeMB:  10,
 			MaxBackups: 5,
+			MaxAgeDays: 3,
 		},
 		Engine: DefaultEngine(),
 		Library: LibraryConfig{
@@ -227,6 +234,11 @@ func Load(path string) (*Config, bool, error) {
 	}
 	if cfg.Log.MaxBackups <= 0 {
 		cfg.Log.MaxBackups = 5
+	}
+	// MaxAgeDays 与 MaxSizeMB/MaxBackups 同口径：零值即默认（旧 toml 无此键
+	// 也回填 3 天，默认行为生效）
+	if cfg.Log.MaxAgeDays <= 0 {
+		cfg.Log.MaxAgeDays = 3
 	}
 	// 路径类空值回填（零值不满足时显式赋默认，见 Config 头部长期约束）：
 	// 旧 toml 显式写空字符串时恢复默认，避免空路径引发运行期怪相。

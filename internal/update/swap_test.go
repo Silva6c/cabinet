@@ -3,6 +3,7 @@ package update
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -30,7 +31,11 @@ func TestApply(t *testing.T) {
 	mustWrite(t, exe, "OLD-VERSION")
 	mustWrite(t, exe+".new", "NEW-VERSION")
 
-	if err := Apply(dir, "app.exe"); err != nil {
+	digest, err := fileSHA256(exe + ".new")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(dir, "app.exe", digest); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	if got := mustRead(t, exe); got != "NEW-VERSION" {
@@ -44,14 +49,17 @@ func TestApply(t *testing.T) {
 	}
 }
 
-// TestApplyRollback 第二步失败（.new 缺失）→ 自动回滚，cur 恢复旧内容。
+// TestApplyRollback .new 缺失 → Apply 报错且 cur 保持旧内容。
+// 说明（2026-11-14 摘要前置重验后）：空摘要走重验拒绝路径；真摘要 + .new 缺失
+// 在 fileSHA256 处即报错——"第二步 rename 失败自动回滚"路径在现行实现下需要
+// .new 在重验后被外部移除才可达（停机窗口攻击面已被摘要收拢），不再单独构造。
 func TestApplyRollback(t *testing.T) {
 	dir := t.TempDir()
 	exe := filepath.Join(dir, "app.exe")
 	mustWrite(t, exe, "OLD-VERSION")
-	// .new 故意不写 → 第二步 rename 必败
+	// .new 故意不写 → 摘要重验即失败
 
-	if err := Apply(dir, "app.exe"); err == nil {
+	if err := Apply(dir, "app.exe", ""); err == nil {
 		t.Fatal("缺 .new 时 Apply 应报错")
 	}
 	if got := mustRead(t, exe); got != "OLD-VERSION" {
@@ -125,5 +133,27 @@ func TestWritable(t *testing.T) {
 	}
 	if err := Writable(filepath.Join(t.TempDir(), "not-exist-dir")); err == nil {
 		t.Fatal("不存在目录应报错")
+	}
+}
+
+// TestApplyDigestMismatch 换入前重验回归（2026-11-14 红队第二轮）：停机窗口内
+// .new 被同目录写权限者替换时 Apply 必须拒绝并删净——摘要随状态机内存传递，
+// 不落盘不受篡改。
+func TestApplyDigestMismatch(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "app.exe")
+	mustWrite(t, exe, "OLD-VERSION")
+	mustWrite(t, exe+".new", "NEW-VERSION")
+
+	// 传入的内容摘要与 .new 实际内容不符（模拟解压后被替换）
+	fake := strings.Repeat("a", 64)
+	if err := Apply(dir, "app.exe", fake); err == nil {
+		t.Fatal("摘要不匹配时 Apply 应拒绝")
+	}
+	if got := mustRead(t, exe); got != "OLD-VERSION" {
+		t.Fatalf("拒绝后 cur 不应变: %q", got)
+	}
+	if _, err := os.Stat(exe + ".new"); !os.IsNotExist(err) {
+		t.Fatal("拒绝后 .new 应已删净")
 	}
 }

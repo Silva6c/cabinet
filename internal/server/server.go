@@ -17,11 +17,29 @@ import (
 )
 
 // EngineBridge server 依赖的引擎能力小接口（engine.Engine 天然满足；
-// 独立成接口便于集成测试注入假引擎）。
+// 独立成接口便于集成测试注入假引擎）。快照制式：Request 只收终局面。
 type EngineBridge interface {
 	Events() <-chan engine.Event
 	Request(fen string)
 	State() string
+}
+
+// HistoryEngine 可选的带历史搜索能力（engine.Engine 实现；测试桩可不实现，
+// server 按能力断言回退快照制式）。curFen=终局面（事件回推口径），UCI 命令
+// 由实现方拼为 `position fen <startFen> moves <moves...>`（vc27 事故教训：
+// 终局面当起点 + 历史当序列 = 非法命令，皮卡鱼直接终止进程）。
+type HistoryEngine interface {
+	RequestHistory(curFen, startFen string, moves []string)
+}
+
+// MultiPVOnceEngine 可选的单次多线搜索能力（engine.Engine 实现；测试桩可不
+// 实现，server 按能力断言回退常规请求）。协议 §4.4 position.multi_pv_once
+// （2026-11-09 双击小棋盘"单次三变解析"）：本条局面以指定线数搜索且仅此
+// 一轮——不改引擎配置档位（"路数"持久值不受扰）。与带历史正交：重复风险
+// 存在时两能力可叠加（带历史的多线请求）。
+type MultiPVOnceEngine interface {
+	RequestMultiPV(fen string, pv int)
+	RequestHistoryMultiPV(curFen, startFen string, moves []string, pv int)
 }
 
 // EngineTuner 运行中可调引擎算力（协议 §4.10 set_engine；engine.Engine 实现）。
@@ -70,12 +88,31 @@ type Server struct {
 	idleTimeout time.Duration
 	// phoneLogMu 手机日志落盘互斥（多连接并发收 log 帧时串行化文件追加）
 	phoneLogMu sync.Mutex
-	// phoneLogPath/phoneLogSeq 单局分卷落盘：当前局文件路径与局号（进程内递增），
-	// 收到手机端"新局开始"分界行即切换下一局文件（一局一文件，检索按局定位）
-	phoneLogPath string
-	phoneLogSeq  int
+	// phoneLogs 每会话当前落盘文件（key=会话 ID；2026-11-07 重构）：
+	// 此前是 Server 级单路径，新会话接入不触发切换——断线重连后的日志
+	// 全部追加进旧文件，文件名日期停留在几天前误导检索；两台手机同时
+	// 连接时还共用一个文件。按会话分文件后各局各设备独立成卷。
+	// 会话注销（hub Unregister）时清条目，防长跑进程表无限增长。
+	phoneLogs map[string]string
+	// phoneLogSeq 局号（进程内递增，重启从 1 重计，见 phoneLogFileName）
+	phoneLogSeq int
+	// histMu/hist 局面历史（2026-11-07 防三次重复判和，per-session）：
+	// 攒集/消费/生命周期见 history.go 包头注释
+	histMu sync.Mutex
+	hist   map[string]*sessionHistory
 	// lastFen 最近一次客户端 position 的 fen（"最新覆盖"：结果按 FEN 匹配下发）
 	lastFen atomic.Value // string
+	// gateRejectPrev/gateRejectCount 结构门自愈放行状态（2026-11-12 vc19 流畅度
+	// 治理）：同一 prev FEN 的连续拒绝计数。第 1 次拒回 bad_frame 给手机自愈重探；
+	// 第 2 次拒同一 prev = prev 大概率是识别坏盘面/force 污染残留，继续拒只会
+	// 死锁（lastFen 停在坏局面，建议断供实测 4.4~27.1s 全靠用户手动"更新"）——
+	// 按识别自愈放行，盘面仍过 FENHashValidated/PositionLegal 兜底（见
+	// handlePosition 结构门块）。force 帧接受时预置 count=1（force 盘面绕过
+	// 结构门可信度未知，下一帧矛盾即达阈值免费自纠，治理 #7/#12 残缺盘面死锁）。
+	// 竞态说明：与 lastFen 同为全局单值，多设备并发 position 的错轮争用后果
+	// 仅为自愈提前/滞后一帧，无害。
+	gateRejectPrev  atomic.Value // string
+	gateRejectCount atomic.Int32
 	// ownerSession 当前局面的归属连接（最近一次有效 position 的会话 ID）：
 	// suggestion 只定向发给它（协议 §4.5 建议路由），多设备互不串台
 	ownerSession atomic.Value // string
@@ -127,6 +164,12 @@ type Server struct {
 	// cloudEnable——开启后对本地库/沉淀未命中的局面另发 action=query&endgame=1
 	// 只查云库残局库（穷举绝对正解）。种子注入 New，运行时以本原子位为准
 	endgameEnable atomic.Bool
+	// cloudEndpoint/cloudAPIKey 云库端点与 key 的构造期快照：UI 回调只切布尔
+	// 开关（原子位），端点/key 无运行期改口——快照成 Server 字段后查询热路径
+	// 对 cfg.CloudBook 零读取，杜绝 UI 写布尔位与 WSS goroutine 整结构体拷贝
+	// 之间的数据竞争（2026-11-04 审查修复）。改端点走 toml + 重启
+	cloudEndpoint string
+	cloudAPIKey   string
 	// lastEndgameMs 残局查询限流时间戳：与开局查询（lastCloudMs）分表——两者
 	// 是不同 action 的独立请求，共享限流会让"每局面先 queryall 占位"把残局
 	// 查询永久饿死；各自 1.5s 对公共端点总频率 ≤2次/1.5s，礼貌性可接受
@@ -136,6 +179,27 @@ type Server struct {
 	// （桔库换库后重分析）时 lastFen 校验拦不住的旧异步帧（库命中已定着、
 	// 在途云帧仍覆盖显示"云库"）被代次拦下
 	posGen atomic.Uint64
+	// lastPositionAt 最近一次收到局面的时刻（UnixMilli；0 = 从未）。供
+	// memwatch 动态 GC 档位的活跃信号（2026-11-09：对局期不得滞留低 GC
+	// 档位，见 memwatch.ActiveProbe）
+	lastPositionAt atomic.Int64
+	// repAvoidFen/repAvoidGen 引擎终值三次重复规避状态机（2026-11-15 实战
+	// 七问；enginePump 单 goroutine 专用字段，无并发访问）：终值着法将判和时
+	// 先照发 rep_risk 警示，替代重搜按 2026-11-17 用户拍板改惰性触发（挂起
+	// repAvoidDelayMs，停留窗口到点才发起；期间任何新局面/清障路径立即作废）。
+	// 绑定局面与代次（posGen 快照）——同局面且代次未变的结果才进替代消费
+	// 分支；任何失效路径（结果被最新覆盖丢弃/他局面终值/引擎状态变化）立即
+	// 清零，防残留把普通终值误当替代消费（红队致命项修订：裸 FEN 键无清障
+	// 会把状态泄漏到下一次触发）
+	repAvoidFen string
+	repAvoidGen uint64
+	// repAvoidSid/repAvoidDue 惰性触发的挂起窗口（同上，pump 专用）：Sid 记
+	// 触发时会话归属（到点重搜取历史链用）；Due 为 nil 时 pump select 的到点
+	// 分支永不就绪（nil channel 天然禁用），置非 nil 即挂起、clearRepAvoid
+	// 置 nil 即停表——到点回调仍在途也无害，fire 侧再按 fen/gen/lastFen 三重
+	// 校验后才真正发起重搜
+	repAvoidSid string
+	repAvoidDue <-chan time.Time
 	// 本轮搜索起始时刻（UnixNano，0 = 空闲）：时间制仪表"用时/上限"的数据源。
 	// enginePump 在最新局面的首条 info 时起表、任意 bestmove/状态变化时停表——
 	// 计在服务端而非引擎包，避免为展示指标动 EngineBridge 接口（测试桩全要跟着改）
@@ -225,6 +289,9 @@ func New(cfg *config.Config, cert tls.Certificate, logger *slog.Logger, eng Engi
 	s.cloudEnable.Store(cfg.CloudBook.Enable) // 面板开关的启动种子（cfg 值仅此一次进入）
 	s.cloudFirst.Store(cfg.CloudBook.CloudFirst)
 	s.endgameEnable.Store(cfg.CloudBook.Endgame)
+	// 端点/key 构造期快照（运行期只读，见字段注释）：cfg.CloudBook 从此零并发读取
+	s.cloudEndpoint = cfg.CloudBook.Endpoint
+	s.cloudAPIKey = cfg.CloudBook.APIKey
 	s.skipBooks.Store(cfg.Engine.SkipBooks)
 	return s
 }

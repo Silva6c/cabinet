@@ -118,6 +118,9 @@ func TestSanitizeName(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"  Pixel 8  ", "Pixel 8"},
 		{"名\x01字\x07测\x1F试", "名字测试"},
+		// Cf 格式控制符（2026-11-14 红队第二轮）：U+202E RTL 覆写 / 零宽空格
+		// 不被 unicode.IsControl 命中，却能视觉重排伪装设备名与日志 tag
+		{"dev\u202Eabc\u200bx", "devabcx"},
 		{strings.Repeat("长", 30), strings.Repeat("长", 24)},
 		{"", ""},
 	}
@@ -148,6 +151,16 @@ func TestDecodeFrame_BadJSON(t *testing.T) {
 	_, _, err := DecodeFrame([]byte("{not json"))
 	if !errors.Is(err, ErrBadJSON) {
 		t.Fatalf("期望 ErrBadJSON, got %v", err)
+	}
+}
+
+// TestParseFrame_TypeMismatchIsBadFrame 协议 §5 对表（2026-11-14 红队第二轮）：
+// 帧体字段类型错（外层 JSON 合法、二次解码类型不符）= bad_frame——手机端
+// bad_frame 触发自愈重探，此前误包 bad_json 只记日志继续，类型错帧错过自愈。
+func TestParseFrame_TypeMismatchIsBadFrame(t *testing.T) {
+	_, err := ParseFrame([]byte(`{"v":1,"t":"position","fen":123}`))
+	if !errors.Is(err, ErrBadFrame) {
+		t.Fatalf("类型错应映射 ErrBadFrame, got %v", err)
 	}
 }
 

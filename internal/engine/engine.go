@@ -15,6 +15,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"cabinet/internal/xq"
 )
 
 // Options 引擎配置。
@@ -98,6 +100,11 @@ type Result struct {
 	RedGo    bool
 	BestMove string // UCCI 着法；无着可走时为 "null"
 	Lines    []Info // 按 MultiPV 升序
+	// EarlyStopped 智能思考早停收束（smart.go 判据命中发 stop，终值深度通常
+	// 低于用户 depth）——沉淀写入跳过此类终值（2026-11-13：早停浅终值复播
+	// 是"棋力下降"体感的损耗点之一；被迫行 legal≤3 是预算压地板非早停，
+	// 照常入库）。超时强停不置位（收束的是完整搜索的自然结果）。
+	EarlyStopped bool
 }
 
 // Info 一条搜索线快照。ScoreCP/Mate 为皮卡鱼原生输出（走子方视角），
@@ -137,7 +144,6 @@ var errReadTimeout = errors.New("限时读超时")
 // 检查点（阻塞读会让兜底超时永远到不了判定点）。
 type proc interface {
 	WriteLine(line string) error
-	ReadLine() (string, error) // 阻塞读；进程输出流关闭返回错误
 	// ReadLineTimeout 限时读一行：d 内无输出返回 errReadTimeout，输出流关闭
 	// 返回 io.EOF（两者可区分，见 errReadTimeout 注释）。
 	ReadLineTimeout(d time.Duration) (string, error)
@@ -152,17 +158,26 @@ type Engine struct {
 	opts Options
 	log  *slog.Logger
 
-	events  chan Event  // 事件流
-	pending chan string // 最新覆盖请求槽（容量 1，满了替换）
-	smart   atomic.Bool // 智能思考（2026-11-02，仅 PC 端）：按局面与收敛度自适应
+	events  chan Event     // 事件流
+	pending chan searchReq // 最新覆盖请求槽（容量 1，满了替换）
+	smart   atomic.Bool    // 智能思考（2026-11-02，仅 PC 端）：按局面与收敛度自适应
 	// 算力，机制见 smart.go；关 = 现行行为逐字节不变。手机端无感知（协议零改动）
 	pendingMu sync.Mutex // 保护 Request 的"排干+放入"两段原子性（多设备并行时
 	// 各自 readLoop 并发调用 Request：无锁交错可为 G1 放入后被 G2 排干、G2 的
 	// 放入撞满槽被丢——较新请求反被丢。锁内串行化后最后到达者恒占槽）
 	state     atomic.Value // string: loading/ready/error
 	searching atomic.Bool  // 是否在搜索中（Request 据此决定是否发 stop）
-	preempt   atomic.Bool  // 外部打断标志：Request 发 stop 时置位，collect 收束时消费
-	cur       atomic.Value // proc：当前进程句柄（stop 打断跨线程用）
+	// genSeq/preemptGen/curGen 打断代次制（2026-11-15 实战七问，替换旧 preempt
+	// atomic.Bool）：布尔打断位有两个致命形态——①搜索自然收束后残留的位作废
+	// 下一轮搜索的首个 bestmove（建议静默丢失，16:05 实锤 77.5s 无指导）；
+	// ②多轮请求交错时无法分辨"这轮 bestmove 属于谁"。代次制：genSeq 单调
+	// 发号，searchLoop 每轮搜索启动时 curGen 对齐本轮代次；submit 打断时把
+	// preemptGen 指向"判定时刻的在途代次"；collect 收束只认"preemptGen==自己
+	// 的代次"——指向已收束搜索的残留位因代次不符对任何新搜索失效。
+	genSeq     atomic.Int64 // 打断代次发号器（单调递增，跨进程重启不复位亦无害）
+	curGen     atomic.Int64 // 当前/最近一轮搜索的代次（searchLoop 启动搜索时对齐）
+	preemptGen atomic.Int64 // 在途打断的目标代次（0=无在途打断请求）
+	cur        atomic.Value // proc：当前进程句柄（stop 打断跨线程用）
 
 	// 运行中可调算力（set_engine 远程调节 / 桌面面板调节，协议 §4.10）：
 	// depth/moveTimeMS 每轮 go 直接读取（moveTimeMS>0 时时间制优先）；threads/
@@ -198,7 +213,7 @@ func New(opts Options, log *slog.Logger) *Engine {
 		opts:          opts,
 		log:           log.With("component", "engine"),
 		events:        make(chan Event, 64),
-		pending:       make(chan string, 1),
+		pending:       make(chan searchReq, 1),
 		tuneNotify:    make(chan struct{}, 1),
 		searchTimeout: 60 * time.Second,
 		stopGrace:     3 * time.Second,
@@ -427,8 +442,94 @@ func (e *Engine) emit(ev Event) {
 	}
 }
 
-// Request 请求分析一个局面：最新覆盖——替换等待槽并打断进行中的搜索。
+// searchReq 一次搜索请求。
+// Fen 是终局面（事件回推/建议帧/显示口径，恒为"当前局面"）；UciFen 是
+// position 命令的 fen 部分=历史起点（空 = 快照制式 = Fen）。Moves 是
+// UciFen → Fen 的着法序列。
+// ⚠语义（2026-11-08 修正，vc27 事故教训）：UCI `position fen <F> moves
+// <m1 m2...>` 表示**从 F 开始依次走 m1 m2**——vc27 曾把 Fen（终局面）当
+// F、把"到达终局面的历史"当序列拼进命令，皮卡鱼对非法序列直接终止进程
+// （Illegal move → EOF → 看门狗重启循环，日志实证 26 次）。现在 UciFen
+// 恒为历史起点、Fen 恒为终局面，两者分离。
+type searchReq struct {
+	fen    string   // 终局面（事件回推/建议帧口径）
+	uciFen string   // position 命令的 fen 部分（历史起点；空 = 快照 = fen）
+	moves  []string // uciFen → fen 的着法序列
+	// multiPV 单次多线覆盖（协议 §4.4 position.multi_pv_once，2026-11-09 双击
+	// 小棋盘"单次三变解析"）：>0 时本条搜索以该线数执行、不碰配置目标
+	// multiPV——"路数"档位的持久值与面板回显都不受扰；0 = 按配置
+	multiPV int
+}
+
+// Request 请求分析一个局面（快照制式，无历史）：最新覆盖——替换等待槽并
+// 打断进行中的搜索。
 func (e *Engine) Request(fen string) {
+	e.submit(searchReq{fen: fen})
+}
+
+// RequestHistory 请求分析一个局面并携带走子历史：position 命令为
+// `position fen <startFen> moves <moves...>`（UCI 语义 = 从 startFen 走到
+// 终局面），皮卡鱼据此识别重复局面、重复线打和棋分（防三次重复判和）。
+// Fen（终局面）必须是 moves 从 startFen 逐段可达的局面——入槽前逐段
+// FenAfter 校验（vc27 教训：脏序列喂引擎 = 皮卡鱼进程退出），校验失败
+// 自动退化为快照请求（宁失历史不杀引擎）。
+func (e *Engine) RequestHistory(curFen, startFen string, moves []string) {
+	e.submitHistory(curFen, startFen, moves, 0)
+}
+
+// RequestMultiPV 单次多线快照请求（协议 §4.4 position.multi_pv_once）：本条
+// 搜索以 pv 线执行且仅此一轮；后续请求自动恢复配置线数（恢复由 applied
+// 记账驱动，见 searchLoop 单次多线覆盖段）。pv 越界（与 SetMultiPV 同域
+// 1–5）不丢弃请求——退化为普通请求并 Warn，与 server 层"越界按缺省处理"
+// 的降级口径一致（宁给普通分析不给"点了没反应"）。
+func (e *Engine) RequestMultiPV(fen string, pv int) {
+	if pv < 1 || pv > 5 {
+		e.log.Warn("单次多线 pv 越界，退化为普通请求", "pv", pv, "fen", fen)
+		e.submit(searchReq{fen: fen})
+		return
+	}
+	e.submit(searchReq{fen: fen, multiPV: pv})
+}
+
+// RequestHistoryMultiPV 单次多线带历史请求：RequestHistory 的链校验全部适用，
+// 校验失败退化为"单次多线快照"（历史可丢、线数意图保留）；pv 越界同
+// RequestMultiPV 退化为普通请求。
+func (e *Engine) RequestHistoryMultiPV(curFen, startFen string, moves []string, pv int) {
+	if pv < 1 || pv > 5 {
+		e.log.Warn("单次多线 pv 越界，退化为普通请求", "pv", pv, "fen", curFen)
+		e.submitHistory(curFen, startFen, moves, 0)
+		return
+	}
+	e.submitHistory(curFen, startFen, moves, pv)
+}
+
+// submitHistory 带历史请求的公共体（链校验 + 退化降级 + 入槽），RequestHistory
+// 与 RequestHistoryMultiPV 共用；pv 为单次多线覆盖（0 = 按配置）。
+func (e *Engine) submitHistory(curFen, startFen string, moves []string, pv int) {
+	if len(moves) == 0 || startFen == "" {
+		e.submit(searchReq{fen: curFen, multiPV: pv})
+		return
+	}
+	fen := startFen
+	for _, mv := range moves {
+		next, ok := xq.FenAfter(fen, mv)
+		if !ok {
+			e.log.Warn("历史着法链校验失败，退化为快照请求", "step_move", mv, "at_fen", fen)
+			e.submit(searchReq{fen: curFen, multiPV: pv})
+			return
+		}
+		fen = next
+	}
+	if fen != curFen {
+		e.log.Warn("历史着法链终点与目标局面不符，退化为快照请求", "chain_end", fen, "target", curFen)
+		e.submit(searchReq{fen: curFen, multiPV: pv})
+		return
+	}
+	e.submit(searchReq{fen: curFen, uciFen: startFen, moves: moves, multiPV: pv})
+}
+
+// submit 入槽 + 打断进行中的搜索（Request/RequestHistory 共用体）。
+func (e *Engine) submit(req searchReq) {
 	// 槽满则先取旧再放新，保证只保留最新。排干与放入必须在锁内成对完成：
 	// 两段之间无锁时并发 Request 可交错成"G1 放入→G2 排干→G2 放入撞满被
 	// 丢"，较新请求反被丢（与最新覆盖语义相反）；锁内最后到达者恒占槽。
@@ -438,19 +539,23 @@ func (e *Engine) Request(fen string) {
 	default:
 	}
 	select {
-	case e.pending <- fen:
+	case e.pending <- req:
 	default:
 	}
-	e.pendingMu.Unlock()
-	// 搜索中则打断：stop 后 bestmove 很快返回，旧结果由 preempt 标志作废。
-	// ⚠已知极窄竞态（接受）：本判定与下方 preempt.Store 之间若搜索恰好自然
-	// 收束（collect 的 Swap 先消费了 preempt 位），残留标志会作废下一轮搜索
-	// 的首个 bestmove——该次建议丢失、待下一次请求覆盖。窗口纳秒级；修复
-	// 须连带考虑"pending 已被消费"的补偿重发，只调标志顺序无效。
+	// 打断判定与 preemptGen 写入同锁（2026-11-15 代次制改造）：searchLoop 的
+	// searching/curGen 转换持同一把锁——submit 持锁期间看到的 (searching,
+	// curGen) 必是同一轮在途搜索的完整状态，preemptGen 精确指向它。旧实现的
+	// 已知竞态（判定与 Store 之间搜索恰好自然收束，残留打断位作废下一轮搜索
+	// 的首个 bestmove——建议静默丢失待下次请求覆盖，16:05 实锤 77.5s 无指导）
+	// 由两道机制关死：①锁串行化——搜索收束（searching 复位）与 submit 判定
+	// 互斥，判定为真时收束必然尚未发生；②即便收束落在锁外微窗内（collect
+	// 已读 bestmove、searching 尚未复位），代次不符使残留位对下一轮搜索无效。
+	// stopOnce 持锁调用安全：realProc 写锁与 pendingMu 无环路。
 	if e.searching.Load() {
-		e.preempt.Store(true)
+		e.preemptGen.Store(e.curGen.Load())
 		e.stopOnce()
 	}
+	e.pendingMu.Unlock()
 }
 
 // stopOnce 打断当前搜索：向当前进程发 stop（realProc/fake 的 WriteLine 均自带写锁）。
@@ -469,6 +574,19 @@ const (
 	restartBackoffMax     = 30 * time.Second
 	restartBackoffTrigger = 5
 )
+
+// maxSameFenTTReuse 同一局面连续搜索允许复用置换表（TT）的次数上限
+// （2026-11-05 用户定稿"超出次数重新思考"）：连续重搜超过此数后，本轮搜索
+// 前先 Clear Hash 强制全新思考。背景：调参重搜/force 重发会把同一局面反复
+// 喂回引擎，TT 里全是上轮结果时智能思考的收敛判据秒命中（实测切一次开关
+// 后 104ms 就"提前收束"），每轮照常沉淀一条分数微抖的建议行，建议流被同
+// 局面近似行刷屏。机制详见 searchLoop 内注释。
+const maxSameFenTTReuse = 1
+
+// ttReuseKeyCap TT 复用累计计数的键数上限（searchLoop 局部 map 兜底）：长跑
+// 进程局面键无界增长时整体重置。在案计数清零 = 个别局面多一次 TT 复用，
+// 正确性无虞——清表判据是"重新思考"的促进项非安全项。
+const ttReuseKeyCap = 256
 
 // backoffDelay 连续快速失败 n 次时的重试间隔：未达阈值用基础间隔（restartDelay），
 // 达到阈值后每次再翻一倍，封顶 restartBackoffMax（移位溢出时同样取封顶值）。
@@ -526,10 +644,12 @@ func (e *Engine) Run(ctx context.Context) {
 		}
 
 		e.setState(StateReady)
-		// 重启后清残留打断标志：旧进程的 collect 异常退出（如 EOF）不经过
-		// 收束路径，preempt 位无人消费；残留会让重启后的首个正常收束被
+		// 重启后清残留打断代次：旧进程的 collect 异常退出（如 EOF）不经过
+		// 收束路径，preemptGen 无人消费；残留会让重启后的首个正常收束被
 		// 误判为"被打断"而丢弃（实测：打断预热→进程崩→重启→新搜索结果被丢）。
-		e.preempt.Store(false)
+		// 代次制下重启后 genSeq 继续推进、巧合撞代次理论上不可能（新搜索取
+		// 新号），显式归零保持语义干净。
+		e.preemptGen.Store(0)
 		// 新进程的引擎内参数已按 handshake 的当前目标值设置，对齐"已生效"标记
 		e.tuneMu.Lock()
 		e.appliedThreads, e.appliedHash, e.appliedMultiPV = e.threads, e.hashMB, e.multiPV
@@ -653,21 +773,40 @@ func (e *Engine) handshake(ctx context.Context, p proc) error {
 	}
 }
 
+// searchKeyOf 同局面判定键：终局面+UCI 起点+历史着法——同局面不同历史在
+// 引擎内是不同评估（重复线打和分），TT 复用/清表判重都按此口径。
+func searchKeyOf(req searchReq) string {
+	if len(req.moves) == 0 {
+		return req.fen
+	}
+	return req.fen + "\x1f" + req.uciFen + "\x1f" + strings.Join(req.moves, " ")
+}
+
 // searchLoop 搜索主循环：等待请求 → position/go → 收 info/bestmove → 发事件。
 // warmup 为预热局面：仅首轮且槽内无用户请求时使用，不与用户请求竞争槽位。
 // 返回 nil 表示 ctx 取消；非 nil 表示进程异常（调用方走看门狗重启）。
 func (e *Engine) searchLoop(ctx context.Context, p proc, warmup string) error {
 	var lineErr error
 	first := true
+	// 同局面重搜的 TT 复用累计计数（2026-11-15 累计制，替换旧"连续同键"口径，
+	// 上限见 maxSameFenTTReuse）：searchLoop 单 goroutine 局部状态，无锁；
+	// 进程重启后归零——新进程 TT 本就是空的，语义自洽。累计口径修复旧缺陷：
+	// 4 局面轮换循环（A→B→C→D→A）里同键永远不连续，旧 sameRuns 恒 0、TT 永
+	// 不清表，秒回旧答案强化建议循环（15:56 实锤 nodes 3751~6616）。
+	// "同局面"判定含 moves（同 FEN 不同历史=不同评估，TT 不可复用），见
+	// searchKeyOf。
+	reuseCounts := make(map[string]int)
 	for {
 		// 取最新请求（无任务轮询等待）
+		var req searchReq
 		var fen string
 		var warm bool // 本轮是否 warmup 预热（智能思考的地板/早停豁免依据）
 		got := false
 		if first {
 			first = false
 			select {
-			case fen = <-e.pending: // 用户请求优先
+			case req = <-e.pending: // 用户请求优先
+				fen = req.fen
 			default:
 				fen = warmup // 预热兜底
 				warm = true
@@ -680,7 +819,8 @@ func (e *Engine) searchLoop(ctx context.Context, p proc, warmup string) error {
 				return nil
 			}
 			select {
-			case fen = <-e.pending:
+			case req = <-e.pending:
+				fen = req.fen
 				got = true
 			case <-e.tuneNotify:
 				// 空闲冲刷调参（2026-10-20）：无搜索任务时收到调参信号，此刻
@@ -705,10 +845,51 @@ func (e *Engine) searchLoop(ctx context.Context, p proc, warmup string) error {
 			}
 		}
 
-		// searching 必须先于 position/go 置位：Request 凭它决定是否发 stop+preempt。
-		// 若放在 go 之后，窗口内到达的新请求不会打断刚发出的搜索，旧搜索只能等
-		// 自然收束，"最新覆盖"会延迟一个 searchTimeout 量级。
+		// searching/curGen 必须先于 position/go 置位：Request 凭 searching 决定
+		// 是否发 stop；代次制下 curGen 对齐本轮代次，submit 的打断才精确指向
+		// 本轮。两量与"collect 后复位"同持 pendingMu 小临界区（与 submit 的
+		// 判定段互斥，2026-11-15 代次制改造，见 submit 注释）。若放在 go 之后，
+		// 窗口内到达的新请求不会打断刚发出的搜索，旧搜索只能等自然收束，
+		// "最新覆盖"会延迟一个 searchTimeout 量级。
+		myGen := e.genSeq.Add(1)
+		e.pendingMu.Lock()
+		e.curGen.Store(myGen)
 		e.searching.Store(true)
+		e.pendingMu.Unlock()
+		// 同局面重搜的 TT 复用上限（累计口径）：调参重搜/force 重发反复喂同一
+		// 局面时，TT 里全是上轮结果，搜索起点失真——智能思考开着时收敛判据
+		// 秒命中、每轮沉淀一条分数微抖的近似行（建议流刷屏，2026-11-05 用户
+		// 实测）。超限的本轮置 pendingClear，由下方 takePendingOptions 顺路
+		// 发出 Clear Hash（与手动清表按钮同一通道，同属 UCI 空闲窗口）。
+		key := searchKeyOf(req)
+		reuseCounts[key]++
+		if len(reuseCounts) > ttReuseKeyCap {
+			// 键数兜底：长跑进程累计键过多时整体重置（代价见 ttReuseKeyCap 注释）
+			reuseCounts = map[string]int{key: 1}
+		}
+		// 单次多线请求（pvOnce 三变）永不复用 TT：用户显式要"重新思考"，TT 里
+		// 全是上轮结果时确定性引擎秒回同果（2026-11-13 用户反馈"缓存命中后
+		// 三变同一种结果"），三变的重析语义失效——每轮强制清表从头搜
+		forceFresh := req.multiPV > 1
+		// 累计复用上限：同键第 maxSameFenTTReuse+2 次请求清表（允许 1 次复用，
+		// 与常量语义一致；清表后按新起点重计）。偏差注记：计数不感知引擎内部
+		// 状态，"清表后的下一轮同键"仍记为复用——后果是偶尔多清一次，方向安全。
+		visits := reuseCounts[key]
+		reuseExceeded := visits > maxSameFenTTReuse+1
+		if reuseExceeded {
+			reuseCounts[key] = 1
+		}
+		if reuseExceeded || forceFresh {
+			e.tuneMu.Lock()
+			e.pendingClear = true
+			e.tuneMu.Unlock()
+			if forceFresh {
+				e.log.Info("单次多线请求，本轮清空置换表保证新鲜搜索", "multi_pv", req.multiPV, "fen", fen)
+			} else {
+				e.log.Info("同局面重搜已超复用上限（累计口径），本轮清空置换表重新思考",
+					"visits", visits, "fen", fen)
+			}
+		}
 		// 待生效的算力变更（set_engine 远程调节 / 桌面面板调节）：此刻刚取到新任务、
 		// 尚未 position/go，是 UCI 允许 setoption 的空闲窗口
 		for _, opt := range e.takePendingOptions() {
@@ -721,18 +902,54 @@ func (e *Engine) searchLoop(ctx context.Context, p proc, warmup string) error {
 		if lineErr != nil {
 			break
 		}
-		// 全文不拼 moves（单局面快照制式）：引擎按无历史局面评估，同 FEN 结果
-		// 可复用（沉淀库按 FEN 查表同口径）；重复局面/长将判例缺历史依据属已知
-		// 语义边界。勿顺手补 moves——会破坏快照幂等与沉淀库口径。
-		if err := p.WriteLine("position fen " + fen); err != nil {
+		// 单次多线覆盖（协议 §4.4 position.multi_pv_once，2026-11-09 双击小棋盘
+		// "单次三变解析"）：本条请求以指定线数搜索，不改配置目标 multiPV（面板
+		// 回显/落盘/snapshot 都不受扰）。生效值记账走 appliedMultiPV——下一条
+		// 普通请求的 takePendingOptions 会发现 applied ≠ 配置目标并自动补发
+		// setoption 恢复，"单次"语义由记账结构天然保证，无需事后恢复动作
+		//（单次覆盖与上一块同为 position/go 前的 UCI 空闲窗口）。
+		// req.multiPV 恰等于引擎已生效值时无需动作，applied 记账也不动——
+		// 下一轮 takePendingOptions 按配置目标与 applied 的差值自行收敛
+		if pv := req.multiPV; pv > 0 {
+			e.tuneMu.Lock()
+			need := pv != e.appliedMultiPV
+			if need {
+				e.appliedMultiPV = pv
+			}
+			e.tuneMu.Unlock()
+			if need {
+				if err := p.WriteLine(fmt.Sprintf("setoption name MultiPV value %d", pv)); err != nil {
+					lineErr = err
+					break
+				}
+				e.log.Info("单次多线解析", "multi_pv", pv, "fen", fen)
+			}
+		}
+		// position 制式（2026-11-08 语义修正，见 searchReq 注释）：UciFen 是
+		// 历史起点、Moves 是到达 Fen（终局面）的序列——UCI 语义为"从起点
+		// 依次走序列"，皮卡鱼据此识别重复局面打和分（防三次重复判和）。
+		// UciFen 空 = 快照制式（fen 即局面），与 vc27 之前行为完全一致。
+		// 入槽前 RequestHistory 已校验整条链可达终局面，此处不再验
+		posFen := fen
+		if req.uciFen != "" {
+			posFen = req.uciFen
+		}
+		posCmd := "position fen " + posFen
+		if len(req.moves) > 0 {
+			posCmd += " moves " + strings.Join(req.moves, " ")
+		}
+		if err := p.WriteLine(posCmd); err != nil {
 			lineErr = err
 			break
 		}
 		// 思考模式二选一：时间制（movetime>0）优先——go movetime 自行收束；
 		// 深度制 go depth 由 searchTimeout 兜底。打断/最新覆盖机制两制共用。
-		// 智能思考开关本轮快照：warmup 预热豁免（保预热本意）；中途切换开关
-		// 对进行中的本轮无影响、下一轮生效——避免半轮内状态翻转的判定歧义
-		smartOn := e.smart.Load() && !warm
+		// 智能思考开关本轮快照：warmup 预热豁免（保预热本意）；单次多线请求
+		// （pvOnce 三变）同样豁免（2026-11-13：早停判据对 MultiPV=3 的 info 流
+		// 第 1 线照样命中，三变被收束在 depth 11-12——用户显式要的多线解析
+		// 必须跑满深度，smart 预算压地板也一并豁免）；中途切换开关对进行中的
+		// 本轮无影响、下一轮生效——避免半轮内状态翻转的判定歧义
+		smartOn := e.smart.Load() && !warm && req.multiPV <= 1
 		// 智能思考（PC 端，见 smart.go）：被迫/极少着法局面本轮预算压地板——
 		// 只作用于本轮 go 拼装（局部 min），不碰用户原子/落盘/回显
 		depth := e.Depth()
@@ -755,8 +972,11 @@ func (e *Engine) searchLoop(ctx context.Context, p proc, warmup string) error {
 			break
 		}
 
-		result, aborted, err := e.collect(ctx, p, fen, smartOn)
+		result, aborted, err := e.collect(ctx, p, fen, smartOn, myGen)
+		// searching 复位与启动置位同锁（submit 判定段的互斥前提，见 submit 注释）
+		e.pendingMu.Lock()
 		e.searching.Store(false)
+		e.pendingMu.Unlock()
 		if err != nil {
 			if ctx.Err() != nil {
 				_ = p.WriteLine("quit")
@@ -766,21 +986,35 @@ func (e *Engine) searchLoop(ctx context.Context, p proc, warmup string) error {
 			break
 		}
 		if aborted {
-			// 被新请求打断：旧搜索的 bestmove 丢弃，pending 里的新请求下一轮处理
+			// 被新请求打断：旧搜索的 bestmove 丢弃，pending 里的新请求下一轮
+			// 处理。Info 留痕（2026-11-15 观测补齐：打断此前零日志，16:05
+			// "无指导 77.5s"窗口无法区分"结果被丢"与"请求没提交"）
+			e.log.Info("搜索被新请求打断（结果作废）", "fen", fen)
 			continue
 		}
 		e.emit(Event{Kind: EventBestmove, Result: result})
 	}
+	// 写失败早退（三处 lineErr break）统一在此复位 searching：置位发生在
+	// position/go 之前，早退不经过 collect 的复位——悬挂期间（崩溃→重启→
+	// 握手完成的秒级窗口）Request 会误判"搜索中"而发多余 stop（2026-11-04
+	// 审查修复；写失败意味着进程已挂，searchLoop 返回后看门狗重启，复位只为
+	// 状态位不失真）。正常路径已在 collect 后复位，双写幂等无害。
+	e.pendingMu.Lock()
+	e.searching.Store(false)
+	e.pendingMu.Unlock()
 	return lineErr
 }
 
 // collect 收束一次搜索：读 info/bestmove 直到 bestmove、超时强停或被打断。
 // aborted=true 表示期间出现新请求（旧结果作废）。smartOn 为智能思考本轮
-// 快照（searchLoop 已折算 warmup 豁免）。
-func (e *Engine) collect(ctx context.Context, p proc, fen string, smartOn bool) (*Result, bool, error) {
+// 快照（searchLoop 已折算 warmup 豁免）。myGen 为本轮搜索的打断代次——
+// bestmove 收束时只认"preemptGen==myGen"的打断（代次制，见 Engine 字段注释）；
+// 指向已收束搜索的残留打断位因代次不符对本轮无效。
+func (e *Engine) collect(ctx context.Context, p proc, fen string, smartOn bool, myGen int64) (*Result, bool, error) {
 	lines := make(map[int]*Info)
 	deadline := time.Now().Add(e.searchTimeout)
 	stopped := false
+	earlyStopped := false  // 智能思考早停标记（透出 Result.EarlyStopped，沉淀写入过滤依据）
 	var smart smartTracker // 智能思考早停状态机（每轮新建 = 状态随搜索复位）
 	for {
 		if ctx.Err() != nil {
@@ -833,9 +1067,15 @@ func (e *Engine) collect(ctx context.Context, p proc, fen string, smartOn bool) 
 				e.emit(Event{Kind: EventInfo, Fen: fen, Info: info})
 				// 智能思考·收敛早停（PC 端，见 smart.go）：主线（MultiPV 缺省
 				// 或 1）判据命中即提前 stop——不置 preempt（本轮结果照常收束
-				// 下发），与超时强停互不干扰（早停先到则 deadline 不再触发）
+				// 下发），与超时强停互不干扰（早停先到则 deadline 不再触发）。
+				// ⚠此判据对 MultiPV=3 的单次三变请求同样命中（info 流第 1 线
+				// 的 MultiPV==1）——三变已被豁免（searchLoop 的 smartOn 折算，
+				// 2026-11-13：三变被早停在 depth 12 收束，同果观感+质量受损）
 				if smartOn && (info.MultiPV == 0 || info.MultiPV == 1) && smart.observe(info) {
-					e.log.Info("智能思考：主线收敛，提前收束", "depth", info.Depth, "fen", fen)
+					earlyStopped = true
+					e.log.Info("智能思考：主线收敛，提前收束", "depth", info.Depth,
+						"score_cp", info.ScoreCP, "mate", info.Mate, "has_mate", info.HasMate,
+						"nodes", info.Nodes, "fen", fen)
 					_ = p.WriteLine("stop")
 				}
 			}
@@ -844,19 +1084,23 @@ func (e *Engine) collect(ctx context.Context, p proc, fen string, smartOn bool) 
 			if len(tokens) > 1 && tokens[1] != "(none)" {
 				best = tokens[1]
 			}
-			// 外部 Request 打断（发过 stop）→ 本次 bestmove 作废，新请求由主循环处理；
-			// 超时强停不算打断（收束的就是当前局面的结果，有效）。
+			// 外部 Request 打断（发过 stop）→ 本次 bestmove 作废，新请求由主循环
+			// 处理；超时强停不算打断（收束的就是当前局面的结果，有效）。
+			// 代次制（2026-11-15）：Swap(0) 取走在途打断的目标代次，仅当它等于
+			// 本轮代次才算被打断——指向已收束搜索的残留位对本轮无效（16:05
+			// 无指导竞态的根治点）。
 			// 作废前必须排干 stop 回执：引擎对一次 stop 恰回一条 bestmove，
 			// 若自然收束与回执先后排队，不排干会被下一轮搜索误读为本轮结果。
-			if e.preempt.Swap(false) {
+			if e.preemptGen.Swap(0) == myGen {
 				e.drainStopReceipt(p)
 				return nil, true, nil
 			}
 			return &Result{
-				Fen:      fen,
-				RedGo:    RedGoOf(fen),
-				BestMove: best,
-				Lines:    sortedLines(lines),
+				Fen:          fen,
+				RedGo:        RedGoOf(fen),
+				BestMove:     best,
+				Lines:        sortedLines(lines),
+				EarlyStopped: earlyStopped,
 			}, false, nil
 		}
 	}
@@ -867,13 +1111,20 @@ func (e *Engine) collect(ctx context.Context, p proc, fen string, smartOn bool) 
 // 两层作用缺一不可：除 bestmove 回执外，还要丢弃回执前排队的残 lines（被打断
 // 搜索的尾巴 info），保证下一轮 collect 从干净管道起步。300ms 窗口是承重墙：
 // 删除或缩短后，极端负载下迟到的 bestmove 会被下一轮 collect 误认作新搜索
-// 结果（且 Result.Fen 贴错局面）；100ms 是窗口内的分片读粒度。
+// 结果（且 Result.Fen 贴错局面）。⚠2026-11-14 红队第二轮实锤修复：实现曾在
+// 首个 100ms 分片静默即提前 return——"自然收束 bestmove + 迟到回执"双发形态
+// 下回执迟于单个分片就漏出排干窗，被下一轮 collect 贴上新 FEN 收作自己的结果
+// （旧着法+零值分数下发并沉淀）。现在静默分片继续等满窗口，读到回执或 EOF
+// 才退出；下发侧另有伪合法/Lines 非空双守卫兜底（engine_pump.go）。
 func (e *Engine) drainStopReceipt(p proc) {
 	deadline := time.Now().Add(300 * time.Millisecond)
 	for time.Now().Before(deadline) {
 		line, err := p.ReadLineTimeout(100 * time.Millisecond)
 		if err != nil {
-			return // 分片超时或输出流关闭（EOF）都终止排干
+			if errors.Is(err, errReadTimeout) {
+				continue // 分片静默等满窗口：回执可能迟于单个分片（修复点）
+			}
+			return // 输出流关闭（EOF）终止排干
 		}
 		tokens := strings.Fields(line)
 		if len(tokens) > 0 && tokens[0] == "bestmove" {
@@ -921,6 +1172,7 @@ func startRealProc(opts Options) (proc, error) {
 		cmd:   cmd,
 		stdin: stdin,
 		lines: make(chan string, 256),
+		quit:  make(chan struct{}),
 	}
 	// 64KB 读缓冲：默认 4096 会让每 fill 只吞 8-20 行（syscall ~3-10 次/秒）；
 	// 加大后整批读入，行为严格等价（ReadString 按需增长，超长 info 行无截断风险）
@@ -931,10 +1183,12 @@ func startRealProc(opts Options) (proc, error) {
 // realProc 真实进程封装：stdin 写加锁（stop 打断与 Run 线程并发写）；
 // stdout 由常驻 reader goroutine 读入 channel，支持限时读与超时排干。
 type realProc struct {
-	cmd     *exec.Cmd
-	stdin   io.WriteCloser
-	lines   chan string // 引擎输出行（reader goroutine 产出；关闭表示流结束）
-	stdinMu sync.Mutex
+	cmd      *exec.Cmd
+	stdin    io.WriteCloser
+	lines    chan string // 引擎输出行（reader goroutine 产出；关闭表示流结束）
+	stdinMu  sync.Mutex
+	quit     chan struct{} // Quit 时 close：解除 readLoop 卡死的 channel send
+	quitOnce sync.Once
 }
 
 func (r *realProc) WriteLine(line string) error {
@@ -944,22 +1198,19 @@ func (r *realProc) WriteLine(line string) error {
 	return err
 }
 
-func (r *realProc) ReadLine() (string, error) {
-	line, ok := <-r.lines
-	if !ok {
-		return "", io.EOF // 输出流已关闭（进程退出）
-	}
-	return line, nil
-}
-
 func (r *realProc) ReadLineTimeout(d time.Duration) (string, error) {
+	// NewTimer+Stop 而非 time.After（2026-11-08 内存排查 S3）：info 风暴期
+	// 本函数每秒数百次调用，After 的 timer 不 Stop、要等燃尽才释放——
+	// 高频路径改为显式 Stop 及时回收（搜索超时窗口本身语义不变）
+	timer := time.NewTimer(d)
+	defer timer.Stop()
 	select {
 	case line, ok := <-r.lines:
 		if !ok {
 			return "", io.EOF // 输出流已关闭（进程退出）
 		}
 		return line, nil
-	case <-time.After(d):
+	case <-timer.C:
 		return "", errReadTimeout
 	}
 }
@@ -973,6 +1224,7 @@ func (r *realProc) ReadLineTimeout(d time.Duration) (string, error) {
 const procQuitKillAfter = 3 * time.Second
 
 func (r *realProc) Quit() error {
+	r.quitOnce.Do(func() { close(r.quit) })
 	_ = r.WriteLine("quit")
 	_ = r.stdin.Close()
 	done := make(chan struct{})
@@ -991,12 +1243,20 @@ func (r *realProc) Quit() error {
 // 代关，否则 send-on-closed panic；② close 后缓冲中残留行仍可被消费，EOF
 // 判定天然排在残行之后（不丢最后一批 info）；③ 256 缓冲吸收 info 突发，
 // 满时阻塞 reader 反压引擎 stdout——collect 不可长时间离岗。
+// quit 兜底（2026-11-08 内存排查 L1）：缓冲灌满且消费方已离岗（超时收场/
+// lineErr 早退）时，裸 send 会永久阻塞——进程 Kill 只关管道、解除不了
+// channel 阻塞，reader goroutine 连同 256 行缓冲一起泄漏（vc27 崩溃风暴
+// 26 次重启每次都有机会踩中）。Quit close(quit) 让阻塞 send 立即改道退出。
 func (r *realProc) readLoop(reader *bufio.Reader) {
 	defer close(r.lines)
 	for {
 		line, err := reader.ReadString('\n')
 		if line != "" {
-			r.lines <- strings.TrimRight(line, "\r\n")
+			select {
+			case r.lines <- strings.TrimRight(line, "\r\n"):
+			case <-r.quit:
+				return
+			}
 		}
 		if err != nil {
 			return

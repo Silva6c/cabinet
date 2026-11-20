@@ -58,12 +58,14 @@ func (s *Store) LookupByFEN(fen string) (*SuggestionRow, error) {
 // CountToday 今日沉淀条数（控制台建议流标题行"今日 N 条"）。
 // ts 以 RFC3339 本地时区文本存储，同机部署时区偏移恒定（中国无夏令时），
 // 与本地零点的字典序比较等价于时间比较。
+// 走 Open 时预编译的常驻语句（2026-11-09 内存治理：控制台每 5s 轮询，
+// modernc 驱动裸 Query 每轮完整 prepare/finalize）。
 func (s *Store) CountToday() (int, error) {
 	now := time.Now()
 	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 	since := midnight.Format(pruneTSFormat)
 	var n int
-	err := s.db.QueryRow("select count(*) from suggestions where ts >= ?", since).Scan(&n)
+	err := s.countTodayStmt.QueryRow(since).Scan(&n)
 	return n, err
 }
 
@@ -78,9 +80,9 @@ func (s *Store) DeleteAll() error {
 }
 
 // Recent 按沉淀顺序倒序取最近 n 条建议（id 自增 = 沉淀顺序，比文本时间排序可靠）。
+// 走 Open 时预编译的常驻语句（2026-11-09 内存治理：控制台每 5s 轮询）。
 func (s *Store) Recent(n int) ([]SuggestionRow, error) {
-	rows, err := s.db.Query(
-		"select ts,source,fen,best_move,score_cp,score_mate,pv,depth from suggestions order by id desc limit ?", n)
+	rows, err := s.recentStmt.Query(n)
 	if err != nil {
 		return nil, err
 	}

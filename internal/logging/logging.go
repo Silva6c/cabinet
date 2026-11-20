@@ -13,7 +13,8 @@ import (
 )
 
 // Setup 按配置初始化 slog 默认 Logger 并返回。
-// File 为空时只写控制台；否则控制台+文件双写，文件按 MaxSizeMB/MaxBackups 滚动。
+// File 为空时只写控制台；否则控制台+文件双写，文件按 MaxSizeMB/MaxBackups
+// 滚动、MaxAgeDays 按天清理（零值已被配置校验回填默认 3 天）。
 func Setup(cfg config.LogConfig) (*slog.Logger, error) {
 	var level slog.Level
 	switch cfg.Level {
@@ -35,6 +36,7 @@ func Setup(cfg config.LogConfig) (*slog.Logger, error) {
 		Filename:   cfg.File,
 		MaxSize:    cfg.MaxSizeMB,
 		MaxBackups: cfg.MaxBackups,
+		MaxAge:     cfg.MaxAgeDays, // lumberjack 语义即"天数"，非 Duration
 		Compress:   true,
 	}
 	if consoleOutput {

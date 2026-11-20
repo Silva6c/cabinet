@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"cabinet/internal/xq"
 )
 
 // ─────────────── fake UCI 引擎 ───────────────
@@ -26,18 +28,6 @@ type fakeProc struct {
 func (f *fakeProc) WriteLine(line string) error {
 	f.stdin <- line
 	return nil
-}
-
-func (f *fakeProc) ReadLine() (string, error) {
-	select {
-	case l, ok := <-f.lines:
-		if !ok {
-			return "", io.EOF
-		}
-		return l, nil
-	case <-f.quit:
-		return "", io.EOF
-	}
 }
 
 func (f *fakeProc) ReadLineTimeout(d time.Duration) (string, error) {
@@ -67,6 +57,7 @@ type fakeEngine struct {
 	slow        bool                          // true：go 后不发 bestmove，等 stop/超时
 	crashOnStop bool                          // true：收到 stop 即关闭输出流（模拟真实皮卡鱼打断时崩溃 EOF）
 	muteOnStop  bool                          // true：收到 stop 后彻底静默——不回 bestmove 也不退出（模拟挂死引擎，A1 回归）
+	stopScript  func()                        // 非空时接管 stop 处理（打断排干回归脚本：自然收束+迟到回执双发形态）
 	goScript    func(goCmd string, nth int32) // 非空时接管 go 处理（智能思考测试脚本；nth 从 1 计）
 	goN         atomic.Int32                  // 已收到的 go 次数（goScript 的 nth）
 	quit        chan struct{}                 // 关闭后输出流视为结束（out 本身不 close，避免 send panic）
@@ -106,6 +97,10 @@ func (f *fakeEngine) handle(line string) {
 		}
 		if f.muteOnStop {
 			// 挂死：既不回 bestmove 也不退出，collect 强停后无界等待的病灶（A1）
+			return
+		}
+		if f.stopScript != nil {
+			f.stopScript()
 			return
 		}
 		// 长搜被打断：立即回 bestmove（皮卡鱼行为）
@@ -358,6 +353,70 @@ func TestEngine_PreemptLatest(t *testing.T) {
 			}
 		case <-deadline2:
 			return
+		}
+	}
+}
+
+// TestEngine_DrainConsumesDelayedStopReceipt 打断排干窗回归（2026-11-14 红队第二轮
+// 实锤）：引擎"自然收束 bestmove + 迟到回执"双发形态下，旧排干实现曾在首个
+// 100ms 分片静默提前退出——回执漏出排干窗，被下一轮 collect 收作新搜索的结果
+// （Result.Fen 贴上新局面下发+沉淀）。修复后排干静默分片等满 300ms 窗，回执必
+// 被消化；下发侧伪合法/Lines 非空双守卫兜底（engine_pump.go）。
+func TestEngine_DrainConsumesDelayedStopReceipt(t *testing.T) {
+	e, fe, events := newTestEngine(t, true)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go e.Run(ctx)
+	waitState(t, e, events, StateReady)
+
+	// 每次 stop：先回自然收束 bestmove（collect abort 消费），150ms 后再回一条
+	// 迟到回执——旧排干在 100ms 静默处早已退出，回执漏进下一轮搜索
+	fe.stopScript = func() {
+		fe.write("bestmove h2e2")
+		go func() {
+			time.Sleep(150 * time.Millisecond)
+			fe.write("bestmove h2e2")
+		}()
+	}
+	// goScript 的 nth（testOpts 无预热，go 序列=fen1、fen2）：1=fen1 不输出（长搜
+	// 等打断）；2=fen2 延迟 200ms 再写真实输出——保证迟到回执在 FIFO 中先于它
+	fe.goScript = func(goCmd string, nth int32) {
+		if nth != 2 {
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+		fe.write("info depth 8 multipv 1 score cp 120 nodes 1000 nps 1000 hashfull 1 pv b0c2")
+		fe.write("bestmove b0c2")
+	}
+
+	fen1 := "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1"
+	fen2 := "2bakab2/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1"
+	e.Request(fen1)
+	// 400ms：必须等第一轮"自然收束+迟到回执"完整消化（回执 +150ms）且 fen1 已
+	// 进入搜索——过早打断会把第二轮回执与第一轮排干窗重叠成时序纠缠
+	time.Sleep(400 * time.Millisecond)
+	e.Request(fen2)
+
+	// 终值判定：任何 h2e2 终值事件（无论贴 fen1 还是 fen2）都是回执漏窗；
+	// fen2 的唯一终值必须是它自己的 b0c2
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case ev := <-events:
+			if ev.Kind != EventBestmove || ev.Result == nil {
+				continue
+			}
+			if ev.Result.BestMove == "h2e2" {
+				t.Fatalf("迟到回执漏出排干窗，被贴上 %s 收作结果", ev.Result.Fen)
+			}
+			if ev.Result.Fen == fen2 {
+				if ev.Result.BestMove != "b0c2" {
+					t.Fatalf("fen2 终值被污染: %s", ev.Result.BestMove)
+				}
+				return // fen2 正确收束，通过
+			}
+		case <-deadline:
+			t.Fatalf("等待 fen2 终值超时，已收命令: %v", fe.cmds())
 		}
 	}
 }
@@ -834,5 +893,345 @@ func TestEngine_IdleTuneFlush(t *testing.T) {
 			t.Fatalf("空闲冲刷未发生，已收命令: %v", cmds)
 		case <-time.After(20 * time.Millisecond):
 		}
+	}
+}
+
+// TestEngine_SameFenTTReuseLimit 同局面连续重搜的 TT 复用上限（2026-11-05）：
+// 同 FEN 连发 3 次，前两轮复用置换表（无 Clear Hash），第 3 轮搜索前必须先
+// 清表重新思考；换新局面后计数重置，其前两轮不再清。回归场景：反复调参/
+// 重发导致建议流被同局面近似行刷屏（复用缓存秒收敛死循环）。
+func TestEngine_SameFenTTReuseLimit(t *testing.T) {
+	e, fe, events := newTestEngine(t, false)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go e.Run(ctx)
+	waitState(t, e, events, StateReady)
+
+	// 等 bestmove 到齐再发下一轮 Request，避免打断（aborted 轮无 bestmove
+	// 事件）干扰轮次计数；非本局面的预热结果按 FEN 过滤丢弃。
+	waitBest := func(fen string) {
+		t.Helper()
+		deadline := time.After(5 * time.Second)
+		for {
+			select {
+			case ev := <-events:
+				if ev.Kind == EventBestmove && ev.Result.Fen == fen {
+					return
+				}
+			case <-deadline:
+				t.Fatalf("等待 bestmove 超时: %s", fen)
+			}
+		}
+	}
+	clearHashCount := func() int {
+		n := 0
+		for _, c := range fe.cmds() {
+			if c == "setoption name Clear Hash" {
+				n++
+			}
+		}
+		return n
+	}
+
+	fen1 := "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR b - - 0 1"
+	e.Request(fen1)
+	waitBest(fen1)
+	e.Request(fen1)
+	waitBest(fen1)
+	if n := clearHashCount(); n != 0 {
+		t.Fatalf("前两轮同局面重搜应复用 TT（Clear Hash ×%d）", n)
+	}
+	e.Request(fen1) // 第 3 轮：超出 maxSameFenTTReuse，搜索前先清表
+	waitBest(fen1)
+	if n := clearHashCount(); n != 1 {
+		t.Fatalf("第 3 轮同局面重搜应恰好清表一次，实际 ×%d", n)
+	}
+
+	// 换新局面：计数重置，前两轮照常复用，不再追加清表
+	fen2 := "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1"
+	e.Request(fen2)
+	waitBest(fen2)
+	e.Request(fen2)
+	waitBest(fen2)
+	if n := clearHashCount(); n != 1 {
+		t.Fatalf("换新局面后不应再清表（计数应重置），实际 Clear Hash ×%d", n)
+	}
+}
+
+// TestEngine_RequestHistory 带历史搜索的语义验证（2026-11-08 vc27 事故回归）：
+// RequestHistory 的 UCI 命令必须是 `position fen <起点> moves <序列>`（从起点
+// 走到终局面），事件回推的 Result.Fen 恒为终局面；脏链（非法着法/终点不符）
+// 必须退化为快照请求——vc27 把终局面当起点、历史当序列，皮卡鱼对非法序列
+// 直接终止进程（Illegal move → EOF → 看门狗重启循环，日志实证 26 次）。
+func TestEngine_RequestHistory(t *testing.T) {
+	e, fe, events := newTestEngine(t, false)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go e.Run(ctx)
+	waitState(t, e, events, StateReady)
+
+	waitBest := func(fen string) {
+		t.Helper()
+		deadline := time.After(5 * time.Second)
+		for {
+			select {
+			case ev := <-events:
+				if ev.Kind == EventBestmove && ev.Result.Fen == fen {
+					return
+				}
+			case <-deadline:
+				t.Fatalf("等待 bestmove 超时: %s", fen)
+			}
+		}
+	}
+	lastPosCmd := func() string {
+		cs := fe.cmds()
+		for i := len(cs) - 1; i >= 0; i-- {
+			if strings.HasPrefix(cs[i], "position ") {
+				return cs[i]
+			}
+		}
+		return ""
+	}
+
+	// 真实合法链（xq.FenAfter 逐段推演，语义自洽）
+	startFen := "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1"
+	m1, ok1 := xq.FenAfter(startFen, "h2e2")
+	m2, ok2 := xq.FenAfter(m1, "b9c7")
+	if !ok1 || !ok2 {
+		t.Fatalf("FenAfter 推演失败: %v %v", ok1, ok2)
+	}
+	// 合法链：position 用起点、moves 用全序列；事件 FEN 用终局面
+	e.RequestHistory(m2, startFen, []string{"h2e2", "b9c7"})
+	waitBest(m2)
+	if last := lastPosCmd(); last != "position fen "+startFen+" moves h2e2 b9c7" {
+		t.Fatalf("带历史命令应为 position fen <起点> moves <序列>，实际: %s", last)
+	}
+
+	// 脏链（第二手 h2 已空 = vc27 实际崩法）：必须退快照
+	fe.mu.Lock()
+	fe.received = nil
+	fe.mu.Unlock()
+	e.RequestHistory(m2, startFen, []string{"h2e2", "h2e2"})
+	waitBest(m2)
+	if last := lastPosCmd(); last != "position fen "+m2 {
+		t.Fatalf("脏链应退化为快照命令 position fen <终局面>，实际: %s", last)
+	}
+
+	// 终点不符（链只走了一步）：同样退快照
+	e.RequestHistory(m2, startFen, []string{"h2e2"})
+	waitBest(m2)
+	if last := lastPosCmd(); last != "position fen "+m2 {
+		t.Fatalf("终点不符应退化为快照命令，实际: %s", last)
+	}
+
+	// 快照请求行为不变
+	e.Request(m2)
+	waitBest(m2)
+	if last := lastPosCmd(); last != "position fen "+m2 {
+		t.Fatalf("快照命令形态不变，实际: %s", last)
+	}
+}
+
+// TestEngine_RequestMultiPV 单次多线覆盖（2026-11-09 双击小棋盘"单次三变
+// 解析"，协议 §4.4 position.multi_pv_once）：one-shot 请求在 position/go
+// 前补发 setoption MultiPV=<pv>，下一条普通请求自动补发恢复配置值——
+// "仅此一轮"由 appliedMultiPV 记账保证，配置目标（面板回显）全程不受扰。
+func TestEngine_RequestMultiPV(t *testing.T) {
+	e, fe, events := newTestEngine(t, false) // testOpts 配置 MultiPV=2
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go e.Run(ctx)
+	waitState(t, e, events, StateReady)
+
+	waitBest := func(fen string) {
+		t.Helper()
+		deadline := time.After(5 * time.Second)
+		for {
+			select {
+			case ev := <-events:
+				if ev.Kind == EventBestmove && ev.Result.Fen == fen {
+					return
+				}
+			case <-deadline:
+				t.Fatalf("等待 bestmove 超时: %s", fen)
+			}
+		}
+	}
+	lastMPOpt := func() string {
+		cs := fe.cmds()
+		for i := len(cs) - 1; i >= 0; i-- {
+			if strings.HasPrefix(cs[i], "setoption name MultiPV") {
+				return cs[i]
+			}
+		}
+		return ""
+	}
+	lastPosCmd := func() string {
+		cs := fe.cmds()
+		for i := len(cs) - 1; i >= 0; i-- {
+			if strings.HasPrefix(cs[i], "position ") {
+				return cs[i]
+			}
+		}
+		return ""
+	}
+
+	fen1 := "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1"
+	fen2 := "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR b - - 0 1"
+
+	// 单次多线：配置 2、请求 3 → setoption 3 后 position/go
+	e.RequestMultiPV(fen1, 3)
+	waitBest(fen1)
+	if got := lastMPOpt(); got != "setoption name MultiPV value 3" {
+		t.Fatalf("单次多线请求应补发 setoption MultiPV 3，实际: %q", got)
+	}
+	if e.MultiPV() != 2 {
+		t.Fatalf("配置目标不得被单次覆盖改变: %d", e.MultiPV())
+	}
+
+	// 下一条普通请求：自动恢复配置值 2（"单次"语义闭环）
+	e.Request(fen2)
+	waitBest(fen2)
+	if got := lastMPOpt(); got != "setoption name MultiPV value 2" {
+		t.Fatalf("普通请求应自动恢复配置线数 2，实际: %q", got)
+	}
+
+	// 越界 pv 降级（2026-11-09 审查收口）：不丢弃请求——退化为普通快照搜索
+	//（无 MultiPV setoption），配置目标不变；RequestHistoryMultiPV 同口径
+	fe.mu.Lock()
+	fe.received = nil
+	fe.mu.Unlock()
+	e.RequestMultiPV(fen1, 6)
+	waitBest(fen1)
+	for _, c := range fe.cmds() {
+		if strings.HasPrefix(c, "setoption name MultiPV") {
+			t.Fatalf("越界 pv 不得改引擎线数: %q", c)
+		}
+	}
+	if last := lastPosCmd(); last != "position fen "+fen1 {
+		t.Fatalf("越界 pv 应退化为普通快照请求，实际: %s", last)
+	}
+	e.RequestHistoryMultiPV(fen1, fen1, nil, 0)
+	waitBest(fen1)
+	if e.MultiPV() != 2 {
+		t.Fatalf("越界 pv 不得改配置: %d", e.MultiPV())
+	}
+}
+
+// TestOptionsDefaultsLocked 引擎兜底默认锁（2026-11-11 用户定）：Options 零值
+// 经 withDefaults 后必须是 autoThreads / 2GiB / 单线 / 深度 20 / 无时限。
+// 实测推荐档（hash_mb=1024）只写文档，绝不进兜底——算力红线，改动先过用户。
+func TestOptionsDefaultsLocked(t *testing.T) {
+	o := Options{}.withDefaults()
+	if want := autoThreads(); o.Threads != want {
+		t.Errorf("Threads 兜底应为 autoThreads()=%d，实际 %d", want, o.Threads)
+	}
+	if o.HashMB != 2048 {
+		t.Errorf("HashMB 兜底应为 2048（自动档），实际 %d", o.HashMB)
+	}
+	if o.MultiPV != 1 {
+		t.Errorf("MultiPV 兜底应为 1（单线最强），实际 %d", o.MultiPV)
+	}
+	if o.Depth != 20 {
+		t.Errorf("Depth 兜底应为 20，实际 %d", o.Depth)
+	}
+	if o.MoveTimeMS != 0 {
+		t.Errorf("MoveTimeMS 兜底应为 0（按深度），实际 %d", o.MoveTimeMS)
+	}
+}
+
+// TestEngine_TTReuseCumulativeRotation TT 复用计数累计制回归（2026-11-15
+// 累计制，替换旧"连续同键"口径）：4 局面轮换循环（A→B→A→B→A）里同键永不
+// 连续，旧实现 sameRuns 恒 0、TT 永不清表，秒回旧答案强化建议循环（15:56
+// 实锤 nodes 3751~6616，同一局面直搜循环直到三次重复判和）。累计口径：同键
+// 第 3 次访问清表，轮换也计入；同键第 2 次访问照常复用（连续口径行为不变，
+// TestEngine_SameFenTTReuseLimit 同步回归）。
+func TestEngine_TTReuseCumulativeRotation(t *testing.T) {
+	e, fe, events := newTestEngine(t, false)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go e.Run(ctx)
+	waitState(t, e, events, StateReady)
+
+	// 等 bestmove 到齐再发下一轮 Request，避免打断轮（aborted 轮无 bestmove
+	// 事件）干扰访问计数；非本局面的预热结果按 FEN 过滤丢弃
+	waitBest := func(fen string) {
+		t.Helper()
+		deadline := time.After(5 * time.Second)
+		for {
+			select {
+			case ev := <-events:
+				if ev.Kind == EventBestmove && ev.Result.Fen == fen {
+					return
+				}
+			case <-deadline:
+				t.Fatalf("等待 bestmove 超时: %s", fen)
+			}
+		}
+	}
+	clearHashCount := func() int {
+		n := 0
+		for _, c := range fe.cmds() {
+			if c == "setoption name Clear Hash" {
+				n++
+			}
+		}
+		return n
+	}
+
+	fenA := "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR b - - 0 1"
+	fenB := "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1"
+	e.Request(fenA) // A visit1（新键）
+	waitBest(fenA)
+	e.Request(fenB) // B visit1
+	waitBest(fenB)
+	e.Request(fenA) // A visit2 → 首次复用，不清表
+	waitBest(fenA)
+	e.Request(fenB) // B visit2 → 首次复用，不清表
+	waitBest(fenB)
+	if n := clearHashCount(); n != 0 {
+		t.Fatalf("轮换前四轮同键各 2 次访问应复用 TT（Clear Hash ×%d）", n)
+	}
+	e.Request(fenA) // A visit3 → 超出 maxSameFenTTReuse，搜索前清表
+	waitBest(fenA)
+	if n := clearHashCount(); n != 1 {
+		t.Fatalf("同键累计第 3 次访问应清表（轮换口径），实际 ×%d", n)
+	}
+}
+
+// TestEngine_CollectStalePreemptGen 打断代次制核心语义（2026-11-15，16:05
+// "无指导 77.5s"竞态的根治点）：collect 收束只认"preemptGen==自己代次"的
+// 打断——指向已收束搜索的残留打断位（旧布尔实现 requeste 判定与置位之间
+// 搜索自然收束时的残留形态）对本轮无效；同代次打断照常作废并消费该位。
+func TestEngine_CollectStalePreemptGen(t *testing.T) {
+	e := New(testOpts(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx := context.Background()
+	fen := "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1"
+
+	// 预灌两条输出的假进程（info + bestmove，collect 读到收束即返回）
+	newProc := func() *fakeProc {
+		p := &fakeProc{stdin: make(chan string, 16), lines: make(chan string, 16), quit: make(chan struct{})}
+		p.lines <- "info depth 1 multipv 1 score cp 60 nodes 100 nps 400000 hashfull 1 pv h2e2"
+		p.lines <- "bestmove h2e2"
+		return p
+	}
+
+	// 残留代次 99 ≠ 本轮代次 7：bestmove 照常收束（旧实现会被残留位作废，
+	// 建议静默丢失）
+	e.preemptGen.Store(99)
+	res, aborted, err := e.collect(ctx, newProc(), fen, false, 7)
+	if err != nil || aborted || res == nil || res.BestMove != "h2e2" {
+		t.Fatalf("残留代次不得作废本轮收束: res=%v aborted=%v err=%v", res, aborted, err)
+	}
+
+	// 同代次打断：结果作废（aborted），且 Swap 消费后归零
+	e.preemptGen.Store(7)
+	res, aborted, err = e.collect(ctx, newProc(), fen, false, 7)
+	if err != nil || !aborted || res != nil {
+		t.Fatalf("同代次打断应作废结果: res=%v aborted=%v err=%v", res, aborted, err)
+	}
+	if got := e.preemptGen.Load(); got != 0 {
+		t.Fatalf("打断位应被消费归零，实际 %d", got)
 	}
 }

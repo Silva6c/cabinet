@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"sync"
 	"syscall"
 	"time"
@@ -22,6 +23,7 @@ import (
 	"cabinet/internal/engine"
 	"cabinet/internal/library"
 	"cabinet/internal/logging"
+	"cabinet/internal/memwatch"
 	"cabinet/internal/server"
 	"cabinet/internal/store"
 	"cabinet/internal/tray"
@@ -29,6 +31,25 @@ import (
 )
 
 func main() {
+	// GC 调参（2026-11-09 内存治理定稿，须在一切服务 goroutine 之前设置）：
+	// 11-08 计量实锤空载 heap 252MB 平台期（GOGC=100 语义 = 2×活集合 ≈126MB
+	// 活：fyne 字体/console 对象树/SQLite 页缓存）、对局期垃圾堆积冲到 2.6GB。
+	// GOGC=50 把空载稳态压到 ~1.5×活集合 ≈190MB；GOMEMLIMIT=800MB 是对局期
+	// 软上限（逼近时 GC 连续回收，Go 1.19+ 语义），压"垃圾堆积型"峰值。
+	// 用户显式设了环境变量则尊重（运维逃生口，GOGC=off 等）
+	gcTuned := false
+	if os.Getenv("GOGC") == "" {
+		debug.SetGCPercent(memwatch.GOGCActive)
+		gcTuned = true
+	}
+	if os.Getenv("GOMEMLIMIT") == "" {
+		debug.SetMemoryLimit(800 << 20)
+		gcTuned = true
+	}
+	// 逃生口联动（2026-11-09 体检 B2）：用户显式设任一 env 时禁用动态档位
+	// ——否则 GOGC=off 等运维语义在首个空闲期被 WatchLoop 静默吞掉
+	memwatch.SkipGCTuning = !gcTuned
+
 	// 更新残留清理与中断自愈（绿色软件零残留）：换到一半断电/杀软拦截的场景
 	// 在此恢复原程序。放在单实例锁之前——恢复与本次是否双开无关。
 	if dir, name, err := update.ExeSelf(); err == nil {
@@ -114,8 +135,17 @@ func run(configPath, resourceRoot string, noTray bool) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// 内存计量（2026-11-07 用户反馈久开内存涨到 2GB）：每 10 分钟一条计量
+	// 日志拿增长曲线 + 堆增长超阈值时自动落 heap/goroutine profile
+	// （logs/mem/ 滚动 2 份；代码级泄漏为零，增长需 profile 落证）；
+	// 控制台日志面板另有实时小字。随 ctx 退出，无资源需要显式清理
+
 	cert, err := server.EnsureCert(cfg.TLS.CertDir)
 	if err != nil {
+		// windowsgui 构建的 exe stderr 不可见（双击无黑框），失败必须落日志
+		// 留痕——否则"启动即退"在日志里只有一行"内阁启动"，排障无从下手
+		// （2026-11-08 外部用户实测：中文主机名致签发失败时的排障痛点）
+		slog.Error("证书初始化失败，程序即将退出", "cert_dir", cfg.TLS.CertDir, "err", err)
 		return err
 	}
 	// 证书指纹：手机端配对锁定依据（二维码 f 参数 + 控制台"② 连接"区展示）
@@ -171,6 +201,11 @@ func run(configPath, resourceRoot string, noTray bool) error {
 
 	// WSS 服务端
 	srv := server.New(cfg, cert, logger, eng)
+	// 活跃信号（赋值必须在 go WatchLoop 之前——2026-11-09 体检 H3：写在
+	// 启动后无同步边是形式数据竞争）：对局期（近 2 分钟有过局面）当期恢复
+	// GOGC 档位，消解采样粒度下"空载低档残留进对局期"的滞后窗
+	memwatch.ActivityProbe = func() bool { return srv.RecentPositionWithin(2 * time.Minute) }
+	go memwatch.WatchLoop(ctx, 10*time.Minute, filepath.Join(filepath.Dir(cfg.Log.File), "mem"))
 	// ⚠SetSuggestionSink/SetSedimentLookup 是 server 的无锁普通字段写（SetBook
 	// 为 atomic.Value），必须全部保持在 go srv.Run 之前——goroutine 启动即
 	// happens-before 边；顺序一旦后移就是数据竞争，且启动初期产生的建议会因
@@ -355,7 +390,8 @@ func run(configPath, resourceRoot string, noTray bool) error {
 	// 变化不影响继续以旧版本收尾。
 	finishShutdown := func(srvR error, haveSrvR bool) error {
 		runErr := awaitShutdown(srvR, haveSrvR)
-		if upd.Snapshot().State != update.StateReadyReboot {
+		snap := upd.Snapshot()
+		if snap.State != update.StateReadyReboot {
 			return runErr
 		}
 		dir, exeName, err := update.ExeSelf()
@@ -363,11 +399,13 @@ func run(configPath, resourceRoot string, noTray bool) error {
 			logger.Error("更新换入失败：无法定位当前程序", "err", err)
 			return runErr
 		}
-		if err := update.Apply(dir, exeName); err != nil {
+		// NewDigest 为解压阶段记录的 .new 自身摘要：换入前重验，防停机窗口内
+		// .new 被同目录写权限者替换（2026-11-14 红队第二轮）
+		if err := update.Apply(dir, exeName, snap.NewDigest); err != nil {
 			logger.Error("更新换入失败（已回滚），保持当前版本", "err", err)
 			return runErr
 		}
-		logger.Info("更新换入完成，拉起新版本", "tag", upd.Snapshot().LatestTag)
+		logger.Info("更新换入完成，拉起新版本", "tag", snap.LatestTag)
 		if err := relaunchSelf(dir, exeName); err != nil {
 			logger.Error("新程序拉起失败——新版本已就位，请手动启动", "err", err)
 		}
@@ -400,6 +438,7 @@ func run(configPath, resourceRoot string, noTray bool) error {
 			},
 			OnActivate: console.Show,
 			OnShowQR:   console.ShowQR,
+			OnAbout:    console.ShowAbout,
 			OnExit:     func() { stop() },
 		})
 	}()
@@ -445,7 +484,7 @@ func run(configPath, resourceRoot string, noTray bool) error {
 			for _, b := range bs {
 				out = append(out, console.BookRow{
 					Name: b.Name, Entries: b.Entries, ModTime: b.ModTime,
-					Enabled: b.Enabled, Status: b.Status,
+					Enabled: b.Enabled, Status: b.Status, Warn: b.Warn,
 				})
 			}
 			return out
@@ -785,6 +824,20 @@ func run(configPath, resourceRoot string, noTray bool) error {
 			}
 			logger.Info("启动自检更新开关已更新", "on", on)
 			return ""
+		},
+		// ── 窗口位置记忆（2026-11-20）：console-state.json 只增窗口坐标键，
+		// 与防火墙/更新开关同文件互不干扰 ──
+		LoadWindowPos: func() (x, y float32, ok bool) {
+			cs, err := loadConsoleState(fwPath)
+			if err != nil || !cs.WindowSaved {
+				return 0, 0, false
+			}
+			return float32(cs.WindowX), float32(cs.WindowY), true
+		},
+		SaveWindowPos: func(x, y float32) {
+			if err := saveWindowPos(fwPath, x, y); err != nil {
+				logger.Warn("窗口位置保存失败", "err", err) // 静默降级：仅影响下次恢复
+			}
 		},
 	})
 

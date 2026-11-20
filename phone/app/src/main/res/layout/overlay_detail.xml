@@ -186,7 +186,7 @@
             android:layout_weight="1"
             android:ellipsize="end"
             android:maxLines="1"
-            android:text="来源 —"
+            android:text="@string/detail_source_none"
             android:textColor="@color/qi_muted"
             android:textSize="11sp" />
 

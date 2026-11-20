@@ -36,6 +36,12 @@ type consoleStateFile struct {
 	DismissedFirewallPorts map[string]bool `json:"firewall_dismissed_ports"`
 	// UpdateAutoCheck 启动时自动检查更新（"检查更新"面板开关；默认关）
 	UpdateAutoCheck bool `json:"update_auto_check"`
+	// WindowSaved/WindowX/WindowY 主窗位置记忆（2026-11-20）：控制台尺寸随
+	// 内容自适应不保存，只记左上角坐标（屏幕像素）。WindowSaved=false（旧
+	// 文件/首启）时忽略坐标，用系统默认位
+	WindowSaved bool    `json:"window_saved"`
+	WindowX     float64 `json:"window_x"`
+	WindowY     float64 `json:"window_y"`
 }
 
 // loadConsoleState 读状态文件；文件不存在返回零值无错（缺键即默认的向前兼容）。
@@ -73,6 +79,19 @@ func setConsoleStateAutoCheck(statePath string, on bool) error {
 		st = consoleStateFile{}
 	}
 	st.UpdateAutoCheck = on
+	return saveConsoleState(statePath, st)
+}
+
+// saveWindowPos 保存主窗位置（读-改-写；文件损坏时覆盖修复）。调用方
+// （console 刷新循环）已做位置判重，此处不再节流。
+func saveWindowPos(statePath string, x, y float32) error {
+	st, err := loadConsoleState(statePath)
+	if err != nil {
+		st = consoleStateFile{}
+	}
+	st.WindowSaved = true
+	st.WindowX = float64(x)
+	st.WindowY = float64(y)
 	return saveConsoleState(statePath, st)
 }
 

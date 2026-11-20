@@ -1,4 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">内阁</string>
+    <!-- 布局首帧文案与 Kotlin 运行时文案的单源（Kotlin 侧 getString 引用同条，
+         改一处两端生效；仅限 xml 与 Kotlin 确需同文案的条目，勿放纯 Kotlin 文案） -->
+    <string name="recognizing_status">识别中</string>
+    <string name="detail_source_none">来源 —</string>
+    <string name="fp_entry_collapsed">证书指纹（可选，扫码自动填入）›</string>
 </resources>

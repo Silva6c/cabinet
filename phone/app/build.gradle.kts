@@ -128,6 +128,17 @@ android {
     packaging {
         resources.excludes.addAll(listOf("/META-INF/{AL2.0,LGPL2.1}"))
     }
+    // JVM 单测的 android.jar stub 方法默认抛 "not mocked"——RemoteAnalysisClient
+    // 构造即创建 HandlerThread/Handler（协议层测试挂账的根因，见 libs.versions.toml）。
+    // 改为返回默认值后二者退化为空操作（looper 恒 null、postDelayed 恒 false），
+    // 单测无真实定时器；org.json 同为 stub，由 test 依赖 android-json 以真实实现
+    // 遮蔽（mockable android.jar 在单测 classpath 末位，test 依赖可覆盖）。
+    // 仅作用于单测类路径，生产构建不受影响。
+    testOptions {
+        unitTests {
+            isReturnDefaultValues = true
+        }
+    }
 }
 
 dependencies {
@@ -144,6 +155,14 @@ dependencies {
     implementation(libs.onnxruntime.android)
     // 单元测试（模板匹配等纯 JVM 逻辑）
     testImplementation(libs.junit)
+    // RemoteAnalysisClient 协议层 JVM 测试（2026-10-27 挂账落地）：MockWebServer 起
+    // WSS 全链路回环，okhttp-tls 运行时生成自签证书测指纹锁定——二者与主 okhttp
+    // 同 version.ref，严格同版（不允许混版）
+    testImplementation(libs.okhttp.mockwebserver)
+    testImplementation(libs.okhttp.tls)
+    // Android org.json 的真实实现（Apache-2.0 拷贝）：android.jar 里 org.json 同为
+    // stub，isReturnDefaultValues 下会静默返回 null 让协议断言全部失真，必须遮蔽
+    testImplementation(libs.android.json)
 }
 
 // APK 归档：构建产物按交付命名惯例（cabinet_<日期>_vc<提交数>_<abi>.apk）复制到

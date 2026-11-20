@@ -181,3 +181,103 @@ func PseudoMoves(b book.Board, redGo bool) []Move {
 	}
 	return out
 }
+
+// TestPlausiblePair 回合结构防线判据（2026-11-10 优势崩塌归因）：用 11-10
+// 凌晨局3 的真实故障 FEN 回放——幽灵帧与三子蒸发帧必须被拒，合法两步合并/
+// 单步/悔棋还原/仅轮次翻转必须通过。
+func TestPlausiblePair(t *testing.T) {
+	// 幽灵帧（局3:L268→L272）：兑子两回合合成一帧、已离场红炮残留——同侧
+	// 2 格差=黑车 f6→f7"吃自家炮"伪非法形状
+	ghostPrev := "3rkab2/4a2R1/4bc3/p1R1C4/1c3rpnp/9/P4C2P/2N1B4/4A4/2BAK4 w - - 0 1"
+	ghostCur := "3rkab2/4a2R1/4br3/p1R1C4/1c4pnp/9/P4C2P/2N1B4/4A4/2BAK4 w - - 0 1"
+	if reason := PlausiblePair(ghostPrev, ghostCur); reason == "" {
+		t.Fatal("幽灵帧必须被拒（同侧 2 格差不可能）")
+	}
+	// 三子蒸发帧（PC:41586）：红车+红马+黑象无落点消失——同侧 3 格差、子数 -3
+	cliffPrev := "4ka3/4a4/2R1b4/p4R3/3N2b2/4r1B1p/9/4C4/9/2BAKn3 w - - 0 1"
+	cliffCur := "4ka3/4a4/2R1b4/p8/9/4r1B1p/9/4C4/9/2BAKn3 w - - 0 1"
+	if reason := PlausiblePair(cliffPrev, cliffCur); reason == "" {
+		t.Fatal("三子蒸发帧必须被拒（子数差超上限）")
+	}
+	// 合法两步合并（PC:41454 真实帧）：车吃马 + 炮移位，必须通过
+	mergePrev := "1r2kab2/4a4/4br1cn/p1nRp1p2/8p/2c1P1P2/PC6P/4C4/N8/2BAKABR1 w - - 0 1"
+	mergeCur := "1r2kab2/4a4/4br1cn/p1R1p1p2/2c5p/4P1P2/PC6P/4C4/N8/2BAKABR1 w - - 0 1"
+	if reason := PlausiblePair(mergePrev, mergeCur); reason != "" {
+		t.Fatalf("合法两步合并不应被拒: %s", reason)
+	}
+	// 翻转一步：非吃子/吃子/悔棋还原全部通过
+	start := "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1"
+	afterCannon, _ := FenAfter(start, "h2e2")
+	if reason := PlausiblePair(start, afterCannon); reason != "" {
+		t.Fatalf("翻转一步非吃子应通过: %s", reason)
+	}
+	afterHorse, _ := FenAfter(afterCannon, "b9c7")
+	if reason := PlausiblePair(afterCannon, afterHorse); reason != "" {
+		t.Fatalf("翻转一步应通过: %s", reason)
+	}
+	// 悔棋还原（afterHorse→afterCannon 反向）：出现+换色形态
+	if reason := PlausiblePair(afterHorse, afterCannon); reason != "" {
+		t.Fatalf("悔棋还原应通过: %s", reason)
+	}
+	// 兑子合并帧（11-10 局3 真实物理结果：红炮 f3×f7、黑车 f5×f7——cells=3、
+	// 子数差 -2）：最高频合法形态，vc47 首版上界错一档曾整批误拒，必须通过
+	exchangePrev := "3rkab2/4a2R1/4bc3/p1R1C4/1c3rpnp/9/P4C2P/2N1B4/4A4/2BAK4 w - - 0 1"
+	exchangeCur := "3rkab2/4a2R1/4br3/p1R1C4/1c4pnp/9/P7P/2N1B4/4A4/2BAK4 w - - 0 1"
+	if reason := PlausiblePair(exchangePrev, exchangeCur); reason != "" {
+		t.Fatalf("兑子合并帧不应被拒: %s", reason)
+	}
+	// 同局面仅轮次翻转（0 格）：手机"更新"/重锚重发
+	startB := "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR b - - 0 1"
+	if reason := PlausiblePair(start, startB); reason != "" {
+		t.Fatalf("仅轮次翻转应通过: %s", reason)
+	}
+	// 同侧 1 格（识别自纠：同格换型误读读回/幽灵清理）——2026-11-10 复审对齐
+	// 手机端无侧判据：PC 拒掉会形成"重探重读同盘面→SAME_BOARD 不再上行"死端
+	sameSideOneCell := "rnbakabnr/9/1c5c1/2p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1"
+	if reason := PlausiblePair(start, sameSideOneCell); reason != "" {
+		t.Fatalf("同侧 1 格自纠帧应放行: %s", reason)
+	}
+	// 同型兑子合并帧（cells=2 异色双消失：黑车吃红车、另一黑车回吃红车，接触
+	// 格 old==new 无 diff）——兑车最高频合法形态，复审 P1-1 补钉
+	sameTypePrev := "r3ka3/9/4p4/r8/9/9/R8/9/9/4K4 w - - 0 1"
+	sameTypeCur := "4ka3/9/4p4/r8/9/9/9/9/9/4K4 w - - 0 1"
+	if reason := PlausiblePair(sameTypePrev, sameTypeCur); reason != "" {
+		t.Fatalf("同型兑子合并帧不应被拒: %s", reason)
+	}
+	// 同色双消失（纯蒸发签名）维持拒绝
+	sameColorVanish := "4ka3/9/4p4/9/9/9/9/9/9/4K4 w - - 0 1"
+	if reason := PlausiblePair(sameTypePrev, sameColorVanish); reason == "" {
+		t.Fatal("同色双消失必须被拒")
+	}
+	// 还原形态复原子同色（非悔棋形状）拒绝
+	afterCannonB := "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C2C4/9/RNBAKABNR b - - 0 1"
+	restoreSameColor := "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C2P2C1/9/RNBAKABNR w - - 0 1"
+	if reason := PlausiblePair(afterCannonB, restoreSameColor); reason == "" {
+		t.Fatal("还原同色子必须被拒")
+	}
+	// 翻转 ≥3 格不可能（一步恰 2 格）：h2e2 两格 + 黑车凭空消失
+	flipThree := "1nbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C2C4/9/RNBAKABNR b - - 0 1"
+	if reason := PlausiblePair(start, flipThree); reason == "" {
+		t.Fatal("翻转 3 格差必须被拒")
+	}
+	// 畸形 FEN 放行（专用合法性校验负责拒绝）
+	if reason := PlausiblePair("bad", start); reason != "" {
+		t.Fatalf("畸形 FEN 应放行给专用校验: %s", reason)
+	}
+}
+
+// TestPlausiblePair_StartJump 跨局重开放行（2026-11-12 #5 实测误伤）：识别端
+// NEW_GAME 判定失效时，上一局残局 → 新局初始盘面的大跳变无 new_game 标记，
+// 结构门无放行形态必拒——重新开局是物理合法跳变，盘面段与标准初始布局全等
+// 即放行；残缺开局（识别错位拼出的残盘）不放，交重探。
+func TestPlausiblePair_StartJump(t *testing.T) {
+	endgame := "3ak1b2/4a4/1R1cb1n2/2pnpCN1p/p8/2P1P1P2/P8/N3B4/3rA4/3AK1B2 w - - 0 1"
+	if reason := PlausiblePair(endgame, startFen); reason != "" {
+		t.Fatalf("残局→开局跳变应放行: %s", reason)
+	}
+	// 残缺开局（缺双炮与红炮）：不得按开局跳变放行
+	brokenStart := "rnbakabnr/9/9/p1p1p1p1p/9/9/P1P1P1P1P/9/9/RNBAKAB1R b - - 0 1"
+	if reason := PlausiblePair(endgame, brokenStart); reason == "" {
+		t.Fatal("残缺盘面不得按开局跳变放行")
+	}
+}
